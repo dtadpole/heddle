@@ -382,7 +382,14 @@ fn read_file_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
                     }
                     Err(error) => return Err(error.into()),
                 }
-                let text = tokio::fs::read_to_string(&target).await?;
+                // Bytes that are not UTF-8 text are refused and the file named, as DSH's fatal decode does (`dsh-fs-local`
+                // decodeUtf8): not the platform's unnamed `stream did not contain valid UTF-8` (live-testing issue #234).
+                let Ok(text) = String::from_utf8(tokio::fs::read(&target).await?) else {
+                    return Ok(ToolResult::refused(
+                        codes::FS_NOT_TEXT,
+                        format!("cannot read \"{shown}\": invalid UTF-8 text"),
+                    ));
+                };
                 let data = serde_json::Map::from_iter([
                     ("path".to_owned(), json!(target)),
                     ("bytes".to_owned(), json!(text.len())),
@@ -1360,6 +1367,50 @@ mod tests {
             .unwrap();
         assert!(result.error.is_none());
         assert_eq!(result.output, "hello");
+    }
+
+    #[tokio::test]
+    async fn a_file_that_is_not_utf8_text_is_fs_not_text_and_names_the_file() {
+        // Live-testing issue #234: the platform's `stream did not contain valid UTF-8` named no file and came back as
+        // TOOL_FAILED; DSH's fatal decode refuses it as FS_NOT_TEXT (`dsh-fs-local` decodeUtf8).
+        let root = tempdir();
+        std::fs::create_dir_all(root.path().join("notes")).unwrap();
+        std::fs::write(root.path().join("notes/binary.dat"), [0xc3, 0x28]).unwrap();
+        let read = tool("read_file", sandbox(root.path()));
+        let result = read
+            .run(
+                args(json!({ "path": "notes/binary.dat" })),
+                context_in(root.path(), SandboxMode::DangerFullAccess),
+            )
+            .await
+            .expect("a refusal, not a tool failure");
+        let error = result.error.as_ref().expect("refused");
+        assert_eq!(error.code, codes::FS_NOT_TEXT);
+        assert_eq!(
+            error.message,
+            format!(
+                "cannot read \"{}/notes/binary.dat\": invalid UTF-8 text",
+                root.path().display()
+            )
+        );
+        assert_eq!(result.output, "");
+    }
+
+    #[tokio::test]
+    async fn a_utf8_file_of_several_byte_characters_still_reads_exactly() {
+        let root = tempdir();
+        let text = "caf\u{e9} \u{4e2d}\u{6587} \u{1f600}";
+        std::fs::write(root.path().join("wide.txt"), text).unwrap();
+        let read = tool("read_file", sandbox(root.path()));
+        let result = read
+            .run(
+                args(json!({ "path": "wide.txt" })),
+                context_in(root.path(), SandboxMode::DangerFullAccess),
+            )
+            .await
+            .unwrap();
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(result.output, text);
     }
 
     #[tokio::test]

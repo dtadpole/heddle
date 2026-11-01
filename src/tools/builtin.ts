@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { closeSync, mkdirSync, openSync, rmSync, writeFileSync, writeSync, type Dirent } from 'node:fs'
-import { readFile as readFileText, readdir, stat } from 'node:fs/promises'
+import { readFile as readFileBytes, readdir, stat } from 'node:fs/promises'
 import { StringDecoder } from 'node:string_decoder'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
@@ -449,7 +449,18 @@ export function builtinTools(
       if (info === undefined) return { output: '', error: { code: 'FS_NOT_FOUND', message: `cannot read "${shown}": not found` } }
       if (!info.isFile()) return { output: '', error: { code: 'FS_NOT_REGULAR_FILE', message: `cannot read "${shown}": not a regular file` } }
       // Read without blocking the event loop, so the other reads of a parallel group run alongside this one.
-      const text = await readFileText(target, 'utf8')
+      const bytes = await readFileBytes(target)
+      /**
+       * Bytes that are not UTF-8 text are refused and the file named, as DSH's fatal decode does (`dsh-fs-local`
+       * decodeUtf8), not read with replacement characters and reported as a success (live-testing issue #234). A
+       * leading byte-order mark is kept, as Node's 'utf8' read kept it.
+       */
+      let text: string
+      try {
+        text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)
+      } catch {
+        return { output: '', error: { code: 'FS_NOT_TEXT', message: `cannot read "${shown}": invalid UTF-8 text` } }
+      }
       return { output: text, data: { path: target, bytes: text.length } }
     },
   }

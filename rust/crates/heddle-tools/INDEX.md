@@ -1,8 +1,8 @@
 ---
 title: The heddle-tools crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-11-01T22:15:00Z
-version: 0.6.2
+modified: 2026-11-01T23:15:00Z
+version: 0.6.3
 description: The Rust port crate for the tool registry, the built-in tools, and outside tools as processes — its public API, what it asks of other crates, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -45,7 +45,8 @@ approval (`DENIED`) → `tools/pre-execute` (`HOOKED`) → escalation (`BAD_ARGS
 resolved once from the session's record or the deployment default and never from the arguments → `run` →
 `tools/post-execute`; a sandbox denial thrown by a tool is `SANDBOX`, any other failure `TOOL_FAILED`. `call`
 never fails: every refusal is a result the model reads. `read_file` classifies a missing file as `FS_NOT_FOUND` and a
-directory as `FS_NOT_REGULAR_FILE`, each `cannot read "<path>": …` with DSH's display spelling (issue #4). `list_dir`
+directory as `FS_NOT_REGULAR_FILE`, each `cannot read "<path>": …` with DSH's display spelling (issue #4), and bytes
+that are not UTF-8 text as `FS_NOT_TEXT`, `cannot read "<path>": invalid UTF-8 text` (issue #234). `list_dir`
 classifies a missing target as `FS_NOT_FOUND`, a file as `FS_NOT_DIRECTORY`, a folder the OS refuses as
 `FS_PERMISSION_DENIED` and any other platform failure as `FS_IO_ERROR`, each `cannot list "<path>": …` (issue #223).
 
