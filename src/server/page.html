@@ -22644,6 +22644,26 @@ function tickSchedulesPage() {
   }
 }
 
+/**
+ * A language change redraws the copy the task views draw by script (the convention above `t()`): the header clock and
+ * its open popover, the page's list, and an open task's detail. The popover keeps its rows by id, so its loading and
+ * failure lines, written once when made, are dropped and made again. The detail is rebuilt from its draft, which holds
+ * every field as typed, so an unsaved edit survives; the change is made in the Settings dialog, so no field has the caret.
+ */
+window.addEventListener('heddle:locale', () => {
+  const menu = document.getElementById('schedule-catalog-menu')
+  if (menu !== null) {
+    menu.setAttribute('aria-label', t('schedule.list.aria'))
+    for (const line of menu.querySelectorAll(':scope > li[role="status"], :scope > li.sched-error')) line.remove()
+  }
+  paintScheduleHeader()
+  if (schedState.pageOpen) renderSchedulesPage()
+  const binding = schedState.drawer
+  if (binding === null) return
+  if (scheduleTaskFor(binding.sessionId, binding.id) === undefined) scheduleSetText(document.getElementById('schedule-drawer-title'), t('schedule.detail.label'))
+  if (schedState.detail !== null) buildScheduleDetail()
+})
+
 /* ── The task detail: DSH's `TaskDetail`, mounted in `#schedule-drawer-body` ─────────────────────────────────────── */
 
 /** DSH's Repeat menu, in its order (UI:4005-4034). */
