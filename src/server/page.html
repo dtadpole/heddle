@@ -2876,6 +2876,8 @@
   /** A focused bar's own ring, drawn inside the lane: the browser's default ring is clipped by the strip's overflow. */
   .tr-tick:focus-visible { outline: 2px solid var(--text-2); outline-offset: 1px; }
   /** A user record's attachment counts beside its text, and the inspector's attachment list (S151). */
+  .tr-more td { padding: 6px 8px; text-align: center; }
+  .tr-more button { font: inherit; font-size: 12px; color: var(--text-2); background: var(--surface-2); border: 1px solid var(--line); border-radius: 6px; padding: 3px 10px; cursor: pointer; }
   .tr-attach-count { margin-left: .5rem; font-size: 11px; color: var(--text-3); white-space: nowrap; }
   .tr-attachments { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
   .tr-attachments li { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; align-items: center; gap: 8px; font-size: 12px; }
@@ -6170,6 +6172,8 @@ async function showView(next) {
   if (view === 'chat') followChatTail(true)
   if (view === 'trajectory' && current !== null) {
     followTail = true
+    /** Entering the view opens a long ledger at its tail again, DSH's mount-time tail; only a live refetch keeps the window. */
+    trajectory.window = undefined
     await showLedger(current)
     followLedgerTail()
   }
@@ -6395,6 +6399,39 @@ function rowFolded(row, collapsedTurns, expanded) {
 }
 /* ledger-rows:end */
 
+/* ledger-window:begin */
+/**
+ * How many rows a long ledger opens with, and adds per "Load earlier": DSH's 50 target records ending at the tail
+ * (dsh-client-ui-trajectory, Virtual rows). Pure, and fenced so test/page-ledger-window.test.ts judges it.
+ */
+const LEDGER_WINDOW = 50
+
+/** The index of the section head (a turn's or a Between turns section's first row) at or before `index`. */
+function sectionHeadAt(rows, index) {
+  for (let at = Math.min(index, rows.length - 1); at >= 0; at -= 1) if (rows[at]?.turnStart) return at
+  return 0
+}
+
+/**
+ * The first rendered row when a ledger opens: the last `size` rows, snapped back to their section head when that adds at
+ * most `size` rows more, so the section's label is drawn; a short ledger opens whole.
+ */
+function tailWindowStart(rows, size) {
+  if (rows.length <= size) return 0
+  const start = rows.length - size
+  const head = sectionHeadAt(rows, start)
+  return start - head <= size ? head : start
+}
+
+/** The first rendered row after one "Load earlier": `size` rows before `start`, snapped back the same way. */
+function earlierWindowStart(rows, start, size) {
+  if (start <= 0) return 0
+  const target = Math.max(0, start - size)
+  const head = sectionHeadAt(rows, target)
+  return target - head <= size ? head : target
+}
+/* ledger-window:end */
+
 /* ledger-attachments:begin */
 /**
  * A user record's attachment counts, as DSH's row shows them beside the text: the nonzero image and file counts, or ''
@@ -6432,6 +6469,13 @@ function renderLedger(data, timeline_ = { spans: [], durationMs: 0 }) {
   trajectory.turns = new Map((data.ledger?.turns ?? []).map((turn) => [turn.index, turn]))
   trajectory.timeline = timeline_
   if (trajectory.data?.id !== data.id) trajectory.viewport = null
+  /**
+   * A long ledger opens at its tail (S151, DSH's Virtual rows). A live refetch of the same session keeps the window's
+   * start, so new rows extend it and its prefix stays; another session opens at its own tail.
+   */
+  trajectory.window = trajectory.window?.id === data.id
+    ? { id: data.id, start: Math.min(trajectory.window.start, tailWindowStart(trajectory.rows, LEDGER_WINDOW)) }
+    : { id: data.id, start: tailWindowStart(trajectory.rows, LEDGER_WINDOW) }
   trajectory.data = data
   trajectory.tools = Array.isArray(data.tools) ? data.tools : []
   trajectory.selected = -1
@@ -6522,8 +6566,12 @@ function renderRows() {
   for (const row of trajectory.rows) trajectory.counts.set(row.turn, (trajectory.counts.get(row.turn) ?? 0) + 1)
   const query = trajectory.search.trim().toLowerCase()
   const shown = []
-  for (let index = 0; index < trajectory.rows.length; index += 1) {
-    const row = trajectory.rows[index]
+  /** Search, fold and selection cover the rendered window, as DSH's do; the status line and overview cover the whole. */
+  /** With the turn fold on, every head is drawn whatever the window: one row per turn is the long session's overview. */
+  const start = trajectory.collapsedTurns ? 0 : Math.max(0, Math.min(trajectory.window?.start ?? 0, trajectory.rows.length))
+  for (let index = start; index < trajectory.rows.length; index += 1) {
+    /** A window that opens inside a section draws its first row as that section's head, marked as continued. */
+    const row = index === start && !trajectory.rows[index].turnStart ? { ...trajectory.rows[index], turnStart: true, continued: true } : trajectory.rows[index]
     const record = row.record ?? {}
     if (query !== '') {
       const haystack = [row.kind, record.name ?? '', record.text ?? '', record.result ?? '', record.label ?? ''].join('\n').toLowerCase()
@@ -6532,7 +6580,59 @@ function renderRows() {
     if (rowFolded(row, trajectory.collapsedTurns, trajectory.expanded)) continue
     shown.push([row, index])
   }
-  body.replaceChildren(...shown.map(([row, index]) => rowNode(row, index)))
+  const nodes = shown.map(([row, index]) => rowNode(row, index))
+  if (start > 0) {
+    /** A search covers the drawn window, as DSH's does, so the control says how many earlier rows also match. */
+    let matches = 0
+    if (query !== '') {
+      for (let index = 0; index < start; index += 1) {
+        const record = trajectory.rows[index].record ?? {}
+        if ([trajectory.rows[index].kind, record.name ?? '', record.text ?? '', record.result ?? '', record.label ?? ''].join('\n').toLowerCase().includes(query)) matches += 1
+      }
+    }
+    nodes.unshift(loadEarlierNode(start, query === '' ? null : matches))
+  }
+  body.replaceChildren(...nodes)
+}
+
+/**
+ * The first body row while an older prefix is not drawn: one button that draws the previous page of rows, DSH's
+ * first-row load control. The row that was first stays where it was on screen, so the reader does not lose their place.
+ */
+function loadEarlierNode(start, matches) {
+  const tr = document.createElement('tr')
+  tr.className = 'tr-more'
+  const cell = document.createElement('td')
+  cell.colSpan = 2
+  const button = document.createElement('button')
+  button.type = 'button'
+  button.textContent = 'Load earlier · ' + start + (start === 1 ? ' more record' : ' more records') + (matches === null ? '' : ' · ' + matches + (matches === 1 ? ' match' : ' matches'))
+  button.addEventListener('click', () => {
+    revealRows(earlierWindowStart(trajectory.rows, start, LEDGER_WINDOW))
+    /** The button is redrawn, so focus goes to the new control, or to the row that was first, without undoing the scroll. */
+    const control = ledger.querySelector('#tr-table tbody .tr-more button')
+    const target = control ?? ledger.querySelector('#tr-table tbody tr[data-index="' + start + '"]')
+    if (target !== null) {
+      if (control === null) target.tabIndex = -1
+      target.focus({ preventScroll: true })
+    }
+  })
+  cell.append(button)
+  tr.append(cell)
+  return tr
+}
+
+/** Draw the window from `start` (never later than it is), keeping the row that was first at the same place on screen. */
+function revealRows(start) {
+  if (trajectory.window === undefined || start >= trajectory.window.start) return
+  const pane = ledger.querySelector('.tr-pane')
+  const first = ledger.querySelector('#tr-table tbody tr[data-index]')
+  const firstIndex = first?.dataset.index
+  const before = first?.getBoundingClientRect().top
+  trajectory.window.start = Math.max(0, start)
+  renderRows()
+  const again = firstIndex === undefined ? null : ledger.querySelector('#tr-table tbody tr[data-index="' + firstIndex + '"]')
+  if (pane !== null && again !== null && before !== undefined) pane.scrollTop += again.getBoundingClientRect().top - before
 }
 
 function rowNode(row, index) {
@@ -6559,7 +6659,7 @@ function rowNode(row, index) {
     rail.className = 'tr-rail'
     const label = document.createElement('span')
     label.className = 'tr-turn-label'
-    label.textContent = sectionLabel(row)
+    label.textContent = sectionLabel(row) + (row.continued === true ? ' (continued)' : '')
     event.append(rail, label)
   }
   const tag = document.createElement('span')
@@ -6598,7 +6698,8 @@ function rowNode(row, index) {
   tr.tabIndex = 0
   tr.setAttribute('role', 'row')
   /** A Between turns head is no turn's anchor: every such section has turn 0, and a tick picks a numbered turn. */
-  if (row.turnStart && !row.loose) turnAnchors.set(row.turn, tr)
+  /** A "(continued)" head is not the turn's anchor: a tick for that turn draws and scrolls to its real first record. */
+  if (row.turnStart && !row.loose && row.continued !== true) turnAnchors.set(row.turn, tr)
   tr.addEventListener('click', () => {
     if (collapsed) {
       trajectory.expanded.add(row.turn)
@@ -7163,7 +7264,13 @@ function renderTimeline(timeline_, data = {}) {
     const tick = tickOf(clickEvent.target)
     if (tick === null) return
     clickEvent.stopPropagation()
-    const anchor = turnAnchors.get(Number(tick.dataset.turn))
+    const turnIndex = Number(tick.dataset.turn)
+    /** A turn before the drawn window is drawn first: the overview covers the whole ledger, so its turns all reach a row. */
+    if (!turnAnchors.has(turnIndex)) {
+      const head = trajectory.rows.findIndex((row) => row.turn === turnIndex && row.turnStart && !row.loose)
+      if (head !== -1) revealRows(head)
+    }
+    const anchor = turnAnchors.get(turnIndex)
     if (anchor !== undefined) anchor.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
   })
   /** Capture-phase enter and leave: they do not bubble, but the strip's capturing listener still sees each tick's. */
@@ -7209,7 +7316,14 @@ function renderTimeline(timeline_, data = {}) {
       trajectory.focus = start !== undefined && end !== undefined && end > start ? { from: start + from * (end - start), to: start + to * (end - start) } : null
     }
     drawFocus()
-    renderRows()
+    /** A focus window that reaches rows before the drawn window draws them first, so they can be lit or dimmed. */
+    const focus = trajectory.focus
+    const reach = focus === null ? -1 : trajectory.rows.findIndex((row) => {
+      const at = Date.parse(row.record?.startedAt ?? '')
+      return !Number.isNaN(at) && at >= focus.from && at <= focus.to
+    })
+    if (reach !== -1 && trajectory.window !== undefined && reach < trajectory.window.start) revealRows(sectionHeadAt(trajectory.rows, reach))
+    else renderRows()
   }
   timeline.oncontextmenu = (menuEvent) => menuEvent.preventDefault()
   timeline.onwheel = (wheelEvent) => {
