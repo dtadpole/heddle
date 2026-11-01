@@ -3,7 +3,7 @@
 // marks it `d` and walks into it) and a link to a file is a file of the target's size. The Rust build's list_dir follows
 // the link the same way and prints `link/`. The TypeScript build took the folder test from the directory entry, which
 // does not follow the link, and its size from `stat`, which does: a link to a folder came out as a file whose size is
-// the folder's (`link (96B)` on macOS), so a model could not tell it was a folder it can list. Live-testing issue #230.
+// the folder's (`link (96B)` on macOS), so a model could not tell it was a folder it can list. Live-testing issue #229.
 // A scripted endpoint asks for one list_dir call of the scratch folder per run.
 import assert from 'node:assert/strict'
 import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs'

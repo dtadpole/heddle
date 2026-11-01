@@ -29,7 +29,7 @@ ten minutes by default; live-testing issue #13).
 `FS_NOT_FOUND` and a file `FS_NOT_DIRECTORY`, each `cannot list "<path>": …`, and one dangling symbolic link in a folder
 is listed by name instead of failing the whole listing (live-testing issue #223).
 `check-list-links.mjs` holds a symbolic link in a listing to what it points at, as DSH's `stat` probe follows it: a
-link to a folder is `link/` and a link to a file is a file of the target's size (live-testing issue #230: the
+link to a folder is `link/` and a link to a file is a file of the target's size (live-testing issue #229: the
 TypeScript build listed a link to a folder as a file of the folder's size).
 `check-utf8-chunks.mjs` holds bash output to whole characters when a UTF-8 sequence arrives split across chunks
 (live-testing issue #96: the TypeScript build decoded each chunk alone).

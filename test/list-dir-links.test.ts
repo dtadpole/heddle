@@ -17,7 +17,7 @@ import { ToolRegistry } from '../src/tools/service.ts'
  * listDirectory probes each child with `stat`, which follows the link) and as the Rust build's list_dir does: a link to
  * a folder is a folder, `link/`, and a link to a file is a file of the target's size. This build took the folder test
  * from the directory entry, which does not follow the link, so a link to a folder came out as a file with the folder's
- * size (`link (96B)` on macOS). Issue #230.
+ * size (`link (96B)` on macOS). Issue #229.
  */
 
 async function listWorkspace(layout: (workspace: string) => void) {
