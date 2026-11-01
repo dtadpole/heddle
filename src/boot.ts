@@ -2,7 +2,9 @@ import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { pathToFileURL } from 'node:url'
 
+import { bootFallback } from './config/boot-fallback.ts'
 import { compose, defaultLayers, expandHome, type ComposedRow, type EntryRow, type Layer } from './config/schema.ts'
+import { layersBeneathSettings, settingsTarget } from './config/settings.ts'
 
 /**
  * A boot: the composed rows, the running context, and how to stop it.
@@ -83,7 +85,16 @@ export async function boot(options: BootOptions = {}): Promise<Boot> {
     layers.push({ layer: `override ${index + 1}`, file: '(inline)', entries: [override] })
   }
 
-  const rows = compose(layers, env)
+  /**
+   * A row the profile patch broke runs on the value beneath the patch instead of failing and leaving its dependants
+   * pending, and each refused row is named once on stderr (#213).
+   */
+  const target = settingsTarget(options, layers, env)
+  const written = target !== undefined && layers[target.index]?.file === target.path ? target : undefined
+  const beneath = written !== undefined ? layersBeneathSettings(layers, written, env) : undefined
+  const fallback = await bootFallback(layers, compose(layers, env), beneath, written?.path, env)
+  for (const note of fallback.notes) process.stderr.write(`${note}\n`)
+  const rows = fallback.rows
 
   /**
    * Relative specifiers resolve against the **base layer's own directory**, not the
