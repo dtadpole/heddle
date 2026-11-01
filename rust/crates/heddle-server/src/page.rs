@@ -458,8 +458,7 @@ mod browser_policy_tests {
     fn only_browser_capability_changes_the_frame_directive() {
         use base64::Engine as _;
         let html = "<script>const x = 1</script>";
-        let hash =
-            base64::engine::general_purpose::STANDARD.encode(Sha256::digest(b"const x = 1"));
+        let hash = base64::engine::general_purpose::STANDARD.encode(Sha256::digest(b"const x = 1"));
         for browser_enabled in [false, true] {
             let script_src = format!("script-src 'self' 'sha256-{hash}'");
             let expected = [
