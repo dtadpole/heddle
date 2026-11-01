@@ -2484,6 +2484,16 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
      * child's turn runs on the agent runtime and reads the session's appended messages at its next step, as DSH's
      * agent takes a steer into whatever turn is running (its inbox is the session's, not the request's).
      */
+    /**
+     * A one-shot delegate child takes no steer from here, as it takes no turn (`subagentTurnRefusal`, the turn
+     * route's rule): DSH's prompt, steer included, answers `session/agent-busy` for a session subagent routing owns,
+     * before any steer gate (dsh-api-session-controller lib/index.js:128-142, 925-949). A teammate passes.
+     */
+    const ownedBySubagentRouting = subagentTurnRefusal(ctx.session.list().find((entry) => entry.id === id))
+    if (ownedBySubagentRouting !== null) {
+      respond(response, ownedBySubagentRouting.status, 'application/json', `${JSON.stringify(ownedBySubagentRouting.body)}\n`)
+      return
+    }
     const liveTurns = ctx.get('turns') as TurnRegistry | undefined
     if ((state.running.get(id) ?? 0) === 0 && liveTurns?.isRunning(id) !== true) {
       respond(
