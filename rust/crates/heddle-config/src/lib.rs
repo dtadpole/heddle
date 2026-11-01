@@ -95,7 +95,7 @@ pub use locale::{
     locale_label, locale_preference, locale_schema, negotiate_locale,
 };
 pub use model_row::{ModelRowEndpoints, ModelRowSource, model_row_endpoints, nominated_default};
-pub use paths::{canonical_path, depth_of, is_under};
+pub use paths::{canonical_path, canonical_path_through_ancestors, depth_of, is_under};
 pub use plugin_inventory::{
     PluginFiberPhase, PluginInventoryEntry, PluginInventorySnapshot, plugin_inventory,
 };
@@ -118,7 +118,8 @@ pub use settings::{
     PlannedWrite, SETTINGS_BEGIN, SETTINGS_END, SecretSlot, SettingsApplier, SettingsError,
     SettingsNamespace, SettingsPathOp, SettingsResponse, SettingsRevisions, SettingsService,
     SettingsTarget, SettingsView, SettingsWrite, commit_settings_write, describe_settings,
-    handle_settings_request, is_secret_key, plan_settings_write, settings_target,
+    handle_settings_request, is_secret_container, is_secret_key, plan_settings_write,
+    settings_target,
 };
 pub use template::{PROFILE_TEMPLATES, reset_profile_from_template, template_files};
 pub use validate::{

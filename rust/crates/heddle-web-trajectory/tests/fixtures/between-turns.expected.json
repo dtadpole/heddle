@@ -1,0 +1,14 @@
+[
+  { "turn": 0, "loose": true, "turnStart": true, "stepStart": false, "label": "command/run", "afterTurn": 0 },
+  { "turn": 0, "loose": true, "turnStart": false, "stepStart": false, "label": "command/done", "afterTurn": 0 },
+  { "turn": 1, "step": 1, "loose": false, "turnStart": true, "stepStart": true, "label": "user" },
+  { "turn": 1, "step": 1, "loose": false, "turnStart": false, "stepStart": false, "label": "assistant" },
+  { "turn": 0, "loose": true, "turnStart": true, "stepStart": false, "label": "command/run", "afterTurn": 1 },
+  { "turn": 0, "loose": true, "turnStart": false, "stepStart": false, "label": "compaction/start", "afterTurn": 1 },
+  { "turn": 0, "loose": true, "turnStart": false, "stepStart": false, "label": "compaction/failed", "afterTurn": 1 },
+  { "turn": 0, "loose": true, "turnStart": false, "stepStart": false, "label": "command/done", "afterTurn": 1 },
+  { "turn": 2, "step": 1, "loose": false, "turnStart": true, "stepStart": true, "label": "user" },
+  { "turn": 2, "step": 1, "loose": false, "turnStart": false, "stepStart": false, "label": "assistant" },
+  { "turn": 0, "loose": true, "turnStart": true, "stepStart": false, "label": "command/run", "afterTurn": 2 },
+  { "turn": 0, "loose": true, "turnStart": false, "stepStart": false, "label": "command/done", "afterTurn": 2 }
+]
