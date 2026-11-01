@@ -24,6 +24,8 @@ export * from './compaction.ts'
 export * from './instructions.ts'
 export * from './meter.ts'
 export * from './prune.ts'
+/** The budget rule a settings write and `config --validate` run before a turn could fail on it (#212). */
+export { contextConfigProblems as configProblems } from '../config/context-rule.ts'
 
 export const name = 'context'
 
@@ -51,33 +53,38 @@ function renderRuntimeContext(sections: readonly RuntimeContextSection[]): strin
   return body.length === 0 ? CLEARED_RUNTIME_CONTEXT : `${RUNTIME_CONTEXT_HEADER}\n\n${body}`
 }
 
+/**
+ * The bounds are the ones the budget and the Rust build hold (#212): a window is a whole number of tokens above 0, a
+ * ratio is a fraction of it, and a token count or byte cap is a whole number, as Rust's unsigned fields read them and as
+ * DSH's compaction-basic asserts. The rule across fields (the retained tail below the trigger) is `configProblems`.
+ */
 export const Config = Schema.object({
   /** The system prompt, written to the surface as its first node. */
   system: Schema.string(),
   /** The context window to budget against, in tokens. */
-  contextWindow: Schema.number().default(1_048_576),
+  contextWindow: Schema.natural().min(1).default(1_048_576),
   /** Compact when the estimate reaches this fraction of the window; defaults to 0.8. */
-  thresholdRatio: Schema.number(),
+  thresholdRatio: Schema.number().min(0).max(1),
   /** Keep this fraction of the window verbatim; defaults to 0.16. */
-  retainRatio: Schema.number(),
+  retainRatio: Schema.number().min(0).max(1),
   /** An absolute trigger, which beats the ratio. */
-  thresholdTokens: Schema.number(),
+  thresholdTokens: Schema.natural(),
   /** An absolute retained tail, which beats the ratio. */
-  retainTokens: Schema.number(),
+  retainTokens: Schema.natural(),
   /** Per-endpoint overrides, for a route with a smaller window than the rest. */
   policies: Schema.array(
     Schema.object({
       endpoint: Schema.string().required(),
-      thresholdRatio: Schema.number(),
-      retainRatio: Schema.number(),
-      thresholdTokens: Schema.number(),
-      retainTokens: Schema.number(),
+      thresholdRatio: Schema.number().min(0).max(1),
+      retainRatio: Schema.number().min(0).max(1),
+      thresholdTokens: Schema.natural(),
+      retainTokens: Schema.natural(),
     }),
   ).default([]),
   /** Read `AGENTS.md` and `CLAUDE.md` and keep them on the surface as a baseline. */
   instructions: Schema.boolean().default(true),
   /** The largest rendered baseline, in bytes. */
-  instructionsMaxBytes: Schema.number().default(INSTRUCTIONS_MAX_BYTES),
+  instructionsMaxBytes: Schema.natural().default(INSTRUCTIONS_MAX_BYTES),
   /** The endpoint a summary is asked of; defaults to the turn's. */
   endpoint: Schema.string(),
   /** The model a summary is asked of; defaults to the endpoint's. */
@@ -88,7 +95,7 @@ export const Config = Schema.object({
    * room to answer, the summary came back empty and compaction was refused on every turn (#15). DSH budgets 65536,
    * which a route that caps its output lower would refuse.
    */
-  summarizeMaxTokens: Schema.number(),
+  summarizeMaxTokens: Schema.natural(),
 })
 
 export interface Config {
