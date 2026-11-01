@@ -116,6 +116,12 @@ function flow(options: { before: string[]; after: string[]; front?: string; boot
     ${source('turnNotice')}
     ${optional('liveRoundsOf')}
     ${source('queueOf')}
+    /** #142: the page holds the stream's events for its own first turn while nothing is open (looseTurnEvents). */
+    let looseTurnEvents = null
+    const LOOSE_EVENTS_LIMIT = 2000
+    ${optional('holdLooseTurn')}
+    ${optional('holdLooseEvent')}
+    ${optional('adoptLooseEvents')}
     ${source('adoptSession')}
     ${optional('looseTurnOut')}
     ${optional('adoptLooseQueue')}
