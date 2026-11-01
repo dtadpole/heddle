@@ -279,7 +279,8 @@ pub fn sanitize_html(html: &str, options: SanitizeOptions<'_>) -> String {
                 continue;
             }
             let Some(attribute) = read_attribute(html, cursor) else {
-                cursor += 1;
+                // An unrecognized character may be non-ASCII; keep every later slice on a UTF-8 boundary.
+                cursor += html[cursor..].chars().next().unwrap().len_utf8();
                 continue;
             };
             cursor = attribute.end;
