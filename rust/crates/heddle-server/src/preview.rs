@@ -483,8 +483,16 @@ mod tests {
             r#"<link rel="stylesheet" href="theme.css"><img src="a.png"><style>@import "nested.css"; p { background: url(bg.png) }</style>"#,
             0,
         );
-        assert!(document.html.contains(r#"href="/api/raw?path=%2Fw%2Fdocs%2Ftheme.css""#));
-        assert!(document.html.contains(r#"src="/api/raw?path=%2Fw%2Fdocs%2Fa.png""#));
+        assert!(
+            document
+                .html
+                .contains(r#"href="/api/raw?path=%2Fw%2Fdocs%2Ftheme.css""#)
+        );
+        assert!(
+            document
+                .html
+                .contains(r#"src="/api/raw?path=%2Fw%2Fdocs%2Fa.png""#)
+        );
         // Full CSS dependency rewriting remains outside this preview contract.
         assert!(document.html.contains(r#"@import "nested.css""#));
         assert!(document.html.contains("url(bg.png)"));
