@@ -393,6 +393,26 @@ fn read_file_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
     )
 }
 
+/// A listing the platform failed, in DSH's words (`dsh-fs-local` `listingIoError`): a target that is gone or reached
+/// through a file is `FS_NOT_FOUND`, one the OS refuses to open `FS_PERMISSION_DENIED`, and anything else
+/// `FS_IO_ERROR` with the platform's own words; each names the directory as it was asked for.
+fn listing_refusal(shown: &str, error: &std::io::Error) -> ToolResult {
+    match error.kind() {
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory => ToolResult::refused(
+            codes::FS_NOT_FOUND,
+            format!("cannot list \"{shown}\": not found"),
+        ),
+        std::io::ErrorKind::PermissionDenied => ToolResult::refused(
+            codes::FS_PERMISSION_DENIED,
+            format!("cannot list \"{shown}\": permission denied"),
+        ),
+        _ => ToolResult::refused(
+            codes::FS_IO_ERROR,
+            format!("cannot list \"{shown}\": {error}"),
+        ),
+    }
+}
+
 fn list_dir_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
     let list = Arc::clone(&sandbox);
     tool_fn(
@@ -421,10 +441,31 @@ fn list_dir_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
                     }
                 };
                 let target = sandbox.assert_readable(&path, context.mode())?;
+                // A target that is gone, a file or refused by the OS is classified and named, as DSH's directory
+                // list does (`dsh-fs-local` `listDirectory`), not reported as the platform's raw error, which
+                // named no directory (live-testing issue #223).
+                let shown = requested_display_path(&context.cwd, &path);
+                match tokio::fs::metadata(&target).await {
+                    Ok(info) if info.is_dir() => {}
+                    Ok(_) => {
+                        return Ok(ToolResult::refused(
+                            codes::FS_NOT_DIRECTORY,
+                            format!("cannot list \"{shown}\": not a directory"),
+                        ));
+                    }
+                    Err(error) => return Ok(listing_refusal(&shown, &error)),
+                }
                 let mut entries = Vec::new();
-                let mut dir = tokio::fs::read_dir(&target).await?;
-                while let Some(entry) = dir.next_entry().await? {
-                    entries.push(entry);
+                let mut dir = match tokio::fs::read_dir(&target).await {
+                    Ok(dir) => dir,
+                    Err(error) => return Ok(listing_refusal(&shown, &error)),
+                };
+                loop {
+                    match dir.next_entry().await {
+                        Ok(Some(entry)) => entries.push(entry),
+                        Ok(None) => break,
+                        Err(error) => return Ok(listing_refusal(&shown, &error)),
+                    }
                 }
                 entries.sort_by_key(|entry| entry.file_name());
                 let mut lines = Vec::with_capacity(entries.len());
@@ -1094,6 +1135,114 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.output, "link/\nreal/");
+    }
+
+    /// Run `list_dir` on `path` in `root` with every access allowed, and return the refusal it answers.
+    async fn listing_refusal_of(root: PathBuf, path: &str) -> crate::tool::ToolError {
+        let list = tool("list_dir", sandbox(root.clone()));
+        let result = list
+            .run(
+                args(json!({ "path": path })),
+                context_in(root, SandboxMode::DangerFullAccess),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.output, "", "{path}");
+        result.error.expect("refused")
+    }
+
+    #[tokio::test]
+    async fn list_dir_on_a_missing_directory_is_fs_not_found_and_names_it() {
+        // Live-testing issue #223: the raw OS error (os error 2 / 20) named no directory.
+        let root = tempdir();
+        std::fs::write(root.path().join("plain.txt"), "preserved").unwrap();
+        for path in ["missing", "plain.txt/inner"] {
+            let error = listing_refusal_of(root.path(), path).await;
+            assert_eq!(error.code, codes::FS_NOT_FOUND, "{path}");
+            assert_eq!(
+                error.message,
+                format!(
+                    "cannot list \"{}/{path}\": not found",
+                    root.path().display()
+                )
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn list_dir_on_a_file_is_fs_not_directory_and_names_it() {
+        let root = tempdir();
+        std::fs::write(root.path().join("plain.txt"), "preserved").unwrap();
+        let error = listing_refusal_of(root.path(), "./plain.txt").await;
+        assert_eq!(error.code, codes::FS_NOT_DIRECTORY);
+        assert_eq!(
+            error.message,
+            format!(
+                "cannot list \"{}/plain.txt\": not a directory",
+                root.path().display()
+            )
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn list_dir_on_a_directory_the_os_will_not_open_is_fs_permission_denied() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempdir();
+        let locked = root.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join("inside.txt"), "x").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root opens any directory, so there is no refusal to judge.
+        let opens_anyway = std::fs::read_dir(&locked).is_ok();
+        let error = if opens_anyway {
+            None
+        } else {
+            Some(listing_refusal_of(root.path(), "locked").await)
+        };
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if let Some(error) = error {
+            assert_eq!(error.code, codes::FS_PERMISSION_DENIED);
+            assert_eq!(
+                error.message,
+                format!(
+                    "cannot list \"{}/locked\": permission denied",
+                    root.path().display()
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_listing_is_classified_by_its_platform_error() {
+        use std::io::{Error, ErrorKind};
+        let refused = |error: Error| {
+            let result = listing_refusal("/work/x", &error);
+            let error = result.error.expect("refused");
+            (error.code, error.message)
+        };
+        assert_eq!(
+            refused(Error::from(ErrorKind::NotFound)),
+            (
+                codes::FS_NOT_FOUND.to_owned(),
+                "cannot list \"/work/x\": not found".to_owned()
+            )
+        );
+        assert_eq!(
+            refused(Error::from(ErrorKind::NotADirectory)).0,
+            codes::FS_NOT_FOUND
+        );
+        assert_eq!(
+            refused(Error::from(ErrorKind::PermissionDenied)).0,
+            codes::FS_PERMISSION_DENIED
+        );
+        assert_eq!(
+            refused(Error::other("disk on fire")),
+            (
+                codes::FS_IO_ERROR.to_owned(),
+                "cannot list \"/work/x\": disk on fire".to_owned()
+            )
+        );
     }
 
     #[tokio::test]
