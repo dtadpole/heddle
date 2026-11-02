@@ -12,6 +12,8 @@
 //! prevent:
 //! - fields the component reads as unsigned integers are `integer` with `minimum: 0`, except `context`'s,
 //!   which its named rule bounds in DSH's words (`context_rule.rs`, #212);
+//! - counts, round caps and sizes are `minimum: 1`, as their TypeScript schemas now declare (#216, DSH's
+//!   `step(1).min(1)`), and the subagent depth `minimum: 0` (dsh-subagent's `maxDepth`);
 //! - `subagent-tool` refuses unknown keys.
 //!
 //! Schemastery's `step(1)` is `integer`, and its `min` and `max` are `minimum` and `maximum`.
@@ -65,7 +67,7 @@ pub fn goal_schema() -> Option<Schema> {
     schema(json!({
         "type": "object",
         "properties": {
-            "defaultMaxGoalRounds": { "type": "integer", "minimum": 0, "default": 100 },
+            "defaultMaxGoalRounds": { "type": "integer", "minimum": 1, "default": 100 },
         }
     }))
 }
@@ -77,7 +79,7 @@ pub fn subagent_tool_schema() -> Option<Schema> {
         "additionalProperties": false,
         "properties": {
             "maxDepth": { "type": "integer", "minimum": 0, "default": 2 },
-            "maxActive": { "type": "integer", "minimum": 0, "default": 1 },
+            "maxActive": { "type": "integer", "minimum": 1, "default": 1 },
         }
     }))
 }
@@ -91,7 +93,7 @@ pub fn schedule_schema() -> Option<Schema> {
             "deliveryHistoryDays": { "type": "integer", "minimum": 1, "maximum": 3650, "default": 30 },
             "deliveryHistoryRecords": { "type": "integer", "minimum": 1, "maximum": 10_000, "default": 200 },
             "autoStart": { "type": "boolean", "default": false },
-            "maxRounds": { "type": "number" },
+            "maxRounds": { "type": "integer", "minimum": 1 },
         }
     }))
 }
@@ -110,7 +112,7 @@ pub fn jobs_schema() -> Option<Schema> {
             "completionDelivery": { "type": "string", "enum": ["wakeup", "quiet"], "default": "wakeup" },
             "maxConsecutiveWakes": { "type": "integer", "minimum": 1 },
             "killGraceMs": { "type": "number", "minimum": 0, "default": 3_000 },
-            "maxRounds": { "type": "number" },
+            "maxRounds": { "type": "integer", "minimum": 1 },
             "promoteOnTimeout": { "type": "boolean", "default": true },
         }
     }))
@@ -121,10 +123,10 @@ pub fn team_schema() -> Option<Schema> {
     schema(json!({
         "type": "object",
         "properties": {
-            "maxMembers": { "type": "integer", "minimum": 0, "default": 8 },
-            "maxTasks": { "type": "integer", "minimum": 0, "default": 256 },
-            "maxPendingMessagesPerMember": { "type": "integer", "minimum": 0, "default": 64 },
-            "maxMessageBytes": { "type": "integer", "minimum": 0, "default": 65_536 },
+            "maxMembers": { "type": "integer", "minimum": 1, "default": 8 },
+            "maxTasks": { "type": "integer", "minimum": 1, "default": 256 },
+            "maxPendingMessagesPerMember": { "type": "integer", "minimum": 1, "default": 64 },
+            "maxMessageBytes": { "type": "integer", "minimum": 1, "default": 65_536 },
         }
     }))
 }
