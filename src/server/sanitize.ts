@@ -19,7 +19,7 @@
 /** Elements a document view renders. Anything else is dropped, with its text kept. */
 const ALLOWED = new Set([
   'a', 'blockquote', 'br', 'code', 'del', 'div', 'em', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hr', 'img', 'input',
-  'li', 'ol', 'p', 'pre', 'section', 'span', 'strong', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr', 'ul',
+  'li', 'ol', 'p', 'pre', 'section', 'span', 'strong', 'sup', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr', 'ul',
 ])
 
 /** Attributes a document view uses. `class` is here for the renderer's own language and frontmatter hooks. */

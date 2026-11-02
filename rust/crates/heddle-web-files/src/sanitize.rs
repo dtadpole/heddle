@@ -44,6 +44,7 @@ pub(crate) const ALLOWED_ELEMENTS: &[&str] = &[
     "section",
     "span",
     "strong",
+    "sup",
     "table",
     "tbody",
     "td",
@@ -278,7 +279,8 @@ pub fn sanitize_html(html: &str, options: SanitizeOptions<'_>) -> String {
                 continue;
             }
             let Some(attribute) = read_attribute(html, cursor) else {
-                cursor += 1;
+                // An unrecognized character may be non-ASCII; keep every later slice on a UTF-8 boundary.
+                cursor += html[cursor..].chars().next().unwrap().len_utf8();
                 continue;
             };
             cursor = attribute.end;
@@ -579,6 +581,29 @@ mod tests {
             ),
             "<p>x</p>"
         );
+    }
+
+    #[test]
+    fn unknown_unicode_attribute_names_preserve_content() {
+        // Harmless unknown names exercise the scanner's UTF-8 cursor, not a broader attribute grammar.
+        for name in ["é", "文字", "😀", "unknowné", "unknown文字", "unknown😀"] {
+            assert_eq!(
+                sanitize_html(
+                    &format!("<p {name}=\"x\">ok</p>"),
+                    SanitizeOptions::default()
+                ),
+                "<p>ok</p>",
+                "unknown attribute {name} is dropped while its paragraph is kept"
+            );
+            assert_eq!(
+                sanitize_html(
+                    &format!("<p {name}=\"x\" title=\"文字 😀\" width=\"12\">ok</p>"),
+                    SanitizeOptions::default()
+                ),
+                "<p title=\"文字 😀\" width=\"12\">ok</p>",
+                "allowed attributes after {name} still retain their values"
+            );
+        }
     }
 
     #[test]

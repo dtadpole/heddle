@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { after, test } from 'node:test'
 
@@ -1960,11 +1960,103 @@ test('a message the server took is not put back or resent when the connection dr
   }
 })
 
+test('a delayed old session read cannot overwrite the latest selected conversation', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('session-view-ticket')
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    mkdirSync(server.work, { recursive: true })
+    const door = await fetch(server.url, { redirect: 'manual' })
+    const cookie = String(door.headers.get('set-cookie') ?? '').split(';')[0]
+    const headers = { cookie, origin: new URL(server.url).origin, 'content-type': 'application/json' }
+    const post = (path, body) => fetch(new URL(path, server.url), { method: 'POST', headers, body: JSON.stringify(body) }).then((response) => response.json())
+    await post('/api/workspaces', { path: server.work })
+    const a = (await post('/api/sessions', { branch: server.work })).session
+    const b = (await post('/api/sessions', { branch: server.work })).session
+    assert.notEqual(a, b, 'fixture requires distinct sessions')
+    await post('/api/sessions/' + a + '/title', { title: 'OLD-A' })
+    await post('/api/sessions/' + b + '/title', { title: 'LATEST-B' })
+    await browser.goto(server.url)
+    const row = (id) => `document.querySelector('#tree li[data-session-id=${JSON.stringify(id)}] > .row')`
+    await browser.waitFor(`${row(a)} !== null && ${row(b)} !== null`, 15000)
+    await browser.evaluate(`${row(b)}.click()`)
+    await browser.waitFor(`document.getElementById('session-title').textContent === 'LATEST-B'`, 10000)
+    await browser.evaluate('new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+    await browser.evaluate(`(() => {
+      const real = window.fetch.bind(window)
+      window.__sessionWaiting = false
+      window.__sessionFinished = false
+      window.__sessionTitleBeforeRelease = null
+      window.fetch = async (input, options) => {
+        const response = await real(input, options)
+        if (String(input) === ${JSON.stringify('/api/sessions/' + a)}) {
+          window.__sessionWaiting = true
+          // Freeze response data now; do not allow a later refetch or body read to hide the stale view publication.
+          const originalJson = response.json.bind(response)
+          const captured = await originalJson()
+          response.json = async () => captured
+          await new Promise((resolve) => { window.__releaseSession = resolve })
+          window.__sessionFinished = true
+        }
+        return response
+      }
+    })()`)
+    await browser.evaluate(`void (window.__oldOpen = globalThis.showSession(${JSON.stringify(a)}))`)
+    await browser.waitFor('window.__sessionWaiting', 10000)
+    await browser.evaluate(`globalThis.showSession(${JSON.stringify(b)})`)
+    await browser.waitFor(`document.getElementById('session-title').textContent === 'LATEST-B'`, 10000)
+    await browser.evaluate('window.__releaseSession()')
+    await browser.waitFor('window.__sessionFinished === true', 10000)
+    await browser.evaluate('window.__oldOpen')
+    assert.equal(await browser.evaluate(`document.getElementById('session-title').textContent`), 'LATEST-B', 'Refs #120: late A title must not replace B')
+    assert.equal(await browser.evaluate(`document.querySelector('#tree li[data-session-id=${JSON.stringify(b)}]')?.getAttribute('aria-selected')`), 'true', 'late A caller must not move selection')
+  } finally { browser.close(); await server.close() }
+})
+
 /**
  * DSH's per-Turn token usage (C71): a completed turn shows its own usage row, closed to its total and opening to the
  * buckets the provider reported, beside the session dock. The row is the durable fold's, so it is the same live and
  * after a reload; a turn whose provider reported nothing has no row at all rather than a zero.
  */
+test('#42: a mixed picker preserves good files and ordinary empty text, refusing only the empty image', { timeout: 60000 }, async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('pick-partial-empty')
+  let browser
+  try {
+    browser = await openBrowser({ width: 1280, height: 900 })
+    mkdirSync(server.work, { recursive: true })
+    const names = ['first.txt', 'invalid.png', 'empty.txt', 'last.txt']
+    const files = names.map(name => join(server.work, name))
+    files.forEach((path, index) => writeFileSync(path, index === 1 || index === 2 ? '' : 'ordinary text\n'))
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor('document.body.dataset.ready === "true"', 15000), 'the page is ready')
+    await browser.evaluate('document.getElementById("attach").click()')
+    const findFile = `Array.from(document.querySelectorAll('#attach-menu button')).find(item => item.textContent === 'File')`
+    assert.ok(await browser.waitFor(`${findFile} !== undefined`, 5000), 'the File action is offered')
+    await browser.evaluate(`${findFile}.click()`)
+    const documentNode = await browser.send('DOM.getDocument', { depth: 2, pierce: true })
+    const found = await browser.send('DOM.querySelector', { nodeId: documentNode.result.root.nodeId, selector: '#attach-file' })
+    await browser.send('DOM.setFileInputFiles', { files, nodeId: found.result.nodeId })
+    assert.ok(await browser.waitFor(`document.querySelectorAll('#attach-cards .attach-card').length === 3`, 10000), 'all three ordinary files become cards')
+    const state = JSON.parse(await browser.evaluate(`JSON.stringify({
+      cards: [...document.querySelectorAll('#attach-cards .attach-card')].map(card => card.textContent),
+      notes: [...document.querySelectorAll('#attach-menu .meta')].map(note => note.textContent),
+    })`))
+    for (const name of ['first.txt', 'empty.txt', 'last.txt']) assert.ok(state.cards.some(card => card.includes(name)), `${name} is retained`)
+    assert.deepEqual(state.notes, ['could not add invalid.png: an empty image is not valid'])
+    const uploads = readdirSync(join(server.home, 'uploads'))
+    assert.equal(uploads.length, 3, 'only admitted uploads are stored')
+    const empty = uploads.find(name => name.endsWith('-empty.txt'))
+    assert.ok(empty !== undefined)
+    assert.equal(statSync(join(server.home, 'uploads', empty)).size, 0, 'the ordinary empty upload is verbatim')
+  } finally {
+    browser?.close()
+    await server.close()
+  }
+})
+
 test('a completed turn shows its own token-usage row, which opens to the reported buckets', async (context) => {
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return

@@ -62,6 +62,7 @@ const PAGE = `<!doctype html>
   <div id="rich" contenteditable="true">editable text</div>
   <div><button id="greet">Greet</button> <button id="fail">Fail</button> <button id="alert">Alert</button> <button id="confirm">Confirm</button> <button id="prompt">Prompt</button> <button id="open">Open tab</button> <button id="spacebar">Space target</button></div>
   <div><input id="keylog" placeholder="type here"><input id="file" type="file" multiple></div>
+  <div><button id="copy">Copy</button> <textarea id="pastebox" rows="1" placeholder="paste here"></textarea></div>
   <div id="hoverTarget">hover target</div>
   <div id="stage">
     <div id="draggable">drag me</div>
@@ -91,6 +92,9 @@ const PAGE = `<!doctype html>
     })
     document.getElementById('open').addEventListener('click', () => { window.open('/second', 'second tab') })
     document.getElementById('spacebar').addEventListener('click', () => { output.textContent = 'activated:spacebar' })
+    document.getElementById('copy').addEventListener('click', () => {
+      navigator.clipboard.writeText('copied by the page').then(() => { output.textContent = 'copied' }, (error) => { output.textContent = 'copy failed:' + error.name })
+    })
     document.getElementById('hoverTarget').addEventListener('mouseenter', (event) => {
       event.currentTarget.setAttribute('data-hovered', 'yes')
     })
@@ -271,6 +275,60 @@ test('press_key Space activates a focused native button, as the space bar does',
   await tools.press_key({ pageId, key: 'Space' })
   const activated = await tools.evaluate_script({ pageId, function: `() => document.getElementById('output').textContent` })
   assert.equal(activated.value, 'activated:spacebar', 'the button answered key " ", which the name Space must send')
+})
+
+/** Read one element's value, or the output line's text. */
+async function valueOf(id) {
+  const property = id === 'output' ? 'textContent' : 'value'
+  return (await tools.evaluate_script({ pageId, function: `() => document.getElementById('${id}').${property}` })).value
+}
+
+/** Empty the paste box and focus an element, by script so no click changes what is focused. */
+async function focusFresh(id) {
+  await tools.evaluate_script({ pageId, function: `() => { document.getElementById('pastebox').value = ''; document.getElementById('${id}').focus() }` })
+}
+
+/**
+ * Only headless: its clipboard belongs to the browser process, so these copies never reach the owner's.
+ * A headed run judges the other half, that a visible browser withholds the clipboard commands.
+ */
+test('on macOS press_key Meta+V pastes what the page copied, in a headless browser', async (t) => {
+  if (!skipUnless(t, browserAvailable(), 'no browser binary was found')) return
+  if (!skipUnless(t, process.platform === 'darwin', 'the editing chords are a macOS rule')) return
+  if (!skipUnless(t, !headed, "a headed run must not write the owner's clipboard")) return
+  const snapshot = await tools.take_snapshot({ pageId })
+  await tools.click({ pageId, uid: findUid(snapshot.tree, 'button', 'Copy') })
+  assert.equal(await valueOf('output'), 'copied', "the page's own Copy button wrote the browser's clipboard")
+  await focusFresh('pastebox')
+  const pressed = await tools.press_key({ pageId, key: 'Meta+V' })
+  assert.equal(pressed.command, 'paste')
+  assert.equal(await valueOf('pastebox'), 'copied by the page', 'Meta+V pasted, as Command+V does on a Mac')
+})
+
+test('on macOS Meta+A, Meta+C and Meta+V select, copy and paste a field, in a headless browser', async (t) => {
+  if (!skipUnless(t, browserAvailable(), 'no browser binary was found')) return
+  if (!skipUnless(t, process.platform === 'darwin', 'the editing chords are a macOS rule')) return
+  if (!skipUnless(t, !headed, "a headed run must not write the owner's clipboard")) return
+  await tools.evaluate_script({ pageId, function: `() => { document.getElementById('keylog').value = 'alpha beta' }` })
+  await focusFresh('keylog')
+  await tools.press_key({ pageId, key: 'Meta+A' })
+  await tools.press_key({ pageId, key: 'Meta+C' })
+  await focusFresh('pastebox')
+  await tools.press_key({ pageId, key: 'Meta+V' })
+  assert.equal(await valueOf('pastebox'), 'alpha beta', 'the whole field was selected, copied and pasted')
+  await tools.press_key({ pageId, key: 'Meta+Z' })
+  assert.equal(await valueOf('pastebox'), '', 'Meta+Z undid the paste')
+})
+
+test('on macOS a visible browser withholds the clipboard commands and says why', async (t) => {
+  if (!skipUnless(t, browserAvailable(), 'no browser binary was found')) return
+  if (!skipUnless(t, process.platform === 'darwin', 'the editing chords are a macOS rule')) return
+  if (!skipUnless(t, headed, 'judged in the headed run, where the browser is a visible window')) return
+  await focusFresh('pastebox')
+  const pressed = await tools.press_key({ pageId, key: 'Meta+V' })
+  assert.equal(pressed.withheld, 'paste')
+  assert.match(pressed.reason, /headless/)
+  assert.equal(await valueOf('pastebox'), '', "nothing from the owner's clipboard reached the page")
 })
 
 test('hover moves the mouse over the element', async (t) => {

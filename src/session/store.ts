@@ -21,6 +21,8 @@ import { zstdCompressSync } from 'node:zlib'
 import type { Chunk, ContentPart, Message } from '../llm/types.ts'
 import { workspaceKey } from './layout.ts'
 import { interruptedTurnClosers } from './repair.ts'
+import { appendWhole, NODE_APPEND_IO, replaceWhole, SessionUnsavedError, type AppendIo } from './append.ts'
+import { recoverTranscript } from './transcript.ts'
 import { SessionTitles } from './title.ts'
 import { decodeTranscript, encodeFrame, isEventRecord, judgeLogHeader, type LogHeader } from './transcript.ts'
 import { normalizeSessionTitle } from './title-text.ts'
@@ -857,8 +859,11 @@ export class SessionStore {
    * appends, and taking the lock drops the fold so the first write re-reads what another process
    * may have appended before it let go. A process that only reads may show an older history until
    * it opens the session again.
+   *
+   * `poisoned` is set when an append failed and its partial bytes could not be cut away (`./append.ts`, #221): every
+   * later append of the session is refused with that error until the fold is dropped and the file read again.
    */
-  private readonly loaded = new Map<string, { readonly events: SessionEvent[]; readonly framed: boolean }>()
+  private readonly loaded = new Map<string, { readonly events: SessionEvent[]; readonly framed: boolean; poisoned?: SessionUnsavedError }>()
 
   /** The sessions this store holds the writer lock for, and where each lock is. */
   private readonly held = new Map<string, string>()
@@ -1159,7 +1164,7 @@ export class SessionStore {
     if (records.length === 0) return
     foldSurface([...log.events, ...records])
     const lines = records.map((record) => `${JSON.stringify(record)}\n`)
-    appendFileSync(handle.transcript, log.framed ? Buffer.concat(lines.map(encodeFrame)) : Buffer.from(lines.join(''), 'utf8'))
+    this.appendBytes(handle, log, log.framed ? Buffer.concat(lines.map(encodeFrame)) : Buffer.from(lines.join(''), 'utf8'))
     /** One push per event: a long source's seed is far more events than a spread may pass as arguments. */
     for (const record of records) log.events.push(record)
     const turns = records.filter((record) => record.type === 'message' && (record.message as RecordedMessage | undefined)?.role === 'user').length
@@ -1386,10 +1391,14 @@ export class SessionStore {
      * are identical before and after an append, so an earlier event is never rewritten — and a
      * crash that tears the last frame costs that frame alone, because the reader walks frames and
      * stops at the first incomplete one.
+     *
+     * The frame goes on whole or not at all (`appendBytes`, #221): a write that fails is cut back before the error is
+     * thrown, so the event is neither in the file nor in the fold and the next append takes its seq.
      */
     const line = `${JSON.stringify(record)}\n`
-    appendFileSync(handle.transcript, this.load(handle).framed ? encodeFrame(line) : Buffer.from(line, 'utf8'))
-    this.load(handle).events.push(record)
+    const entry = this.load(handle)
+    this.appendBytes(handle, entry, entry.framed ? encodeFrame(line) : Buffer.from(line, 'utf8'))
+    entry.events.push(record)
     /**
      * No event here moves `updated`: DSH dates a row by the latest prompt or steer only (see `message()`), so an answer, a
      * turn boundary or a harness note no longer re-dates it. This used to touch on those three types (R-developer-eight-20).
@@ -1434,8 +1443,32 @@ export class SessionStore {
     if (records.length === 0) return
     const entry = this.load(handle)
     const lines = records.map((record) => `${JSON.stringify(record)}\n`)
-    appendFileSync(handle.transcript, entry.framed ? Buffer.concat(lines.map(encodeFrame)) : Buffer.from(lines.join(''), 'utf8'))
+    this.appendBytes(handle, entry, entry.framed ? Buffer.concat(lines.map(encodeFrame)) : Buffer.from(lines.join(''), 'utf8'))
     entry.events.push(...records)
+  }
+
+  /**
+   * The file calls an append makes (`./append.ts`): the real file system, unless a test puts one in that fails a write
+   * part-way.
+   */
+  appendIo: AppendIo = NODE_APPEND_IO
+
+  /**
+   * Append bytes to a session's log whole or not at all, the one way `append`, `record` and a fork's `seed` write (#221).
+   *
+   * A write that fails is cut back to the length the log had, and `SessionUnsavedError` says why in words. When the cut
+   * fails too, the fold is marked poisoned and every later append of the session throws that same error, because an
+   * append after a torn tail would be lost on the next open; opening the session again re-reads the file and cuts the
+   * tail (`load`).
+   */
+  private appendBytes(handle: SessionHandle, entry: { poisoned?: SessionUnsavedError }, bytes: Uint8Array): void {
+    if (entry.poisoned !== undefined) throw entry.poisoned
+    try {
+      appendWhole(handle.transcript, bytes, this.appendIo)
+    } catch (error) {
+      if (error instanceof SessionUnsavedError && error.poisoned) entry.poisoned = error
+      throw error
+    }
   }
 
   /** Whether this store holds the session's writer lock. */
@@ -1508,12 +1541,23 @@ export class SessionStore {
    * The format is decided by what the file says and what it is called, so a session born before
    * frames existed keeps being appended to as plain JSONL rather than being rewritten.
    */
-  private load(handle: SessionHandle): { events: SessionEvent[]; framed: boolean } {
+  private load(handle: SessionHandle): { events: SessionEvent[]; framed: boolean; poisoned?: SessionUnsavedError } {
     const cached = this.loaded.get(handle.id)
-    if (cached !== undefined) return cached as { events: SessionEvent[]; framed: boolean }
+    if (cached !== undefined) return cached
 
     let { bytes, decoded } = this.readLog(handle)
     const torn = bytes.length - decoded.readableBytes > 0
+
+    /**
+     * A tear in the **middle** is stepped over when whole frames follow it (#221).
+     *
+     * An append that failed part-way, before the rollback in `./append.ts` existed, left its partial frame in the file,
+     * and the turns written after the disk had room again sit behind it. Cutting at the tear threw them away (J183: t6,
+     * answered after the space came back, was gone after the restart). `recoverTranscript` finds where whole frames
+     * start again and keeps them, when their seqs join the ones before the tear; it answers nothing for a tear at the
+     * tail, which is cut below as it always was.
+     */
+    let recovered = torn ? recoverTranscript(bytes) : undefined
 
     /**
      * A torn tail is cut off before anything is appended.
@@ -1529,19 +1573,36 @@ export class SessionStore {
      * be that process's append in progress, so a reader that cannot take the lock reads the whole
      * frames and leaves the file alone; one that can re-reads under the lock before it cuts, because
      * the frame may have been finished by the holder it just replaced.
+     *
+     * A log torn in the middle is written again without its torn bytes, in one step (`replaceWhole`): a truncate cannot
+     * take bytes out of the middle. Every frame kept is copied as it was. A log that cannot be written again (a full disk)
+     * is read past its tear and left as it is; the next open tries again.
      */
     let dropped = 0
+    let droppedRanges: { offset: number; length: number }[] | undefined
     if (torn && this.tryClaim(handle)) {
       ;({ bytes, decoded } = this.readLog(handle))
-      dropped = bytes.length - decoded.readableBytes
-      if (dropped > 0) {
+      recovered = bytes.length > decoded.readableBytes ? recoverTranscript(bytes) : undefined
+      if (recovered !== undefined) {
         try {
-          truncateSync(handle.transcript, decoded.readableBytes)
+          replaceWhole(handle.transcript, Buffer.concat(recovered.kept.map((frame) => bytes.subarray(frame.start, frame.end))))
+          dropped = recovered.dropped.reduce((sum, range) => sum + range.end - range.start, 0)
+          droppedRanges = recovered.dropped.map((range) => ({ offset: range.start, length: range.end - range.start }))
         } catch {
-          // a transcript that cannot be truncated still reads; the next append simply lands after the tear
+          // read past the tear from memory; the file keeps it until an open can write the log again
+        }
+      } else {
+        dropped = bytes.length - decoded.readableBytes
+        if (dropped > 0) {
+          try {
+            truncateSync(handle.transcript, decoded.readableBytes)
+          } catch {
+            // a transcript that cannot be truncated still reads; the next append simply lands after the tear
+          }
         }
       }
     }
+    const lines = recovered?.lines ?? decoded.lines
 
     /**
      * Every line must be a session event, as the Rust build's reader requires of every line (`SessionEvent::from_line`):
@@ -1550,7 +1611,7 @@ export class SessionStore {
      * team sweep as an event and stopped the start on `event.type.startsWith`).
      */
     const events: SessionEvent[] = []
-    for (const [index, line] of decoded.lines.entries()) {
+    for (const [index, line] of lines.entries()) {
       let record: unknown
       try {
         record = JSON.parse(line)
@@ -1560,10 +1621,22 @@ export class SessionStore {
       if (!isEventRecord(record)) throw new SessionLogUnreadableError(handle.transcript, index + 1, 'is not a session event')
       events.push(record as SessionEvent)
     }
-    const framed = decoded.format === 'zstd-frames' || ((torn || decoded.lines.length === 0) && isFramed(handle.transcript))
-    const entry = { events, framed }
+    const framed = decoded.format === 'zstd-frames' || ((torn || lines.length === 0) && isFramed(handle.transcript))
+    const entry: { events: SessionEvent[]; framed: boolean; poisoned?: SessionUnsavedError } = { events, framed }
     this.loaded.set(handle.id, entry)
-    if (dropped > 0) this.append(handle, { type: 'transcript/repaired', droppedBytes: dropped })
+    /**
+     * The repair is recorded, and a tear stepped over names the ranges it took out (offsets in the file as it was). A note
+     * the disk will not take does not fail the read: the repair is already on disk, and the next append says why it
+     * cannot be saved.
+     */
+    if (dropped > 0) {
+      try {
+        this.append(handle, { type: 'transcript/repaired', droppedBytes: dropped, ...(droppedRanges !== undefined ? { droppedRanges } : {}) })
+      } catch (error) {
+        if (!(error instanceof SessionUnsavedError)) throw error
+        this.warn(`heddle session: the repair of ${handle.transcript} could not be recorded: ${error.message}`)
+      }
+    }
     return entry
   }
 

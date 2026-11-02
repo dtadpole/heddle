@@ -519,7 +519,8 @@ impl GoalDriver {
                                 id: current.goal.id.clone(),
                                 revision: current.goal.revision,
                             };
-                            if let Err(paused) = self.goals.pause(session, &reference) {
+                            // The round is over; a turn that began since is not this pause's to end (#190).
+                            if let Err(paused) = self.goals.pause_in_turn(session, &reference) {
                                 let _ = self.goals.disarm(session);
                                 error = Some(paused.to_string());
                             }
