@@ -160,10 +160,12 @@ render_plist() {
   if [ "$supervise" = yes ]; then
     # The supervisor watches the server's health route (a hung server keeps its port and answers nothing), reclaims a
     # leftover of this same command on the port (the agent abandons its process group, so a killed supervisor leaves
-    # its server serving), and holds a lock so no second supervisor of this service ever runs beside it.
+    # its server serving), and holds a lock so no second supervisor of this service ever runs beside it. A server it
+    # judges hung is examined first, into a 0700 directory beside the lock: a node report and a `sample` (#257).
     xml_strings "$node" "$here/supervisor.mjs" \
       --health-url "http://127.0.0.1:$port/healthz" --health-every "${HEDDLE_HEALTH_EVERY:-5}" \
-      --reclaim-port "$port" --lock "$heddle_home/web-supervisor.$port.lock" -- >> "$args"
+      --reclaim-port "$port" --lock "$heddle_home/web-supervisor.$port.lock" \
+      --capture-dir "$heddle_home/hang-captures" -- >> "$args"
   fi
   xml_strings "$exe" >> "$args"
   if [ -n "$cli" ]; then xml_strings "$cli" >> "$args"; fi
