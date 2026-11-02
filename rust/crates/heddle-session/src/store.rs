@@ -28,7 +28,7 @@
 //! internal lock serializes the fold and the file writes, so a seq is assigned and written atomically.
 //! The listener is called **after** the lock is released, so it may read the store.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
@@ -45,8 +45,8 @@ use crate::message::{Chunk, Message, RecordedMessage, Role};
 use crate::meta::{CreateOptions, FlagPatch, ForkAttribution, ModelSelection, SessionMeta};
 use crate::repair::interrupted_turn_closers;
 use crate::surface::{
-    SurfaceState, completed_prefix, derive_message, derive_node_message, fold_surface, fork_seed,
-    index_by_seq, is_surface_eligible,
+    IndexedEvents, SeqLookup, SurfaceState, completed_prefix, derive_message, fold_surface,
+    fork_seed, is_surface_eligible,
 };
 use crate::title::SessionTitles;
 use crate::transcript::{
@@ -360,6 +360,11 @@ struct Loaded {
     events: Arc<Vec<Arc<SessionEvent>>>,
     framed: bool,
     poisoned: Option<String>,
+    /// The log's index by seq, as positions in `events`, through `events[..indexed]` ([`SessionStore::indexed`], #159).
+    /// A log only grows by appending to `events`, and dropping the fold drops this with it, so extending it by what was
+    /// appended answers what [`crate::index_by_seq`] over the whole log answers.
+    by_seq: Arc<HashMap<u64, usize>>,
+    indexed: usize,
 }
 
 /// Append bytes to a session's log whole or not at all, the one way `append`, the turn closers and a fork's seed write
@@ -395,6 +400,8 @@ struct StoreState {
     surface_cache: HashMap<String, (usize, Arc<SurfaceState>)>,
     /// The sessions this store holds the writer lock for, and where each lock is.
     held: HashMap<String, PathBuf>,
+    /// How many times a log was indexed from its first event ([`SessionStore::indexed`]); a step should add none (#159).
+    seq_index_builds: usize,
 }
 
 impl Drop for SessionStore {
@@ -1411,6 +1418,8 @@ impl SessionStore {
                 events: Arc::new(events),
                 framed,
                 poisoned: None,
+                by_seq: Arc::default(),
+                indexed: 0,
             },
         );
         if dropped > 0 {
@@ -1480,18 +1489,14 @@ impl SessionStore {
             });
         }
         let shadowed_seqs = surface.nodes[start_idx..=end_idx].to_vec();
-        let events = state
-            .loaded
-            .get(&handle.id)
-            .expect("the surface was folded")
-            .events
-            .clone();
+        // One index for every node the span shadows (#159): a compaction's span is most of the surface.
+        let by_seq = self.indexed_locked(state, handle)?;
         let replacement = event
             .get("message")
             .and_then(|value| serde_json::from_value::<Message>(value.clone()).ok());
 
         let head = shadowed_seqs.first().copied();
-        let head_message = head.and_then(|seq| derive_node_message(events.as_slice(), seq));
+        let head_message = head.and_then(|seq| derive_message(&by_seq, seq));
         if start_idx == 0 && head_message.as_ref().map(|message| message.role) == Some(Role::System)
         {
             let head_rewritten = replacement
@@ -1505,7 +1510,7 @@ impl SessionStore {
             }
         }
         for seq in &shadowed_seqs {
-            let original = derive_node_message(events.as_slice(), *seq);
+            let original = derive_message(&by_seq, *seq);
             if original.as_ref().map(|message| message.role) != Some(Role::Tool) {
                 continue;
             }
@@ -1601,22 +1606,98 @@ impl SessionStore {
         Ok(folded)
     }
 
+    /// The log with its index by seq: what [`crate::index_by_seq`] over [`SessionStore::read`] answers, without indexing
+    /// the whole log on every call (#159).
+    ///
+    /// The index is kept beside the fold and extended by the events appended since the last call, so a caller that
+    /// derives node after node pays for it once per load rather than once per node. The snapshot is the caller's: an
+    /// append after it is not in it, as with [`SessionStore::read`].
+    pub fn indexed(&self, handle: &SessionHandle) -> Result<IndexedEvents, SessionError> {
+        let mut state = self.state.lock().expect("the store lock is never poisoned");
+        self.indexed_locked(&mut state, handle)
+    }
+
+    fn indexed_locked(
+        &self,
+        state: &mut StoreState,
+        handle: &SessionHandle,
+    ) -> Result<IndexedEvents, SessionError> {
+        self.load_locked(state, handle)?;
+        let loaded = state
+            .loaded
+            .get_mut(&handle.id)
+            .expect("the log was just loaded");
+        if loaded.indexed < loaded.events.len() {
+            if loaded.indexed == 0 {
+                state.seq_index_builds += 1;
+            }
+            // A snapshot still out shares the map, and `make_mut` copies it then; a step's snapshots are gone by its
+            // next call, so the map is extended in place. Later events win a seq, as in `index_by_seq`.
+            let positions = Arc::make_mut(&mut loaded.by_seq);
+            for (at, event) in loaded.events.iter().enumerate().skip(loaded.indexed) {
+                positions.insert(event.seq, at);
+            }
+            loaded.indexed = loaded.events.len();
+        }
+        Ok(IndexedEvents::kept(
+            loaded.events.clone(),
+            loaded.by_seq.clone(),
+        ))
+    }
+
+    /// How many times this store has indexed a log from its first event ([`SessionStore::indexed`]); a step should add
+    /// none (#159).
+    pub fn seq_index_builds(&self) -> usize {
+        self.state
+            .lock()
+            .expect("the store lock is never poisoned")
+            .seq_index_builds
+    }
+
     /// One node's derived message, or `None` when the node produces none.
     pub fn derive_node(
         &self,
         handle: &SessionHandle,
         seq: u64,
     ) -> Result<Option<Message>, SessionError> {
-        let events = self.read(handle)?;
-        Ok(derive_node_message(events.as_slice(), seq))
+        let by_seq = self.indexed(handle)?;
+        Ok(derive_message(&by_seq, seq))
+    }
+
+    /// The surface positions that hold a user message: what "new input" means to a running turn (the steering check,
+    /// heddle-agent `user_input_seqs`), and the positions whose [`SessionStore::derive_node`] is a user's.
+    ///
+    /// Read from each position's own event (#159): a user message is a `message` or `context/note` event, while a chunk
+    /// run derives to an assistant message or to nothing, so no run is assembled to answer it, and the index is the one
+    /// [`SessionStore::indexed`] keeps. The check used to derive every node, indexing the whole log for each.
+    pub fn user_input_seqs(&self, handle: &SessionHandle) -> Result<BTreeSet<u64>, SessionError> {
+        let (surface, by_seq) = {
+            let mut state = self.state.lock().expect("the store lock is never poisoned");
+            let surface = self.surface_locked(&mut state, handle)?;
+            (surface, self.indexed_locked(&mut state, handle)?)
+        };
+        Ok(surface
+            .nodes
+            .iter()
+            .copied()
+            .filter(|seq| {
+                by_seq
+                    .event(*seq)
+                    .is_some_and(|event| event.kind == "message" || event.kind == "context/note")
+                    && derive_message(&by_seq, *seq).map(|message| message.role) == Some(Role::User)
+            })
+            .collect())
     }
 
     /// The messages a request carries: every surface node, derived, in surface order.
     pub fn derive_messages(&self, handle: &SessionHandle) -> Result<Vec<Message>, SessionError> {
-        let events = self.read(handle)?;
-        let by_seq = index_by_seq(events.as_slice());
+        let (surface, by_seq) = {
+            let mut state = self.state.lock().expect("the store lock is never poisoned");
+            let surface = self.surface_locked(&mut state, handle)?;
+            (surface, self.indexed_locked(&mut state, handle)?)
+        };
         let mut messages = Vec::new();
-        for seq in self.surface(handle)?.nodes.iter().copied() {
+        for seq in surface.nodes.iter().copied() {
             if let Some(message) = derive_message(&by_seq, seq) {
                 messages.push(message);
             }
@@ -3718,6 +3799,302 @@ mod tests {
         assert_eq!(
             store.messages(&fork).unwrap(),
             store.messages(&source).unwrap()
+        );
+    }
+
+    /// A session of `turns` short turns, written as frames in one append the way a long session's log holds them
+    /// (#159): a prompt, a request, `deltas` text deltas and a `done`, and the turn's two closers.
+    fn long_session(root: &str, turns: usize, deltas: usize) -> SessionHandle {
+        let writer = SessionStore::new(root, &Env::default());
+        let handle = writer
+            .create(CreateOptions {
+                cwd: Some("/home/me/work".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        let mut seq = writer.count(&handle).unwrap();
+        writer.release(&handle);
+        let mut bytes = Vec::new();
+        let mut put = |kind: &str, fields: Value| {
+            let event = SessionEvent {
+                seq,
+                at: "2026-11-01T00:00:00.000Z".to_string(),
+                kind: kind.to_string(),
+                fields: fields.as_object().cloned().unwrap(),
+            };
+            bytes.extend(encode_frame(&format!("{}\n", event.to_line())));
+            seq += 1;
+        };
+        for turn in 0..turns {
+            put(
+                "message",
+                json!({ "message": { "role": "user", "content": [{ "type": "text", "text": format!("question {turn}") }] } }),
+            );
+            put(
+                "model/request",
+                json!({ "endpoint": "scripted", "messages": turn * 2 + 1, "tools": [] }),
+            );
+            for index in 0..deltas {
+                put(
+                    "assistant/chunk",
+                    json!({ "chunk": { "type": "text-delta", "text": format!(" word{index}") } }),
+                );
+            }
+            put(
+                "assistant/chunk",
+                json!({ "chunk": { "type": "done", "finishReason": "stop" } }),
+            );
+            put(
+                "assistant/completed",
+                json!({ "text": "answer", "finishReason": "stop", "rounds": 1 }),
+            );
+            put("turn/completed", json!({ "rounds": 1 }));
+        }
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&handle.transcript)
+            .unwrap()
+            .write_all(&bytes)
+            .unwrap();
+        handle
+    }
+
+    /// The steering check's positions, asked node by node as the agent loop used to ask them.
+    fn users_node_by_node(store: &SessionStore, handle: &SessionHandle) -> BTreeSet<u64> {
+        store
+            .surface(handle)
+            .unwrap()
+            .nodes
+            .iter()
+            .copied()
+            .filter(|seq| {
+                store
+                    .derive_node(handle, *seq)
+                    .unwrap()
+                    .map(|message| message.role)
+                    == Some(Role::User)
+            })
+            .collect()
+    }
+
+    /// Issue #159: each step of a long session asked the steering check, which derived every surface node, and each
+    /// derivation indexed the whole log again: (surface nodes) × (log events), up to three times a step. The store now
+    /// keeps one index per loaded log and extends it as the log grows, so the check, every node's derivation and the
+    /// appends between them index the log once, and the check costs the same at 300 turns as at three.
+    #[test]
+    fn a_long_session_is_indexed_once_and_its_steering_check_does_not_grow_with_it() {
+        let (dir, _) = store();
+        let root = dir.path().to_str().unwrap().to_string();
+        let seeded = long_session(&root, 300, 166);
+        let store = SessionStore::new(&root, &Env::default());
+        let handle = store.open(&seeded.id).expect("the session is on disk");
+        // Writing takes the lock and reads the log again, once: everything after this is one step's work.
+        store.claim(&handle).unwrap();
+        let events = store.count(&handle).unwrap();
+        assert!(events > 50_000, "a 300-turn log: {events} events");
+
+        let started = std::time::Instant::now();
+        let users = store.user_input_seqs(&handle).unwrap();
+        let first = started.elapsed();
+        assert_eq!(users.len(), 300, "every prompt is a user position");
+        assert_eq!(store.seq_index_builds(), 1, "the log was indexed once");
+
+        // Asked again, as each step asks it two or three times: it reads the kept index.
+        let started = std::time::Instant::now();
+        for _ in 0..3 {
+            assert_eq!(store.user_input_seqs(&handle).unwrap(), users);
+        }
+        let again = started.elapsed() / 3;
+        assert!(
+            again < std::time::Duration::from_millis(50),
+            "the check at 300 turns took {again:?} (the first call, which indexed the log, {first:?})"
+        );
+
+        // Node by node, the old way of asking, answers the same and builds nothing more.
+        assert_eq!(users_node_by_node(&store, &handle), users);
+        assert_eq!(
+            store.seq_index_builds(),
+            1,
+            "a node's derivation reads the kept index"
+        );
+
+        // A step's appends extend the index; a steered message is seen at once.
+        store
+            .model_request(
+                &handle,
+                &ModelRequestRecord {
+                    endpoint: "scripted".to_string(),
+                    messages: 601,
+                    ..ModelRequestRecord::default()
+                },
+            )
+            .unwrap();
+        let steered = store.message(&handle, user("and one more thing")).unwrap();
+        let after = store.user_input_seqs(&handle).unwrap();
+        assert!(
+            after.contains(&steered.seq),
+            "the steered prompt is new input"
+        );
+        assert_eq!(after.len(), 301);
+        assert_eq!(users_node_by_node(&store, &handle), after);
+        assert_eq!(
+            store.seq_index_builds(),
+            1,
+            "appending extended the index rather than rebuilding it"
+        );
+    }
+
+    /// The kept index answers what a fresh `index_by_seq` answers, for every node kind, and the user positions are
+    /// exactly those whose derived message is a user's: a system note and a summary note, a tool result, an answer, a
+    /// run its turn closed as failed, and a message with no content.
+    #[test]
+    fn the_kept_index_and_the_user_positions_answer_what_a_fresh_derivation_answers() {
+        let (_dir, store) = store();
+        let handle = store
+            .create(CreateOptions {
+                cwd: Some("/home/me/work".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        let note = |role: &str, text: &str| {
+            NewEvent::new("context/note").field(
+                "message",
+                json!({ "role": role, "content": [{ "type": "text", "text": text }] }),
+            )
+        };
+        let chunk = |value: Value| NewEvent::new("assistant/chunk").field("chunk", value);
+        let append = |event: NewEvent| {
+            store
+                .append(&handle, event, AppendOptions::default())
+                .unwrap()
+        };
+        append(note("system", "the system prompt"));
+        store.message(&handle, user("first question")).unwrap();
+        append(chunk(
+            json!({ "type": "text-delta", "text": "let me look" }),
+        ));
+        append(chunk(
+            json!({ "type": "tool-call", "id": "c1", "name": "bash", "arguments": "{}" }),
+        ));
+        append(chunk(
+            json!({ "type": "done", "finishReason": "tool_calls" }),
+        ));
+        store
+            .message(
+                &handle,
+                Message {
+                    role: Role::Tool,
+                    tool_call_id: Some("c1".to_string()),
+                    content: vec![crate::message::ContentPart::Text {
+                        text: "ok".to_string(),
+                    }],
+                    source: None,
+                },
+            )
+            .unwrap();
+        append(chunk(
+            json!({ "type": "text-delta", "text": "half an answ" }),
+        ));
+        append(
+            NewEvent::new("assistant/completed")
+                .field("text", "")
+                .field("finishReason", "error"),
+        );
+        append(NewEvent::new("turn/completed"));
+        append(note("user", "a summary of the earlier turns"));
+        append(NewEvent::new("message").field("message", json!({ "role": "user", "content": [] })));
+        store.message(&handle, user("second question")).unwrap();
+        append(chunk(json!({ "type": "text-delta", "text": "the answer" })));
+        append(chunk(json!({ "type": "done", "finishReason": "stop" })));
+
+        let events = store.read(&handle).unwrap();
+        let fresh = crate::surface::index_by_seq(events.as_slice());
+        let kept = store.indexed(&handle).unwrap();
+        for event in events.iter() {
+            assert_eq!(
+                kept.event(event.seq).map(|found| found.to_line()),
+                fresh.event(event.seq).map(|found| found.to_line())
+            );
+            assert_eq!(
+                derive_message(&kept, event.seq),
+                derive_message(&fresh, event.seq)
+            );
+        }
+        assert!(kept.event(events.len() as u64).is_none());
+        let users = store.user_input_seqs(&handle).unwrap();
+        assert_eq!(users, users_node_by_node(&store, &handle));
+        let texts: Vec<String> = users
+            .iter()
+            .map(|seq| derive_message(&kept, *seq).unwrap().content[0].clone())
+            .map(|part| match part {
+                crate::message::ContentPart::Text { text } => text,
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                "first question",
+                "a summary of the earlier turns",
+                "second question"
+            ],
+            "the user positions: two prompts and the summary note, not the empty message"
+        );
+    }
+
+    /// A log that holds a seq twice (no writer here writes one) is read as `index_by_seq` reads it: the later event
+    /// wins the seq.
+    #[test]
+    fn the_kept_index_lets_the_later_of_two_events_with_one_seq_win_as_a_fresh_index_does() {
+        let (dir, _) = store();
+        let root = dir.path().to_str().unwrap().to_string();
+        let writer = SessionStore::new(&root, &Env::default());
+        let handle = writer
+            .create(CreateOptions {
+                cwd: Some("/home/me/work".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        writer.release(&handle);
+        let mut bytes = Vec::new();
+        for (seq, text) in [
+            (1, "the first one"),
+            (1, "the later one"),
+            (2, "the next one"),
+        ] {
+            let event = SessionEvent {
+                seq,
+                at: "2026-11-01T00:00:00.000Z".to_string(),
+                kind: "message".to_string(),
+                fields: json!({ "message": { "role": "user", "content": [{ "type": "text", "text": text }] } })
+                    .as_object()
+                    .cloned()
+                    .unwrap(),
+            };
+            bytes.extend(encode_frame(&format!("{}\n", event.to_line())));
+        }
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&handle.transcript)
+            .unwrap()
+            .write_all(&bytes)
+            .unwrap();
+        let store = SessionStore::new(&root, &Env::default());
+        let handle = store.open(&handle.id).unwrap();
+        let events = store.read(&handle).unwrap();
+        let fresh = crate::surface::index_by_seq(events.as_slice());
+        let kept = store.indexed(&handle).unwrap();
+        assert_eq!(
+            kept.event(1).map(|event| event.to_line()),
+            fresh.event(1).map(|event| event.to_line())
+        );
+        assert_eq!(
+            store.derive_node(&handle, 1).unwrap(),
+            crate::surface::derive_node_message(events.as_slice(), 1)
+        );
+        assert_eq!(
+            store.user_input_seqs(&handle).unwrap(),
+            users_node_by_node(&store, &handle)
         );
     }
 }

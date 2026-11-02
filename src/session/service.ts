@@ -380,6 +380,14 @@ export class SessionService extends Service {
   }
 
   /**
+   * The surface positions that hold a user message, which is what "new input" means to a running turn: the positions
+   * whose {@link node} is a user's, read from each position's own event with one index (#159).
+   */
+  userInputSeqs(handle: SessionHandle): ReadonlySet<number> {
+    return this.store.userInputSeqs(handle)
+  }
+
+  /**
    * What has already happened, for a caller that wants to show it.
    *
    * A session no live writer holds reads **balanced**: a turn its writer left unfinished is followed by the closers the

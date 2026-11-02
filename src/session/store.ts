@@ -877,6 +877,20 @@ export class SessionStore {
   private readonly surfaceCache = new Map<string, { readonly count: number; readonly state: SurfaceState }>()
 
   /**
+   * Each loaded log's index by seq ({@link bySeq}), keyed by the fold's own event array and extended as the log grows.
+   *
+   * Issue #159: a turn's steering check derived every surface node, and each derivation indexed the **whole log** again,
+   * so one check cost (surface nodes) × (log events), up to three times a step: about 2.4 s a step at 300 short turns,
+   * with the TS server's event loop held throughout. A log only grows by appending to that array, and dropping the fold
+   * (`claim`) gives the session a new array, so an index kept per array and extended by what was appended answers what
+   * `indexBySeq(read(handle))` answers, built once per load.
+   */
+  private readonly seqIndexes = new WeakMap<readonly SessionEvent[], { readonly bySeq: Map<number, SessionEvent>; indexed: number }>()
+
+  /** How many times a log was indexed from its first event, for a check that a step indexes none (#159). */
+  private seqIndexBuildCount = 0
+
+  /**
    * The automatic titles of this store's sessions (`./title.ts`, DSH's first-prompt title). Idle until a model is
    * attached, which the session plugin does; it lives on the store so every service over this store shares one record
    * of which call may still land.
@@ -1676,10 +1690,11 @@ export class SessionStore {
      * endpoints *is* the validation; there is no hole to check for, because the slice defines the
      * span rather than assuming it.
      */
-    const events = this.read(handle)
+    /** One index for every node the span shadows (#159): a compaction's span is most of the surface. */
+    const bySeq = this.bySeq(handle)
     const replacement = isSurfaceEligible(event.type) ? (event.message as Message | undefined) : undefined
     const head = shadowedSeqs[0]
-    const headMessage = head === undefined ? null : deriveNodeMessage(events, head)
+    const headMessage = head === undefined ? null : deriveMessage(bySeq, head)
     if (startIdx === 0 && headMessage?.role === 'system') {
       if (replacement?.role !== 'system' || shadowedSeqs.length !== 1) {
         throw new Error(
@@ -1688,7 +1703,7 @@ export class SessionStore {
       }
     }
     for (const seq of shadowedSeqs) {
-      const original = deriveNodeMessage(events, seq)
+      const original = deriveMessage(bySeq, seq)
       if (original?.role !== 'tool') continue
       /**
        * A tool result may only be rewritten by a tool result for the same call — and only over
@@ -1747,9 +1762,55 @@ export class SessionStore {
     return state
   }
 
+  /**
+   * The log indexed by seq: what `indexBySeq(read(handle))` answers, without indexing the whole log on every call (#159).
+   *
+   * Kept per loaded log and extended by the events appended since the last call, so a caller that derives node after
+   * node pays for the index once per load rather than once per node. The map is the store's own and grows with the
+   * log; a caller must not change it.
+   */
+  bySeq(handle: SessionHandle): ReadonlyMap<number, SessionEvent> {
+    const events = this.read(handle)
+    let index = this.seqIndexes.get(events)
+    if (index === undefined) {
+      index = { bySeq: new Map(), indexed: 0 }
+      this.seqIndexes.set(events, index)
+      this.seqIndexBuildCount += 1
+    }
+    /** Later events win a seq, as `indexBySeq` lets them. */
+    for (; index.indexed < events.length; index.indexed += 1) {
+      const event = events[index.indexed]!
+      index.bySeq.set(event.seq, event)
+    }
+    return index.bySeq
+  }
+
+  /** How many times this store has indexed a log from its first event ({@link bySeq}); a step should add none (#159). */
+  get seqIndexBuilds(): number {
+    return this.seqIndexBuildCount
+  }
+
   /** One node's message, or null when the node produces none. */
   deriveNode(handle: SessionHandle, seq: number): Message | null {
-    return deriveNodeMessage(this.read(handle), seq)
+    return deriveMessage(this.bySeq(handle), seq)
+  }
+
+  /**
+   * The surface positions that hold a user message: what "new input" means to a running turn (the steering check in
+   * `src/agent/loop.ts`), and the positions where `deriveNode(handle, seq)?.role === 'user'`.
+   *
+   * Read from each position's own event (#159): a user message is a `message` or `context/note` event, while a chunk run
+   * derives to an assistant message or to nothing, so no run is assembled to answer it, and the index is the one
+   * {@link bySeq} keeps. The check used to derive every node, indexing the whole log for each.
+   */
+  userInputSeqs(handle: SessionHandle): ReadonlySet<number> {
+    const bySeq = this.bySeq(handle)
+    const held = new Set<number>()
+    for (const seq of this.surface(handle).nodes) {
+      const type = bySeq.get(seq)?.type
+      if ((type === 'message' || type === 'context/note') && deriveMessage(bySeq, seq)?.role === 'user') held.add(seq)
+    }
+    return held
   }
 
   /**
@@ -1759,8 +1820,7 @@ export class SessionStore {
    * shows up here and nowhere else, while `read()` still returns everything that ever happened.
    */
   deriveMessages(handle: SessionHandle): readonly RecordedMessage[] {
-    const events = this.read(handle)
-    const bySeq = indexBySeq(events)
+    const bySeq = this.bySeq(handle)
     const messages: RecordedMessage[] = []
     for (const seq of this.surface(handle).nodes) {
       const message = deriveMessage(bySeq, seq)

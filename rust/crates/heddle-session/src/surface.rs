@@ -242,6 +242,66 @@ pub fn index_by_seq<E: Borrow<SessionEvent>>(events: &[E]) -> HashMap<u64, &Sess
     by_seq
 }
 
+/// A log read by seq, which [`derive_message`] reads its events through: the map [`index_by_seq`] builds, or a
+/// store's kept index ([`IndexedEvents`]).
+pub trait SeqLookup {
+    /// The event the log holds at `seq`.
+    fn event(&self, seq: u64) -> Option<&SessionEvent>;
+}
+
+impl<S: std::hash::BuildHasher> SeqLookup for HashMap<u64, &SessionEvent, S> {
+    fn event(&self, seq: u64) -> Option<&SessionEvent> {
+        self.get(&seq).copied()
+    }
+}
+
+/// A snapshot of one session's log with the store's index of it by seq (issue #159).
+///
+/// The store keeps the index beside its fold and extends it as the log grows ([`crate::SessionStore::indexed`]), so a
+/// caller that derives node after node reads one index instead of building a map of the whole log per node. It answers
+/// what [`index_by_seq`] over the same events answers: the last event written with a seq is the one found.
+#[derive(Clone)]
+pub struct IndexedEvents {
+    events: crate::event::Events,
+    positions: std::sync::Arc<HashMap<u64, usize>>,
+}
+
+impl IndexedEvents {
+    /// Index `events` from the start, for a caller with a log the store does not keep.
+    pub fn new(events: crate::event::Events) -> Self {
+        let mut positions = HashMap::with_capacity(events.len());
+        for (at, event) in events.iter().enumerate() {
+            positions.insert(event.seq, at);
+        }
+        Self {
+            events,
+            positions: std::sync::Arc::new(positions),
+        }
+    }
+
+    /// A snapshot over an index the store keeps; every position names an event of `events`.
+    pub(crate) fn kept(
+        events: crate::event::Events,
+        positions: std::sync::Arc<HashMap<u64, usize>>,
+    ) -> Self {
+        Self { events, positions }
+    }
+
+    /// The events, in log order.
+    pub fn events(&self) -> &crate::event::Events {
+        &self.events
+    }
+}
+
+impl SeqLookup for IndexedEvents {
+    fn event(&self, seq: u64) -> Option<&SessionEvent> {
+        self.positions
+            .get(&seq)
+            .and_then(|at| self.events.get(*at))
+            .map(|event| event.as_ref())
+    }
+}
+
 /// The message one node derives to, or `None` when it produces none.
 ///
 /// A `message` or `context/note` node is its `message` field, when that parses and has content. A chunk
@@ -270,8 +330,8 @@ pub fn index_by_seq<E: Borrow<SessionEvent>>(events: &[E]) -> HashMap<u64, &Sess
 ///
 /// A `message` field that does not parse as a [`Message`] derives to `None` (the TypeScript build passed
 /// such an object through unchecked; no writer produces one).
-pub fn derive_message(by_seq: &HashMap<u64, &SessionEvent>, seq: u64) -> Option<Message> {
-    let event = by_seq.get(&seq)?;
+pub fn derive_message<L: SeqLookup + ?Sized>(by_seq: &L, seq: u64) -> Option<Message> {
+    let event = by_seq.event(seq)?;
     if event.kind == "message" || event.kind == "context/note" {
         let message = serde_json::from_value::<Message>(event.get("message")?.clone()).ok()?;
         if message.content.is_empty() {
@@ -284,7 +344,7 @@ pub fn derive_message(by_seq: &HashMap<u64, &SessionEvent>, seq: u64) -> Option<
     }
     let mut content: Vec<ContentPart> = Vec::new();
     let mut index = seq;
-    while let Some(next) = by_seq.get(&index) {
+    while let Some(next) = by_seq.event(index) {
         if next.kind != "assistant/chunk" {
             // A message held for the step boundary, an inbox splice or any other note written while the model
             // streamed is not part of its step (#30): the step runs to its `done`, a new request or the turn's end.
