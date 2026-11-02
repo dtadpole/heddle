@@ -1,12 +1,12 @@
 ---
 title: Record commit
-version: 1.2.0
-description: Commits edits to the shared reflection record from a temporary worktree at a fresh origin/main, refusing a stale base and unioning append-only logs, so a record edit cannot silently drop another writer's entries; a commit a protected main refuses is parked on records/<seat>.
+version: 1.3.0
+description: Commits edits to the shared reflection record from a temporary worktree at a fresh origin/main, refusing a stale base and unioning append-only logs, so a record edit cannot silently drop another writer's entries; every commit is parked on records/<seat>, and main is pushed only with --main.
 grounded_in:
   - source: _projects_/heddle/_context_/team-operations/working-model.md, commit from a temporary worktree at a fresh origin/main and count a landing only after reading it back
   - source: _projects_/heddle/_context_/team-operations/decision-log.yaml D-012, never stash or override another session's work in the shared tree
 created: 2026-10-23T03:43:51Z
-modified: 2026-11-01T21:12:46Z
+modified: 2026-11-01T23:50:00Z
 ---
 
 # `record-commit`
@@ -43,12 +43,12 @@ node _tools_/record-commit/record-commit.mjs --repo ~/reflection \
 node --test _tools_/record-commit/_tests_/record/unit.test.mjs
 ```
 
-Last run 2026-11-01 13:21 PST, on main 6157062 with the protected-main park and the refusal reasons: 37 passed, 0 failed.
+Last run 2026-11-01 15:47 PST, on 6b53922d0 (main 6157062 plus the protected-main park) with parking as the default and only a record's own validator errors refusing it: 46 passed, 0 failed. A dry run against reflection main after the GHE convergence (35 errors on main) would park.
 
 ## Read next
 
-- [how-it-works.md](how-it-works.md) — why the tool exists, the seven steps of a run, push-race handling, and
-  parking on `records/<seat>` when main is protected.
+- [how-it-works.md](how-it-works.md) — why the tool exists, the seven steps of a run, parking on `records/<seat>`
+  (the default), and push-race handling under `--main`.
 - [every-file-or-none.md](every-file-or-none.md) — a run carries every given file or none.
 - [usage.md](usage.md) — the commit message, the options and the exit codes.
 - [test-coverage.md](test-coverage.md) — what the suite covers, and a dry run against the real record.

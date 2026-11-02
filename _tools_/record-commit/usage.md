@@ -1,9 +1,9 @@
 ---
 title: Using record-commit
 created: 2026-10-24T05:00:49Z
-modified: 2026-11-01T21:12:46Z
+modified: 2026-11-01T23:50:00Z
 level: L2
-version: 1.1.0
+version: 1.2.0
 description: The commit message convention, the options that matter, and the exit codes of record-commit.
 status: unverified
 grounded_in:
@@ -28,8 +28,10 @@ gate reads messages.
 - `--validator PATH` — a runnable frontmatter validator; the default is the tree's own
   `shared/_tools_/frontmatter-validator/validate-frontmatter.py`, run with a python that imports PyYAML
   (`--python` or `$PYTHON` overrides; otherwise the record repository's `.venv/bin/python`, then a `python3` with PyYAML, and the report names the one used and why, e.g. `python: /opt/homebrew/bin/python3 (no .venv; a python3 with PyYAML)`).
-- `--seat NAME` — the branch `records/NAME` a commit is parked on when main is protected; the default is this
-  session's TEAM.yaml key ([how-it-works.md](how-it-works.md#a-protected-main)).
+- `--seat NAME` — the branch `records/NAME` every commit is parked on; the default is this session's TEAM.yaml
+  key ([how-it-works.md](how-it-works.md#parking-the-default)).
+- `--main` — push `main` directly, parking only if main refuses as protected. Use it only when the owner has
+  opened main to direct pushes; without it, `main` is never pushed.
 - `--message-file FILE`, `--author "Name <email>"`, `--repo DIR`, `--remote`, `--branch`.
 
 `--file`, `--staged`, `--base`, `--append`, `--verbose` and `--retries` are explained with the steps in
@@ -39,7 +41,7 @@ gate reads messages.
 
 | Code | Meaning |
 |---|---|
-| `0` | committed, read back, live tree synced (or `--no-sync`); or, with main protected, parked and read back, the last line `parked on records/<seat> <sha>` |
-| `1` | refused before the commit: a stale base on the first attempt (the caller's own old edit), validator error, bad arguments; or main is protected and no seat is known |
+| `0` | parked and read back, the last line `parked on records/<seat> <sha>`; or, with `--main`, committed, read back, live tree synced (or `--no-sync`) |
+| `1` | refused before the commit: a stale base on the first attempt (the caller's own old edit), a validator error the record adds, bad arguments; or no seat is known to park on |
 | `2` | the record would not carry every given file — refused, nothing committed: a file unchanged, or a file another writer changed while this run was pushing — or the pushed commit does not carry it as expected |
 | `3` | committed and read back, but the live tree was not fast-forwarded: the record is safe and the live tree is retried next pass |
