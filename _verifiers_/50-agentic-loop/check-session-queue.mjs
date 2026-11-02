@@ -145,21 +145,31 @@ async function harness(label) {
   const config = join(home, 'heddle.json')
   writeFileSync(config, `${JSON.stringify({ default: 'double', endpoints: [{ name: 'double', kind: 'openai-chat', baseUrl: provider.baseUrl, model: 'double-model', apiKey: 'a-test-key' }] }, null, 2)}\n`)
   const root = join(home, 'sessions')
-  const server = await startCli(
-    ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--endpoint', 'double', '--session-root', root],
-    { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
-  )
-  const cookie = await cookieFor(server.url)
+  const launch = () =>
+    startCli(['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--endpoint', 'double', '--session-root', root], {
+      HEDDLE_HOME: home,
+      HEDDLE_CONFIG: config,
+    })
+  let server = await launch()
+  let cookie = await cookieFor(server.url)
   await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: work }) })
-  const post = (path, body) => api(server.url, cookie, path, { method: 'POST', body: JSON.stringify(body) })
   return {
     provider,
-    server,
+    get server() {
+      return server
+    },
     work,
     root,
-    post,
+    post: (path, body) => api(server.url, cookie, path, { method: 'POST', body: JSON.stringify(body) }),
     get: (path) => api(server.url, cookie, path),
     log: (session) => readTranscript(join(root, session)),
+    /** Kill the server mid-turn and start it again on the same home, as a crash and a restart do. */
+    restart: async () => {
+      server.kill('SIGKILL')
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 300))
+      server = await launch()
+      cookie = await cookieFor(server.url)
+    },
     close: () => {
       server.kill()
       provider.close()
@@ -298,6 +308,58 @@ test('#162: Steer moves a queued row into the running turn in one step, and is r
     await until(() => h.log(session).filter((event) => event.type === 'turn/completed').length >= 2, 10_000, 'the idle send to run')
     const refused = await h.post(`/api/sessions/${session}/queue/steer`, { id: idle.body.id ?? 'inbox-none' })
     assert.equal(refused.status, 409, JSON.stringify(refused.body))
+  } finally {
+    h.close()
+  }
+})
+
+test('#162: a queued send counts no turn, and a drained turn is a running turn the steer route steers into', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  const h = await harness('session-queue-running')
+  try {
+    const first = await h.post('/api/turn', { prompt: 'HOLD the first turn', folder: h.work, new: true, detach: true })
+    const session = first.body.session
+    await until(() => h.provider.held() === 1, 10_000, 'the first turn to reach the model')
+    const queued = await h.post('/api/turn', { session, prompt: 'HOLD the drained turn', queue: true, requestId: 'request-drained', detach: true })
+    assert.equal(queued.body.queued, true, JSON.stringify(queued.body))
+    h.provider.release()
+    await until(() => h.provider.held() === 1 && userTexts(h.log(session)).includes('HOLD the drained turn'), 10_000, 'the drained turn to reach the model')
+    const listed = async () => ((await h.get('/api/sessions')).body.sessions ?? (await h.get('/api/sessions')).body).find?.((entry) => entry.id === session)
+    assert.equal((await listed())?.running, true, 'the drained turn reads as running')
+    const steer = await h.post(`/api/sessions/${session}/steer`, { prompt: 'STEER-INTO-DRAINED' })
+    assert.equal(steer.status, 200, `the steer route steers into the drained turn\n${JSON.stringify(steer.body)}`)
+    h.provider.release()
+    await until(() => userTexts(h.log(session)).includes('STEER-INTO-DRAINED') && h.log(session).filter((event) => event.type === 'turn/completed').length >= 2, 20_000, 'the steer to land')
+    assert.equal(h.log(session).filter((event) => event.type === 'turn/completed').length, 2, 'the steer landed in the drained turn')
+    await until(async () => (await listed())?.running === false, 5_000, 'the session to read as idle again')
+  } finally {
+    h.close()
+  }
+})
+
+test('#162: a crash during a drained turn leaves one interrupted turn, and the next row still queued, then run once', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  const h = await harness('session-queue-restart')
+  try {
+    const first = await h.post('/api/turn', { prompt: 'ready', folder: h.work, new: true, detach: true })
+    const session = first.body.session
+    await until(() => h.log(session).some((event) => event.type === 'turn/completed'), 10_000, 'the first turn')
+    const hold = await h.post('/api/turn', { session, prompt: 'HOLD the first queued', detach: true })
+    assert.equal(hold.status, 202)
+    await until(() => h.provider.held() === 1, 10_000, 'the held turn')
+    await h.post('/api/turn', { session, prompt: 'HOLD the claimed row', queue: true, requestId: 'request-claimed', detach: true })
+    await h.post('/api/turn', { session, prompt: 'QUEUED-SECOND', queue: true, requestId: 'request-second', detach: true })
+    h.provider.release()
+    await until(() => h.provider.held() === 1 && userTexts(h.log(session)).includes('HOLD the claimed row'), 10_000, 'the claimed row to be running')
+    await h.restart()
+    const after = h.log(session)
+    assert.equal(userTexts(after).filter((text) => text === 'HOLD the claimed row').length, 1, 'the claimed row is one user message: the claim and the message were one write')
+    const listed = await h.get(`/api/sessions/${session}/queue`)
+    assert.deepEqual(listed.body.items.map((item) => item.text), ['QUEUED-SECOND'], 'the next row is still queued after the restart')
+    await until(() => userTexts(h.log(session)).includes('QUEUED-SECOND') && h.log(session).at(-1)?.type === 'turn/completed', 20_000, 'the next row to run')
+    const closers = h.log(session).filter((event) => event.type === 'turn/completed' && event.reason?.kind === 'interrupted')
+    assert.equal(closers.length, 1, `exactly one interrupted turn\n${JSON.stringify(h.log(session).filter((event) => event.type === 'turn/completed'))}`)
+    assert.equal(userTexts(h.log(session)).filter((text) => text === 'QUEUED-SECOND').length, 1, 'the next row ran once')
   } finally {
     h.close()
   }
