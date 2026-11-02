@@ -96,7 +96,29 @@ pub trait DeliveryHost: Send + Sync {
         let _ = session_id;
         None
     }
+    /// Take the session's next place in its turn queue: behind the turn in flight, ahead of any turn queued after
+    /// (a goal round's next one). Resolves, once the place is the session's, with a guard that holds it. `None` when
+    /// the host has no queue (issue #256; DSH's round driver runs a waiting followup before another round).
+    fn reserve_next(&self, session_id: &str) -> Option<BoxFuture<'static, Reservation>> {
+        let _ = session_id;
+        None
+    }
+    /// [`DeliveryHost::start_turn`] in the place a reservation holds: the turn is started there, and the place passes
+    /// on once it is live. The default drops the reservation and starts the turn as usual.
+    fn start_turn_reserved(
+        &self,
+        session_id: &str,
+        text: &str,
+        source: Value,
+        reservation: Reservation,
+    ) -> BoxFuture<'static, Result<(), String>> {
+        drop(reservation);
+        self.start_turn(session_id, text, source)
+    }
 }
+
+/// A held place in a session's turn queue ([`DeliveryHost::reserve_next`]); dropping it gives the place up.
+pub type Reservation = Box<dyn std::any::Any + Send>;
 
 /// An armed timer.
 pub type TimerId = u64;
@@ -178,6 +200,8 @@ struct DriverState {
     stopping: bool,
     /// Sessions whose due reminders wait for the turn in flight to end.
     waiting: HashSet<String>,
+    /// Places a waiting session's reminders hold in its turn queue, taken while the turn ran (#256).
+    reservations: HashMap<String, Reservation>,
 }
 
 /// What one group's delivery came to.
@@ -364,6 +388,7 @@ impl ScheduleDriver {
         let running = {
             let mut state = self.state();
             state.stopping = true;
+            state.reservations.clear();
             self.clear_timer_locked(&mut state);
             state.running.clone()
         };
@@ -385,6 +410,9 @@ impl ScheduleDriver {
         let mut failed: HashSet<String> = HashSet::new();
         let mut deferred: HashSet<String> = HashSet::new();
         let mut handled: HashSet<String> = HashSet::new();
+        // Places held when this drive began: one its due reminders did not claim (deleted, say) is given up at the
+        // end, so the session's queue moves on. A place that arrives during the drive waits for the drive it asked for.
+        let held: Vec<String> = self.state().reservations.keys().cloned().collect();
         let scan_now = self.service.now();
         let due: Vec<ScheduleTask> = self
             .service
@@ -445,6 +473,12 @@ impl ScheduleDriver {
                 }
             }
         }
+        {
+            let mut state = self.state();
+            for session in &held {
+                state.reservations.remove(session);
+            }
+        }
         if self.stopping() {
             return;
         }
@@ -503,21 +537,33 @@ impl ScheduleDriver {
         self.host
             .resolve(session)
             .map_err(|error| format!("Error: {error}"))?;
-        if self.host.is_busy(session) {
-            // Heddle's followup: the reminder becomes the session's next turn, once the one in flight ends.
+        // A place this session's reminders took while its turn ran: the session is theirs now, though the place
+        // itself counts as busy (#256).
+        let reservation = self.state().reservations.remove(session);
+        if reservation.is_none() && self.host.is_busy(session) {
+            // Heddle's followup: the reminder becomes the session's next turn, once the one in flight ends. Where
+            // the host has a turn queue it takes its place there now, so a turn queued when this one ends (a goal
+            // round's next) comes after it, as DSH's round driver yields to a waiting followup (#256).
             let newly = self.state().waiting.insert(session.to_owned());
-            if newly
-                && let (Some(idle), Some(runtime)) =
-                    (self.host.when_idle(session), self.runtime.clone())
-            {
+            if newly && let Some(runtime) = self.runtime.clone() {
                 let me = self.me.clone();
-                let session = session.to_owned();
-                runtime.spawn(async move {
-                    idle.await;
-                    if let Some(driver) = me.upgrade() {
-                        driver.turn_ended(&session);
-                    }
-                });
+                let owned = session.to_owned();
+                if let Some(reserve) = self.host.reserve_next(session) {
+                    runtime.spawn(async move {
+                        let place = reserve.await;
+                        if let Some(driver) = me.upgrade() {
+                            driver.state().reservations.insert(owned.clone(), place);
+                            driver.turn_ended(&owned);
+                        }
+                    });
+                } else if let Some(idle) = self.host.when_idle(session) {
+                    runtime.spawn(async move {
+                        idle.await;
+                        if let Some(driver) = me.upgrade() {
+                            driver.turn_ended(&owned);
+                        }
+                    });
+                }
             }
             return Ok(GroupOutcome::Deferred);
         }
@@ -548,10 +594,13 @@ impl ScheduleDriver {
             render_reminder_framing(&task.record)
         };
         let cursor = self.host.cursor(session);
-        self.host
-            .start_turn(session, &text, schedule_source())
-            .await
-            .map_err(|error| format!("Error: {error}"))?;
+        let started = match reservation {
+            Some(place) => self
+                .host
+                .start_turn_reserved(session, &text, schedule_source(), place),
+            None => self.host.start_turn(session, &text, schedule_source()),
+        };
+        started.await.map_err(|error| format!("Error: {error}"))?;
         let message_id = self.host.find(session, cursor, &text).ok_or_else(|| {
             "Error: Session persistence did not acknowledge the reminder".to_owned()
         })?;
