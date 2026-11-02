@@ -1073,11 +1073,20 @@ async fn search_sessions(
         Ok(query) => query,
         Err(refusal) => return respond::error(StatusCode::BAD_REQUEST, refusal.message),
     };
-    match state.harness().sessions.search(&query) {
-        Ok(page) => respond::json(StatusCode::OK, &page),
-        Err(error) => respond::error(
+    // The first search after a start reads every session log (#257). It runs on the blocking pool, so no runtime
+    // worker waits on it and every other route, `/healthz` among them, keeps answering: run inline, a cold search over
+    // 400 sessions held the server's health probes for its whole 7-18 s.
+    let searched =
+        tokio::task::spawn_blocking(move || state.harness().sessions.search(&query)).await;
+    match searched {
+        Ok(Ok(page)) => respond::json(StatusCode::OK, &page),
+        Ok(Err(error)) => respond::error(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("session search failed: {}", error.message),
+        ),
+        Err(failed) => respond::error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("session search failed: {failed}"),
         ),
     }
 }
@@ -4452,6 +4461,136 @@ mod tests {
             body_text(&bytes),
             "{\n  \"sandbox\": {\n    \"mode\": \"workspace-write\"\n  },\n  \"cwd\": \"/work\"\n}\n"
         );
+    }
+
+    /// The test sessions with a content search as slow as a cold one over a large store (#257); every other call is
+    /// the fake's own.
+    struct SlowSearch(Sessions);
+
+    impl SessionService for SlowSearch {
+        fn list(&self) -> Vec<SessionMeta> {
+            self.0.list()
+        }
+        fn exists(&self, id: &str) -> bool {
+            self.0.exists(id)
+        }
+        fn events(&self, id: &str) -> Option<Vec<Value>> {
+            self.0.events(id)
+        }
+        fn start(&self, options: StartSession) -> Result<String, ServiceError> {
+            self.0.start(options)
+        }
+        fn open_at(&self, folder: &Path, options: OpenAt) -> Result<String, ServiceError> {
+            self.0.open_at(folder, options)
+        }
+        fn create_at(
+            &self,
+            branch: &Path,
+            title: Option<&str>,
+            preset: Option<&str>,
+        ) -> Result<CreatedSession, ServiceError> {
+            self.0.create_at(branch, title, preset)
+        }
+        fn fork(&self, id: &str, at_seq: Option<u64>) -> ForkOutcome {
+            self.0.fork(id, at_seq)
+        }
+        fn set_flags(
+            &self,
+            id: &str,
+            patch: FlagPatch,
+        ) -> Result<Option<SessionMeta>, ServiceError> {
+            self.0.set_flags(id, patch)
+        }
+        fn rename(&self, id: &str, title: &str) -> Option<SessionMeta> {
+            self.0.rename(id, title)
+        }
+        fn definition_id(&self, folder: &Path) -> Option<String> {
+            self.0.definition_id(folder)
+        }
+        fn update_definition_title(&self, folder: &Path, title: &str) -> Result<(), ServiceError> {
+            self.0.update_definition_title(folder, title)
+        }
+        fn set_model(&self, id: &str, selection: &SessionSelection) -> Option<SessionMeta> {
+            self.0.set_model(id, selection)
+        }
+        fn effective_mode(&self, id: &str, fallback: &str) -> String {
+            self.0.effective_mode(id, fallback)
+        }
+        fn set_mode(
+            &self,
+            id: &str,
+            mode: &str,
+            fallback: &str,
+        ) -> Result<ModeWrite, ServiceError> {
+            self.0.set_mode(id, mode, fallback)
+        }
+        fn user_content(&self, id: &str, content: Vec<Value>) -> Result<(), ServiceError> {
+            self.0.user_content(id, content)
+        }
+        fn folder(&self, id: &str) -> Option<PathBuf> {
+            self.0.folder(id)
+        }
+        fn search(&self, query: &str) -> Result<heddle_session::SessionSearchPage, ServiceError> {
+            std::thread::sleep(std::time::Duration::from_millis(1_500));
+            Ok(heddle_session::SessionSearchPage {
+                items: vec![heddle_session::SessionSearchHit {
+                    session_id: "session-00000000-0000-0000-0000-000000000001".into(),
+                    snippet: format!("found {query}"),
+                }],
+                has_more: false,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn health_answers_while_a_slow_content_search_runs() {
+        // #257: the first content search reads every log. Run inline in its handler, it held the runtime thread, and
+        // a cold search over 400 sessions left `/healthz` unanswered for all of its 7-18 s. On this test's one-thread
+        // runtime a search that blocks the thread delays `/healthz` by its whole 1.5 s.
+        let (router, _) = ServerBuilder::new(
+            Harness::new(
+                Arc::new(SlowSearch(Sessions::with_one())),
+                Arc::new(Models),
+                Arc::new(Turns),
+                Arc::new(Sandbox),
+                PathBuf::from("/work"),
+            ),
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("slow-search")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let started = std::time::Instant::now();
+        let search = tokio::spawn({
+            let router = router.clone();
+            async move {
+                call(
+                    &router,
+                    Method::GET,
+                    "/api/sessions/search?q=quokka",
+                    Some(&cookie),
+                )
+                .await
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let (status, _, _) = call(&router, Method::GET, "/healthz", None).await;
+        let waited = started.elapsed();
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            waited < std::time::Duration::from_millis(1_000),
+            "/healthz waited {waited:?} for the search"
+        );
+        let (status, _, bytes) = search.await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{}", body_text(&bytes));
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["items"][0]["snippet"], "found quokka", "{body}");
+        assert_eq!(body["hasMore"], false);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
