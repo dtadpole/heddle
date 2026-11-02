@@ -52,8 +52,11 @@ export interface ModelInfoEndpoint {
 /** What a model accepts: the two modalities the harness can deliver. */
 export type InputModality = 'text' | 'image'
 
-/** How long a model-list read may take before the answer simply stays `undefined`. */
-const DEFAULT_TIMEOUT_MS = 1500
+/**
+ * How long a model-list read may take. 5 s, up from 1.5 s (#178): a list that answered after 2.5 s used to count as no
+ * answer. A slow read no longer loses an image silently either way (see `inputOfModelList`), but an answer is better.
+ */
+const DEFAULT_TIMEOUT_MS = 5000
 
 /** What a read may be told: how long to wait, and which model to ask about when it is not the default. */
 export interface ModelInfoOptions {
@@ -148,10 +151,15 @@ async function readModelList(endpoint: ModelInfoEndpoint, timeoutMs: number): Pr
       ...(endpoint.proxy !== undefined ? { proxy: endpoint.proxy } : {}),
     })
     return 'json' in response ? response.json : undefined
-  } catch {
+  } catch (error) {
+    const key = cacheKey(endpoint)
+    if (key !== undefined) readFailures.set(key, error instanceof Error ? error.message : String(error))
     return undefined
   }
 }
+
+/** Why the last read of a list failed, by cache key, for `inputOfModelList` to say (#178). */
+const readFailures = new Map<string, string>()
 
 /** The is-a-record guard both parsers share. */
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -211,6 +219,27 @@ export function inputModalitiesFromModelList(
     if (body === undefined || model === undefined) return undefined
     return inputModalitiesOfRow(rowOf(body, endpoint.kind, model))
   })
+}
+
+/**
+ * What the provider's list says about one model's input (#178): the row's modalities (absent when the list answered
+ * but did not say, which callers read as text only, DSH's default), or `unread` with the reason when the list could not
+ * be read at all (a timeout, a refusal, an answer that was not JSON). An endpoint whose kind publishes no list answers
+ * nothing, which is not a failure. A failed read is never cached, so the next caller asks again.
+ */
+export async function inputOfModelList(
+  endpoint: ModelInfoEndpoint,
+  options: ModelInfoOptions = {},
+): Promise<{ readonly modalities?: readonly InputModality[]; readonly unread?: string }> {
+  const about: ModelInfoEndpoint = options.askAbout === undefined ? endpoint : { ...endpoint, askAbout: options.askAbout }
+  const key = cacheKey(about)
+  if (key === undefined) return {}
+  const body = await modelList(endpoint, options)
+  if (body === undefined) return { unread: readFailures.get(key) ?? 'the provider gave no model list' }
+  readFailures.delete(key)
+  const model = options.askAbout ?? askedAbout(endpoint)
+  const modalities = model === undefined ? undefined : inputModalitiesOfRow(rowOf(body, endpoint.kind, model))
+  return modalities === undefined ? {} : { modalities }
 }
 
 /**

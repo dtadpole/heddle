@@ -207,6 +207,12 @@ export function canonicalFinishReason(raw: string | null | undefined, toolCalls 
 /** One piece of a streamed answer. */
 export type Chunk =
   | { readonly type: 'text-delta'; readonly text: string }
+  /**
+   * A sentence for the person about this call, not part of the answer (#178): the model service says so when it held
+   * an image back because the model's provider list could not be read. The loop adds it to the turn's `ended` reasons,
+   * which the page draws with the turn and the log keeps; it is never recorded as answer content.
+   */
+  | { readonly type: 'notice'; readonly text: string }
   | { readonly type: 'reasoning-delta'; readonly text: string }
   /**
    * A fragment of a tool call **while the model is still writing it**, DSH's `tool-call-delta`.

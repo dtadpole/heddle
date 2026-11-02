@@ -824,6 +824,15 @@ async fn run_turn_body(
             while let Some(item) = stream.next().await {
                 match item {
                     Ok(chunk) => {
+                        // A notice from the model service is for the person, not the answer (#178): it joins
+                        // the turn's `ended` reasons, which the record keeps and the page draws with the turn,
+                        // and it is neither recorded as a chunk nor counted as a started answer.
+                        if let Chunk::Notice { text } = &chunk {
+                            if !ended.iter().any(|reason| reason == text) {
+                                ended.push(text.clone());
+                            }
+                            continue;
+                        }
                         // Recorded as it arrives: an interrupted turn shows the half of the answer that came.
                         runtime.session.assistant_chunk(session, &chunk)?;
                         if !matches!(chunk, Chunk::ToolCallDelta { .. }) {
@@ -846,7 +855,7 @@ async fn run_turn_body(
                                 call.name.clone(),
                                 call.arguments.clone(),
                             )),
-                            Chunk::ToolCallDelta { .. } => {}
+                            Chunk::ToolCallDelta { .. } | Chunk::Notice { .. } => {}
                             Chunk::Done {
                                 finish_reason: finished,
                                 usage: reported,

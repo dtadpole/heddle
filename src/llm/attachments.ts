@@ -67,6 +67,17 @@ export function fileHandleText(part: FilePart): string {
   )
 }
 
+/**
+ * The placeholder for an image held back because nothing declares the model's input and its provider list could not be
+ * read (#178). The model is told the truth: not "accepts text only", which nobody said, but that the image was not sent.
+ */
+export function unreadImageText(part: ImagePart): string {
+  return `[image not sent: this model's image support could not be read from the provider; attachment sha256:${shortDigest(part.sha256)}]`
+}
+
+/** The turn's notice when an image was held back that way (#178), drawn with the turn as its `ended` reasons are. */
+export const UNREAD_IMAGE_NOTICE = "image not sent: the model's image support could not be read from the provider, so the model was told the image was withheld"
+
 /** DSH's model-facing placeholder for an image a text-only route cannot accept. */
 export function textOnlyImageText(part: ImagePart): string {
   return `[image omitted because this model accepts text only; attachment sha256:${shortDigest(part.sha256)}]`
@@ -115,10 +126,11 @@ function materializeImage(part: ImagePart): ImagePart | { readonly type: 'text';
 }
 
 /** Project one content part for the provider boundary. */
-function projectPart(part: ContentPart, endpoint: EndpointConfig): ContentPart {
+function projectPart(part: ContentPart, endpoint: EndpointConfig, unread: boolean): ContentPart {
   if (part.type === 'file') return { type: 'text', text: fileHandleText(part) }
   if (part.type === 'image' && part.data === undefined) {
-    return acceptsImages(endpoint) ? materializeImage(part) : { type: 'text', text: textOnlyImageText(part) }
+    if (acceptsImages(endpoint)) return materializeImage(part)
+    return { type: 'text', text: unread ? unreadImageText(part) : textOnlyImageText(part) }
   }
   return part
 }
@@ -133,11 +145,13 @@ export function projectAttachments(
   messages: readonly Message[],
   endpoint: EndpointConfig,
   limits: ImageRequestLimits = IMAGE_REQUEST_LIMITS,
+  /** The endpoint's list could not be read and nothing declares the model (#178): held-back images say so truthfully. */
+  unread = false,
 ): readonly Message[] {
   let changed = false
   const projected = messages.map((message) => {
     const content = message.content.map((part) => {
-      const next = projectPart(part, endpoint)
+      const next = projectPart(part, endpoint, unread)
       if (next !== part) changed = true
       return next
     })

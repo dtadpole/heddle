@@ -31,7 +31,9 @@ use serde::Serialize;
 use crate::adapter::{Adapter, ChunkStream};
 use heddle_config::EndpointConfig;
 
-use crate::attachments::{IMAGE_REQUEST_LIMITS, project_attachments};
+use crate::attachments::{
+    IMAGE_REQUEST_LIMITS, UNREAD_IMAGE_NOTICE, accepts_images, project_attachments_with,
+};
 use crate::error::ModelError;
 use crate::model_info::{InputModality, ModelInfoOptions, ModelListCache};
 use crate::types::{
@@ -446,6 +448,7 @@ impl ModelService {
                     .iter()
                     .any(|part| matches!(part, ContentPart::Image(_)))
             });
+            let mut unread = false;
             let endpoint = if carries_image {
                 // A declaration wins and asks nothing (#178): the model's own `inputModalities`, else the
                 // endpoint's, so an image never waits on, or is lost to, a slow provider list.
@@ -463,13 +466,13 @@ impl ModelService {
                     }
                     _ => resolved.endpoint(),
                 };
-                let discovered = if configured.input_modalities.is_some()
+                let answer = if configured.input_modalities.is_some()
                     || matches!(configured.kind, heddle_config::EndpointKind::Scripted)
                 {
-                    None
+                    crate::model_info::ModelInput::default()
                 } else {
                     model_lists
-                        .input_modalities(
+                        .input_of(
                             configured,
                             &ModelInfoOptions {
                                 ask_about: base.model.clone(),
@@ -478,15 +481,45 @@ impl ModelService {
                         )
                         .await
                 };
-                with_discovered_modalities(configured, discovered.as_deref())
+                if let Some(reason) = &answer.unread {
+                    // The read that explains a held-back image (#178).
+                    tracing::warn!(
+                        endpoint = %configured.name,
+                        model = base.model.as_deref().or(configured.model.as_deref()).unwrap_or("(default)"),
+                        reason = %reason,
+                        "model: the model list could not be read; its images are held back"
+                    );
+                }
+                let discovered = with_discovered_modalities(configured, answer.modalities.as_deref());
+                unread = answer.unread.is_some() && !accepts_images(&discovered);
+                discovered
             } else {
                 resolved.endpoint().clone()
             };
             let sendable = GenerateRequest {
-                messages: project_attachments(&base.messages, &endpoint, IMAGE_REQUEST_LIMITS),
+                messages: project_attachments_with(
+                    &base.messages,
+                    &endpoint,
+                    IMAGE_REQUEST_LIMITS,
+                    unread,
+                ),
                 ..base
             };
-            stream_through_hooks(&hooks, &sendable, resolved, sendable.clone())
+            // An image held back for an unread list is said to the person too (#178): a notice ahead of the answer,
+            // which the loop keeps with the turn.
+            let lead: Vec<Result<Chunk, ModelError>> = if unread {
+                vec![Ok(Chunk::Notice {
+                    text: UNREAD_IMAGE_NOTICE.to_string(),
+                })]
+            } else {
+                Vec::new()
+            };
+            futures::stream::iter(lead).chain(stream_through_hooks(
+                &hooks,
+                &sendable,
+                resolved,
+                sendable.clone(),
+            ))
         })
         .flatten();
         Ok(Box::pin(lazy))
@@ -508,6 +541,8 @@ impl ModelService {
                 Chunk::ToolCall(call) => generated.tool_calls.push(call),
                 // A live fragment of a call that arrives whole above; it is not the finish.
                 Chunk::ToolCallDelta { .. } => {}
+                // A sentence for the person, not the answer (#178).
+                Chunk::Notice { .. } => {}
                 Chunk::Done { finish_reason, .. } => generated.finish_reason = finish_reason,
             }
         }

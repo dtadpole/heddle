@@ -67,7 +67,7 @@ function imageMessage(path: string) {
   }]
 }
 
-test('a failed discovery is retried on the next image turn rather than cached as text only', async () => {
+test('a failed discovery holds the image back truthfully, says so in a notice, and is retried on the next image turn (#178)', async () => {
   resetModelInfoCache()
   const dir = mkdtempSync(join(tmpdir(), 'heddle-discovery-'))
   const path = join(dir, 'shot.png')
@@ -76,9 +76,13 @@ test('a failed discovery is retried on the next image turn rather than cached as
   const ctx = new Context()
   try {
     const service = new ModelService(ctx, [{ name: 'flaky', kind: 'openai-chat', baseUrl: provider.baseUrl, model: 'm' }])
-    /** The first read fails, so the first turn falls back to the text placeholder. */
-    await service.generate({ endpoint: 'flaky', messages: imageMessage(path) })
-    assert.match(provider.completions[0] ?? '', /accepts text only/, 'the failed read degrades the first turn to text')
+    /** The first read fails: the image is held back, and the model is told why rather than a false "text only". */
+    const chunks: { type: string; text?: string }[] = []
+    for await (const chunk of service.stream({ endpoint: 'flaky', messages: imageMessage(path) })) chunks.push(chunk)
+    assert.match(provider.completions[0] ?? '', /\[image not sent: this model's image support could not be read from the provider; attachment sha256:abababab\]/)
+    assert.doesNotMatch(provider.completions[0] ?? '', /accepts text only|"type":"image_url"/)
+    assert.equal(chunks[0]?.type, 'notice', 'and the person is told, before the answer')
+    assert.match(chunks[0]?.text ?? '', /image not sent/)
     /** The second turn asks again, gets the answer, and sends the image. */
     await service.generate({ endpoint: 'flaky', messages: imageMessage(path) })
     assert.match(provider.completions[1] ?? '', /"type":"image_url"/, 'the retried read delivers image content')
@@ -114,6 +118,26 @@ test('a model that declares its own input is believed without a list read: one e
     await service.generate({ endpoint: 'mixed', model: 'txt', messages: imageMessage(path) })
     assert.match(provider.completions[1] ?? '', /accepts text only/, 'the text model gets the placeholder, as declared')
     assert.equal(provider.modelHits(), 0, 'and neither asked the provider')
+  } finally {
+    await ctx.fiber.dispose()
+    await provider.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a list that answers text only gets DSH\'s placeholder, and no notice (#178)', async () => {
+  resetModelInfoCache()
+  const dir = mkdtempSync(join(tmpdir(), 'heddle-discovery-'))
+  const path = join(dir, 'shot.png')
+  writeFileSync(path, Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+  const provider = await flakyProvider({ data: [{ id: 'm', input_modalities: ['text'] }] }, 0)
+  const ctx = new Context()
+  try {
+    const service = new ModelService(ctx, [{ name: 'plain', kind: 'openai-chat', baseUrl: provider.baseUrl, model: 'm' }])
+    const chunks: { type: string }[] = []
+    for await (const chunk of service.stream({ endpoint: 'plain', messages: imageMessage(path) })) chunks.push(chunk)
+    assert.match(provider.completions[0] ?? '', /accepts text only/)
+    assert.ok(!chunks.some((chunk) => chunk.type === 'notice'), 'a known text-only model is no surprise to report')
   } finally {
     await ctx.fiber.dispose()
     await provider.close()

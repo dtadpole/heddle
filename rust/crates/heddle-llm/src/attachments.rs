@@ -67,6 +67,19 @@ pub fn file_handle_text(part: &FilePart) -> String {
     )
 }
 
+/// The placeholder for an image held back because nothing declares the model's input and its provider list could
+/// not be read (`unreadImageText`, #178): the model is told the image was not sent, not a false "accepts text only".
+pub fn unread_image_text(part: &ImagePart) -> String {
+    format!(
+        "[image not sent: this model's image support could not be read from the provider; attachment sha256:{}]",
+        short_digest(&part.sha256)
+    )
+}
+
+/// The turn's notice when an image was held back that way (`UNREAD_IMAGE_NOTICE`, #178), kept with the turn's
+/// `ended` reasons.
+pub const UNREAD_IMAGE_NOTICE: &str = "image not sent: the model's image support could not be read from the provider, so the model was told the image was withheld";
+
 /// The placeholder for an image a text-only route cannot accept (`textOnlyImageText`).
 pub fn text_only_image_text(part: &ImagePart) -> String {
     format!(
@@ -122,7 +135,7 @@ fn materialize_image(part: &ImagePart) -> ContentPart {
 }
 
 /// Project one content part for the provider boundary.
-fn project_part(part: &ContentPart, images_accepted: bool) -> ContentPart {
+fn project_part(part: &ContentPart, images_accepted: bool, unread: bool) -> ContentPart {
     match part {
         ContentPart::File(file) => ContentPart::Text {
             text: file_handle_text(file),
@@ -130,6 +143,10 @@ fn project_part(part: &ContentPart, images_accepted: bool) -> ContentPart {
         ContentPart::Image(image) if image.data.is_none() => {
             if images_accepted {
                 materialize_image(image)
+            } else if unread {
+                ContentPart::Text {
+                    text: unread_image_text(image),
+                }
             } else {
                 ContentPart::Text {
                     text: text_only_image_text(image),
@@ -147,6 +164,17 @@ pub fn project_attachments(
     endpoint: &EndpointConfig,
     limits: ImageRequestLimits,
 ) -> Vec<Message> {
+    project_attachments_with(messages, endpoint, limits, false)
+}
+
+/// [`project_attachments`], told whether the endpoint's list could not be read for a model nothing declares (#178):
+/// then a held-back image says so truthfully.
+pub fn project_attachments_with(
+    messages: &[Message],
+    endpoint: &EndpointConfig,
+    limits: ImageRequestLimits,
+    unread: bool,
+) -> Vec<Message> {
     let images_accepted = accepts_images(endpoint);
     let mut projected: Vec<Message> = messages
         .iter()
@@ -156,7 +184,7 @@ pub fn project_attachments(
             content: message
                 .content
                 .iter()
-                .map(|part| project_part(part, images_accepted))
+                .map(|part| project_part(part, images_accepted, unread))
                 .collect(),
             source: message.source.clone(),
         })
@@ -337,6 +365,25 @@ mod tests {
                 &DIGEST[..8]
             )
         );
+    }
+
+    /// #178: an image held back because the model's list could not be read says so truthfully, not "text only".
+    #[test]
+    fn an_unread_list_holds_the_image_back_with_a_truthful_placeholder() {
+        with_image(&[0x89, 0x50, 0x4e, 0x47], |path| {
+            let messages = vec![message(vec![ContentPart::Image(image_part(path))])];
+            let unread =
+                project_attachments_with(&messages, &endpoint(None), IMAGE_REQUEST_LIMITS, true);
+            let ContentPart::Text { text } = &unread[0].content[0] else {
+                panic!("the image is held back as text");
+            };
+            assert!(text.starts_with("[image not sent: this model's image support could not be read from the provider; attachment sha256:"), "{text}");
+            let known = project_attachments(&messages, &endpoint(None), IMAGE_REQUEST_LIMITS);
+            let ContentPart::Text { text } = &known[0].content[0] else {
+                panic!("the image is the placeholder");
+            };
+            assert!(text.contains("accepts text only"), "{text}");
+        });
     }
 
     #[test]

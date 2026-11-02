@@ -3,8 +3,8 @@ import type { Context } from '@deepseek-ai/cordis'
 
 import { selectionProblem } from '../endpoints.ts'
 import { adapterFor } from './adapters.ts'
-import { projectAttachments } from './attachments.ts'
-import { inputModalitiesFromModelList, type InputModality } from './model-info.ts'
+import { acceptsImages, projectAttachments, UNREAD_IMAGE_NOTICE } from './attachments.ts'
+import { inputOfModelList, type InputModality } from './model-info.ts'
 import { inputModalitiesFor, ModelError, reasoningLevelsFor, requestMessages, textOf, type Adapter, type Chunk, type EndpointConfig, type GenerateRequest, type Message } from './types.ts'
 
 export * from './types.ts'
@@ -44,7 +44,7 @@ export class ModelService extends Service {
 
   private endpoints = new Map<string, Adapter>()
   /** One provider modality read per endpoint, shared by every request that carries an image. */
-  private readonly modalityLookups = new Map<string, Promise<EndpointConfig>>()
+  private readonly modalityLookups = new Map<string, Promise<{ readonly endpoint: EndpointConfig; readonly unread?: string }>>()
   /** The endpoint the configuration nominated, if any. */
   private nominated: string | undefined
   /**
@@ -112,15 +112,15 @@ export class ModelService extends Service {
    * The promise is cached per endpoint and model, and a failed read resolves to the configured endpoint, so a
    * provider outage degrades an image to the text placeholder rather than failing the turn.
    */
-  private endpointWithModalities(endpoint: EndpointConfig, model?: string): Promise<EndpointConfig> {
+  private endpointWithModalities(endpoint: EndpointConfig, model?: string): Promise<{ readonly endpoint: EndpointConfig; readonly unread?: string }> {
     /**
      * A declaration wins and asks nothing (#178): the model's own `inputModalities`, else the endpoint's. An image then
      * never waits on, or is lost to, a slow provider list; a route serving an image-capable model beside a text-only one
      * declares each.
      */
     const declared = inputModalitiesFor(endpoint, model)
-    if (declared !== undefined) return Promise.resolve(declared === endpoint.inputModalities ? endpoint : { ...endpoint, inputModalities: declared })
-    if (endpoint.kind === 'scripted') return Promise.resolve(endpoint)
+    if (declared !== undefined) return Promise.resolve({ endpoint: declared === endpoint.inputModalities ? endpoint : { ...endpoint, inputModalities: declared } })
+    if (endpoint.kind === 'scripted') return Promise.resolve({ endpoint })
     /**
      * Cached per endpoint **and model**, because the answer is a fact about one model: a gateway can serve an
      * image-capable deployment beside a text-only one, and one cache entry for the endpoint would answer the
@@ -129,19 +129,24 @@ export class ModelService extends Service {
     const key = `${endpoint.name}\u0000${model ?? endpoint.model ?? ''}`
     const cached = this.modalityLookups.get(key)
     if (cached !== undefined) return cached
-    const pending = inputModalitiesFromModelList(endpoint, { ...(model !== undefined ? { askAbout: model } : {}) })
-      .then((modalities) => {
+    const pending = inputOfModelList(endpoint, { ...(model !== undefined ? { askAbout: model } : {}) })
+      .then((answer): { readonly endpoint: EndpointConfig; readonly unread?: string } => {
         /**
          * Only an answer is cached. A provider that failed to answer said nothing about its model, and holding
          * "said nothing" for the life of the process would turn one outage into a conversation that can never
          * send an image again; the next image-bearing request asks again.
          */
-        if (modalities === undefined) this.modalityLookups.delete(key)
-        return withDiscoveredModalities(endpoint, modalities)
+        if (answer.unread !== undefined) {
+          this.modalityLookups.delete(key)
+          /** The read that explains a held-back image (#178). */
+          this.ctx.logger.warn('model: the model list of %s could not be read for %s (%s); its images are held back', endpoint.name, model ?? endpoint.model ?? '(default)', answer.unread)
+          return { endpoint, unread: answer.unread }
+        }
+        return { endpoint: withDiscoveredModalities(endpoint, answer.modalities) }
       })
-      .catch(() => {
+      .catch((error: unknown) => {
         this.modalityLookups.delete(key)
-        return endpoint
+        return { endpoint, unread: error instanceof Error ? error.message : String(error) }
       })
     this.modalityLookups.set(key, pending)
     return pending
@@ -299,14 +304,18 @@ export class ModelService extends Service {
        * and a turn without an image never reads the model list for one.
        */
       const carriesImage = base.messages.some((message) => message.content.some((part) => part.type === 'image'))
-      const endpoint = carriesImage ? await self.endpointWithModalities(resolved.endpoint, base.model) : resolved.endpoint
+      const looked = carriesImage ? await self.endpointWithModalities(resolved.endpoint, base.model) : { endpoint: resolved.endpoint }
+      const endpoint = looked.endpoint
+      const unread = looked.unread !== undefined && !acceptsImages(endpoint)
+      /** An image held back for an unread list is said to the person too (#178), as a notice the loop keeps with the turn. */
+      if (unread) yield { type: 'notice' as const, text: UNREAD_IMAGE_NOTICE }
       /**
        * The attachment projection sits between the recorded request and the adapter: files become handles,
        * images become bytes only on a route that accepts image input, and every other route sees
        * deterministically-labelled text. It is applied after the `model/request` waterfall, so a listener
        * that rewrites the request still sees the content as the session recorded it.
        */
-      const sendable = { ...base, messages: projectAttachments(base.messages, endpoint) }
+      const sendable = { ...base, messages: projectAttachments(base.messages, endpoint, undefined, unread) }
       yield* self.ctx.waterfall('model/stream', sendable, () => resolved.stream(sendable, signal))
     })()
   }

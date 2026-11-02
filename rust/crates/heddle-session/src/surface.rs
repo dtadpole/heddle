@@ -315,6 +315,9 @@ pub fn derive_message(by_seq: &HashMap<u64, &SessionEvent>, seq: u64) -> Option<
             Some(Chunk::ToolCall(call)) => content.push(ContentPart::ToolCall(call)),
             Some(Chunk::Done { .. }) => break,
             Some(Chunk::ToolCallDelta { .. }) => {}
+            // A notice is for the person, never answer content (#178); the loop does not record one, and a log
+            // that holds one anyway derives nothing from it.
+            Some(Chunk::Notice { .. }) => {}
             // A chunk that does not parse is a chunk this build does not know; the run continues past it,
             // as the TypeScript build does when its `if` chain matches no branch.
             None => {}

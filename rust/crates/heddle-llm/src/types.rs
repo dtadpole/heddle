@@ -218,6 +218,11 @@ pub enum Chunk {
     },
     #[serde(rename = "tool-call")]
     ToolCall(ToolCall),
+    /// A sentence for the person about this call, not part of the answer (#178): the model service says so when it
+    /// held an image back because the model's provider list could not be read. The loop adds it to the turn's `ended`
+    /// reasons; it is never recorded as answer content. JSON: `{"type":"notice","text":…}`.
+    #[serde(rename = "notice")]
+    Notice { text: String },
     /// The end of one call: the loop's finish reason (see [`canonical_finish_reason`]) and the usage, if reported.
     #[serde(rename = "done", rename_all = "camelCase")]
     Done {

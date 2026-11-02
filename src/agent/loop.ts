@@ -639,6 +639,15 @@ async function runTurnBody(
 
       try {
         for await (const chunk of ctx.model.streamResolved(request, signal)) {
+          /**
+           * A notice from the model service is for the person, not part of the answer (#178): an image held back because
+           * the model's provider list could not be read. It joins the turn's `ended` reasons, which the record keeps and
+           * the page draws with the turn, live and after a reload; it is not recorded as a chunk and starts no answer.
+           */
+          if (chunk.type === 'notice') {
+            if (!ended.includes(chunk.text)) ended.push(chunk.text)
+            continue
+          }
           // Recorded as it arrives: the transcript of an interrupted turn should show
           // the half of the answer that arrived.
           ctx.session.store.assistantChunk(options.session, chunk)

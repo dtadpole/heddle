@@ -46,7 +46,7 @@ pub fn has_model_list(kind: &EndpointKind) -> bool {
 }
 
 /// How long a model-list read may take before the answer stays `None`.
-pub const DEFAULT_MODEL_INFO_TIMEOUT_MS: u64 = 1500;
+pub const DEFAULT_MODEL_INFO_TIMEOUT_MS: u64 = 5000;
 
 /// What a read may be told.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -93,6 +93,15 @@ pub struct ModelListCache {
     >,
 }
 
+/// What [`ModelListCache::input_of`] learned about one model's input (#178).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ModelInput {
+    /// The row's modalities; `None` when the list did not say (or publishes no list).
+    pub modalities: Option<Vec<InputModality>>,
+    /// Why the list could not be read, when it could not.
+    pub unread: Option<String>,
+}
+
 impl ModelListCache {
     pub fn new() -> Self {
         Self::default()
@@ -126,6 +135,33 @@ impl ModelListCache {
         let body = self.model_list(endpoint, options).await?;
         let model = asked_about(endpoint, options)?;
         input_modalities_of_row(row_of(&body, &endpoint.kind, &model)?)
+    }
+
+    /// What the provider's list says about one model's input (`inputOfModelList`, #178): the row's modalities
+    /// (`None` when the list answered but did not say, read as text only), or `unread` when the list could not be
+    /// read at all. An endpoint whose kind publishes no list answers nothing, which is not a failure. A failed read is
+    /// never cached.
+    pub async fn input_of(
+        &self,
+        endpoint: &EndpointConfig,
+        options: &ModelInfoOptions,
+    ) -> ModelInput {
+        if !has_model_list(&endpoint.kind) {
+            return ModelInput::default();
+        }
+        let Some(model) = asked_about(endpoint, options) else {
+            return ModelInput::default();
+        };
+        let Some(body) = self.model_list(endpoint, options).await else {
+            return ModelInput {
+                modalities: None,
+                unread: Some("the read failed or timed out".to_string()),
+            };
+        };
+        ModelInput {
+            modalities: row_of(&body, &endpoint.kind, &model).and_then(input_modalities_of_row),
+            unread: None,
+        }
     }
 
     /// Forget cached answers (`resetModelInfoCache`).
