@@ -335,8 +335,44 @@ export function keyDescription(key) {
   throw new Error(`press_key does not know the key '${key}'`)
 }
 
-/** Press one key, or a chord such as `Control+A`. */
-export async function pressKey(page, { key }) {
+/**
+ * The macOS chords that are editing commands, by modifiers and physical key.
+ *
+ * On a Mac the browser's menu, not the page, turns Command+V into a paste, and a key event sent over the
+ * protocol never reaches the menu: without the command, Meta+V reached the page as a bare keydown and
+ * pasted nothing. The protocol carries the command with the event instead, the way Playwright sends it.
+ * Elsewhere the page's own key bindings handle Control+V, so only macOS needs the table.
+ */
+const MAC_EDITING_COMMANDS = {
+  'Meta+KeyA': 'selectAll',
+  'Meta+KeyC': 'copy',
+  'Meta+KeyX': 'cut',
+  'Meta+KeyV': 'paste',
+  'Meta+KeyZ': 'undo',
+  'Shift+Meta+KeyZ': 'redo',
+}
+
+/** The commands that read or write the clipboard. */
+const CLIPBOARD_COMMANDS = new Set(['copy', 'cut', 'paste'])
+
+/** Why a visible browser does not get a clipboard command. */
+export const VISIBLE_CLIPBOARD_REASON =
+  "a visible browser shares the owner's macOS clipboard; a headless one has its own, so start it headless to judge copy and paste"
+
+/** The editing command a chord is on macOS, or `undefined`; only the exact modifiers count. */
+export function macEditingCommand(code, modifiers) {
+  const prefix = modifiers === MODIFIERS.Meta ? 'Meta+' : modifiers === (MODIFIERS.Meta | MODIFIERS.Shift) ? 'Shift+Meta+' : undefined
+  return prefix === undefined ? undefined : MAC_EDITING_COMMANDS[prefix + code]
+}
+
+/**
+ * The two protocol events for one key or chord, and the editing command they carry.
+ *
+ * A clipboard command goes only to a headless browser: its clipboard belongs to the browser process,
+ * while a visible one reads and writes the owner's, so a paste there could put private text on a page
+ * that a snapshot then records. The key events still go, so a page's own keydown handler sees the chord.
+ */
+export function keyEvents(key, { platform = process.platform, headless = false } = {}) {
   const { key: name, modifiers } = parseKey(key)
   const description = keyDescription(name)
   /** A chord is a command, not text: `Control+A` must not insert the letter `a`. */
@@ -348,15 +384,30 @@ export async function pressKey(page, { key }) {
     nativeVirtualKeyCode: description.keyCode,
     modifiers,
   }
+  const command = platform === 'darwin' ? macEditingCommand(description.code, modifiers) : undefined
+  const withheld = command !== undefined && CLIPBOARD_COMMANDS.has(command) && headless !== true
+  const down = {
+    type: text !== undefined ? 'keyDown' : 'rawKeyDown',
+    ...common,
+    ...(text !== undefined ? { text, unmodifiedText: text } : {}),
+    ...(command !== undefined && !withheld ? { commands: [command] } : {}),
+  }
+  return {
+    down,
+    up: { type: 'keyUp', ...common },
+    ...(command !== undefined ? (withheld ? { withheld: command } : { command }) : {}),
+  }
+}
+
+/** Press one key, or a chord such as `Control+A`; on macOS, `Meta+V` pastes. */
+export async function pressKey(page, { key }) {
+  const events = keyEvents(key, { headless: page.browser?.running?.headless === true })
   await actionSettle(page, async () => {
-    await page.send('Input.dispatchKeyEvent', {
-      type: text !== undefined ? 'keyDown' : 'rawKeyDown',
-      ...common,
-      ...(text !== undefined ? { text, unmodifiedText: text } : {}),
-    })
-    await page.send('Input.dispatchKeyEvent', { type: 'keyUp', ...common })
+    await page.send('Input.dispatchKeyEvent', events.down)
+    await page.send('Input.dispatchKeyEvent', events.up)
   })
-  return { pressed: key }
+  if (events.withheld !== undefined) return { pressed: key, withheld: events.withheld, reason: VISIBLE_CLIPBOARD_REASON }
+  return { pressed: key, ...(events.command !== undefined ? { command: events.command } : {}) }
 }
 
 /** Type text into whatever is focused. */

@@ -805,7 +805,8 @@ mod tests {
             json!({ "command": "echo out; echo err >&2" }),
         )
         .await;
-        assert_eq!(ok.output, "out\nerr\n");
+        // stderr under its own marker, as DSH's bash renders a run (live-testing issue #246).
+        assert_eq!(ok.output, "out\n[stderr]\nerr\n");
         assert!(ok.error.is_none(), "{ok:?}");
         assert_eq!(
             ok.data.as_ref().and_then(|data| data.get("exitCode")),

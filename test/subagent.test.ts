@@ -336,6 +336,25 @@ test('a child a previous process left mid-turn is closed in its log and reported
   assert.equal(notices.length, 1)
 })
 
+test('a child whose only open item is a /compact a restart cut is not reported to its parent as interrupted (#206)', async () => {
+  const { store, parent, notices, service } = reportSetup()
+  // Its turn ended; then a /compact was waiting on its summary when the process exited.
+  const child = store.create({ cwd: root, endpoint: 'scripted', model: 'm', parentSession: parent.id, origin: 'subagent', delegationDepth: 1 })
+  store.append(child, { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'the task' }] } })
+  store.append(child, { type: 'model/request', messages: 1 })
+  store.append(child, { type: 'assistant/completed', text: 'the answer' })
+  store.append(child, { type: 'turn/completed', rounds: 1 })
+  store.append(child, { type: 'command/run', commandId: 'cmd-1', name: 'compact', source: { kind: 'user' } })
+  store.append(child, { type: 'compaction/start', fromSeq: 1, throughSeq: 3, shadowedSeqs: [1, 2, 3] })
+  store.release(child)
+
+  assert.equal(service.reportInterrupted([parent, child]), 0, 'no turn was cut, so the parent has nothing to hear')
+  await service.settle(parent.id)
+  assert.equal(notices.length, 0)
+  assert.equal(store.read(child).at(-1)?.type, 'compaction/start', 'and the sweep leaves the log to the next write-open')
+  assert.equal(store.writerHeld(child), false)
+})
+
 test('the start report leaves teammates, old cuts, orphans and live writers alone, and a cut parent gets the notice without a turn', async () => {
   const { store, parent, notices, service } = reportSetup()
   const teammate = cutChild(store, parent, { teamId: parent.id })
