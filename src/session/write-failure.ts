@@ -1,5 +1,6 @@
 /**
- * A session store write that failed: a rename, pin, unpin, archive or unarchive the store could not save (issue #149).
+ * A session store write that failed: a creation, rename, pin, unpin, archive or unarchive the store could not save
+ * (issue #149).
  *
  * The store writes a session's record into its folder under the heddle home, and a full disk or a permission mistake
  * makes that write throw. The route used to let Node's error through as a `500 internal error: EACCES: permission
@@ -13,19 +14,27 @@
  * `500` with DSH's code and DSH's rename sentence for every verb. The reason is said in words and never with the path:
  * the store's folder names are the working folder spelled out, home directory included (#106, #130). The words and the
  * code are the Rust build's `SessionError::write_failure`, word for word.
+ *
+ * Creating a session is a store write too, and it failed the same raw way: New session in a workspace whose store folder
+ * is unwritable answered `500 internal error: EACCES: permission denied, open '<absolute store path>/session-<id>.json'`
+ * here and `400 <absolute store path>/session-<id>.json: Permission denied (os error 13)` in the Rust build (#149, J180).
+ * DSH wraps a failed creation as `failed to create session: <error>` with the same `gateway/internal`
+ * (`dsh-api-session-controller` lib/index.js:1073-1086, `rejectCreation`), and names no session, since none was made.
+ * `storeCreateFailure` is that sentence with the same reason words; the Rust build's is `SessionError::create_failure`.
  */
 
 /** DSH's code for a failure that is not the caller's: the store could not save the change. */
 export const WRITE_FAILED_CODE = 'gateway/internal'
 
-/** What was being saved, in the sentence's words. */
-export type SessionWriteVerb = 'rename' | 'pin' | 'unpin' | 'archive' | 'unarchive'
+/** What was being saved, in the sentence's words. A `create` names no session: none was made. */
+export type SessionWriteVerb = 'create' | 'rename' | 'pin' | 'unpin' | 'archive' | 'unarchive'
 
 /** A store write that failed, with DSH's code beside the sentence. Recognised by class, name or code. */
 export class SessionWriteError extends Error {
   readonly code = WRITE_FAILED_CODE
-  constructor(verb: SessionWriteVerb, id: string, reason: string) {
-    super(`failed to ${verb} session "${id}": ${reason}`)
+  /** `id` is the session the write was for, and `undefined` for a creation, which DSH's sentence names no session in. */
+  constructor(verb: SessionWriteVerb, id: string | undefined, reason: string) {
+    super(id === undefined ? `failed to ${verb} session: ${reason}` : `failed to ${verb} session "${id}": ${reason}`)
     this.name = 'SessionWriteError'
   }
 }
@@ -56,6 +65,16 @@ export function writeFailureReason(error: unknown): string | undefined {
 export function storeWriteFailure(verb: SessionWriteVerb, id: string, error: unknown): SessionWriteError | undefined {
   const reason = writeFailureReason(error)
   return reason === undefined ? undefined : new SessionWriteError(verb, id, reason)
+}
+
+/**
+ * The failure for `error` met creating a session — `failed to create session: <reason>`, DSH's `rejectCreation`
+ * sentence (`dsh-api-session-controller` lib/index.js:1085) — or `undefined` when it is not a write failure. A branch
+ * heddle cannot write its definition into is not one: that is #106's `session/unwritable`, which carries no `syscall`.
+ */
+export function storeCreateFailure(error: unknown): SessionWriteError | undefined {
+  const reason = writeFailureReason(error)
+  return reason === undefined ? undefined : new SessionWriteError('create', undefined, reason)
 }
 
 /** The verb a flags patch saves: an archive change names the write when there is one, else the pin change. */

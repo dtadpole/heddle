@@ -6403,6 +6403,86 @@ test("a rename, pin or archive the session store cannot save answers 500 gateway
   }
 })
 
+test("New session, the folder route and a new turn in a workspace whose session-store folder is mode 000 answer 500 gateway/internal in words, never the store's path, and record nothing (#149)", async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  /** A mode-000 folder does not stop the superuser, so the claim cannot be judged as root. */
+  if (!skipUnless(context, typeof process.getuid !== 'function' || process.getuid() !== 0, 'a user that file modes apply to')) return
+  /**
+   * Issue #149, J180. A workspace's session-store folder (`<store>/<encoded working folder>/`) at mode 000, and then New
+   * session in that workspace: TS answered a raw `500 internal error: EACCES: permission denied, open '<absolute store
+   * path>/session-<id>.json'`, Rust a `400 <absolute store path>/session-<id>.json: Permission denied (os error 13)` — the
+   * raw error and the path the rename, pin and archive check above rules out, on the create path, with a different status
+   * on each build. DSH wraps a failed creation as `failed to create session: <error>` with `gateway/internal`
+   * (`rejectCreation`, dsh-api-session-controller lib/index.js:1073-1086), and names no session, since none was made. Both
+   * builds answer `500 { error: 'failed to create session: permission denied', code: 'gateway/internal' }` for the three
+   * ways a person starts one: the tree's New session (`POST /api/sessions`), the folder route with `new`, and a turn with
+   * `{folder, new: true}`, the composer's first message. The folder is given back its mode in `finally`.
+   */
+  const { chmodSync, readdirSync, statSync } = await import('node:fs')
+  const h = harness('create-failure')
+  const store = join(h.home, 'sessions')
+  let storeFolder
+  let live
+  try {
+    live = await startServer(['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', store], { ...h.env, HOME: h.home })
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const call = async (path, body) => {
+      const response = await fetch(new URL(path, live.url), { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      return { status: response.status, type: response.headers.get('content-type') ?? '', text: await response.text() }
+    }
+    const ids = async () => (await (await fetch(new URL('/api/sessions', live.url), { headers: { cookie } })).json()).map((meta) => meta.id).sort()
+    assert.equal((await call('/api/workspaces', { path: h.work })).status, 200, 'the workspace is registered')
+    const first = await call('/api/sessions', { branch: h.work })
+    assert.equal(first.status, 200, `a first session made the workspace's store folder (${first.text.slice(0, 200)})`)
+    const before = await ids()
+    const folders = readdirSync(store).filter((name) => statSync(join(store, name)).isDirectory())
+    assert.equal(folders.length, 1, `the workspace has one store folder (${folders.join(', ')})`)
+    storeFolder = join(store, folders[0])
+
+    chmodSync(storeFolder, 0o000)
+    const answers = []
+    try {
+      for (const [name, path, body] of [
+        ['New session', '/api/sessions', { branch: h.work }],
+        ['the folder route with new', '/api/folders/session', { folder: h.work, new: true }],
+        ['a turn with new', '/api/turn', { prompt: 'a new conversation', folder: h.work, new: true }],
+      ]) {
+        answers.push({ name, ...(await call(path, body)) })
+      }
+    } finally {
+      chmodSync(storeFolder, 0o755)
+    }
+    const work = realpathSync(h.work)
+    for (const { name, status, type, text } of answers) {
+      assert.equal(status, 500, `${name}: the store could not record the session, which is not the caller's fault\n${text}`)
+      assert.match(type, /^application\/json/, `${name}: answered as JSON, as every refusal is\n${text}`)
+      let body
+      try {
+        body = JSON.parse(text)
+      } catch {
+        body = text
+      }
+      assert.deepEqual(body, { error: 'failed to create session: permission denied', code: 'gateway/internal' }, `${name}: DSH's code and creation sentence, the reason in words`)
+      for (const leak of [h.home, realpathSync(h.home), store, storeFolder, work, process.env.HOME].filter((path) => typeof path === 'string' && path.length > 1)) {
+        assert.ok(!text.includes(leak), `${name}: no path into the store (${leak})`)
+      }
+    }
+    assert.deepEqual(await ids(), before, 'no session was recorded')
+    const again = await call('/api/sessions', { branch: h.work })
+    assert.equal(again.status, 200, `once the folder can be written again, New session is saved (${again.text.slice(0, 200)})`)
+  } finally {
+    live?.kill()
+    try {
+      if (storeFolder !== undefined) chmodSync(storeFolder, 0o755)
+    } catch {
+      // already given back
+    }
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 test('archiving a session with running work is refused with the work named, and stop: true stops it and archives', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   /**

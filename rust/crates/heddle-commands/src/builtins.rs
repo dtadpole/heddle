@@ -33,6 +33,8 @@ pub struct CompactionOutcome {
     pub busy: bool,
     /// A summary was written and refused (it did not shrink the history), with the reason recorded in the log.
     pub refused: Option<String>,
+    /// The session's Stop cancelled the summary before anything was replaced (#140, #154).
+    pub cancelled: bool,
 }
 
 /// DSH's `/compact` answer for an agent that is not idle (dsh-command-compact, `busy`).
@@ -40,6 +42,8 @@ pub const COMPACT_BUSY: &str = "Compaction is unavailable because this process h
 /// DSH's `/compact` answer for a summary that could not be made smaller (dsh-command-compact, `summary`).
 pub const COMPACT_REFUSED: &str =
     "Compaction could not produce a useful summary. The attempt is recorded in the session log.";
+/// DSH's `/compact` answer when the command's signal fired (dsh-command-compact, `cancelled`).
+pub const COMPACT_CANCELLED: &str = "Compaction cancelled.";
 
 /// The compaction `/compact` asks for: summarise the session's older history now. An `Err` is the sentence
 /// naming why it could not.
@@ -68,6 +72,9 @@ pub fn compact_command(host: Arc<dyn CompactionHost>) -> CommandDefinition {
                 // (#132).
                 if outcome.busy {
                     return Ok(CommandResult::error(COMPACT_BUSY));
+                }
+                if outcome.cancelled {
+                    return Ok(CommandResult::error(COMPACT_CANCELLED));
                 }
                 if outcome.refused.is_some() {
                     return Ok(CommandResult::error(COMPACT_REFUSED));

@@ -59,7 +59,7 @@ pub use registry::{
 };
 pub use routes::{MAX_COMMAND_LINE, MENU_PATH, MENU_SOURCE};
 pub use service::{
-    CommandServices, Commands, NO_CONTEXT_SERVICE, NO_GOAL_SERVICE, NO_SUMMARY_ENDPOINT,
+    CommandServices, Commands, NO_CONTEXT_SERVICE, NO_GOAL_SERVICE, NO_SUMMARY_ENDPOINT, TurnHold,
     TurnRunning, anonymous_user,
 };
 
@@ -105,6 +105,7 @@ mod tests {
         let fixture = Fixture::new("lib-merge");
         let commands = Commands::new(CommandServices {
             turn_running: None,
+            turn_hold: None,
             sessions: Arc::new(SessionService::from_store(fixture.store.clone())),
             goals: None,
             context: None,

@@ -177,7 +177,8 @@ const STYLE = `
  * session the composer is attached to, or null), `ensureSession()` (start one when there is none),
  * `sendAsPrompt(text, attachments)` (the page's ordinary send, for a line the host does not recognise and for the words a
  * `prompt` action hands on, each with the files the line carried), `addRow(node)` (append to the transcript),
- * `notice(text)` (say something went wrong), `pendingAttachments()` and `takeAttachments()` (the composer's files), and
+ * `notice(text)` (say something went wrong), `maskUserText(text)` (the page's full-text noninteractive credential projection),
+ * `pendingAttachments()` and `takeAttachments()` (the composer's files), and
  * optionally `openFilePicker()`, `openModelMenu()`, `openAccessMenu()`, `setModeChip(chip | null)` and
  * `setPlaceholder(text | null)` (the page's `window.heddlePage` affordances).
  */
@@ -190,6 +191,8 @@ export function install(api) {
   let trigger = null
   let dismissed = null
   const drawn = new Map()
+  // Drawn text is masked, so cache the original identity in memory, never in a DOM attribute.
+  const inputTextByBody = new WeakMap()
 
   if (document.getElementById('hc-style') === null) {
     const style = document.createElement('style')
@@ -718,14 +721,16 @@ export function install(api) {
     if (bubble.nextElementSibling !== row) row.before(bubble)
     const text = commandInputText(name, args)
     const body = bubble.querySelector('.hc-input-bubble')
-    if (body.textContent !== text) {
+    if (inputTextByBody.get(body) !== text) {
+      const masked = api.maskUserText(text)
       const token = `/${name}`
       const chip = document.createElement('span')
       chip.className = 'hc-chip'
       chip.dataset.command = name
       chip.title = token
       chip.textContent = token
-      body.replaceChildren(chip, document.createTextNode(text.slice(token.length)))
+      body.replaceChildren(chip, document.createTextNode(masked.slice(token.length)))
+      inputTextByBody.set(body, text)
     }
     return bubble
   }
@@ -740,7 +745,9 @@ export function install(api) {
     if (typeof event.commandId !== 'string') return
     if (event.type === 'command/run') {
       const row = rowFor(event.commandId, event.name)
-      if (typeof event.args === 'string') row.querySelector('.hc-args').textContent = event.args.trim()
+      if (typeof event.args === 'string') {
+        row.querySelector('.hc-args').textContent = (event.name === 'goal' ? api.maskUserText(event.args) : event.args).trim()
+      }
       if (INPUT_BUBBLE_COMMANDS.has(event.name) && row.isConnected) bubbleFor(row, event.commandId, event.name, event.args)
       return
     }

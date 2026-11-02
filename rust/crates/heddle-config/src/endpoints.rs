@@ -605,6 +605,30 @@ pub struct EndpointsView {
     pub endpoints: Vec<Value>,
     /// The nominated endpoint when it is in the list, else `null`.
     pub default: Option<String>,
+    /// The model a new session starts with on the default endpoint ([`EndpointsView::with_selection`]).
+    #[serde(rename = "defaultModel", skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+    /// The reasoning effort a new session starts with on the default endpoint.
+    #[serde(rename = "defaultEffort", skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<String>,
+}
+
+impl EndpointsView {
+    /// The view with the default selection beside the default endpoint, so a composer opening a fresh session shows
+    /// and sends it (DSH parity A104). Kept only when `endpoint` is the view's default, so one endpoint's default
+    /// model is never paired with another's.
+    pub fn with_selection(
+        mut self,
+        endpoint: Option<&str>,
+        model: Option<String>,
+        effort: Option<String>,
+    ) -> Self {
+        if endpoint.is_some() && endpoint == self.default.as_deref() {
+            self.default_model = model;
+            self.default_effort = effort;
+        }
+        self
+    }
 }
 
 /// [`describe_page_endpoint`] over `endpoints`, with `nominated` kept only when the list holds it: the list a
@@ -619,6 +643,8 @@ pub fn describe_endpoints(endpoints: &[EndpointConfig], nominated: Option<&str>)
         } else {
             None
         },
+        default_model: None,
+        default_effort: None,
     }
 }
 
@@ -1103,6 +1129,29 @@ mod tests {
         let error = read_key_file(missing.to_str().unwrap(), &env).unwrap_err();
         assert!(error.problems()[0].starts_with("could not read the key file '"));
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_listing_names_the_default_selection_only_beside_its_own_endpoint() {
+        let view = describe_endpoints(&default_endpoints(), Some("scripted"));
+        let named =
+            view.clone()
+                .with_selection(Some("scripted"), Some("m".into()), Some("high".into()));
+        assert_eq!(named.default_model.as_deref(), Some("m"));
+        assert_eq!(named.default_effort.as_deref(), Some("high"));
+        let json = serde_json::to_value(&named).unwrap();
+        assert_eq!(json["defaultModel"], json!("m"));
+        let elsewhere = view.with_selection(Some("other"), Some("m".into()), None);
+        assert_eq!(
+            elsewhere.default_model, None,
+            "another endpoint's default is not paired with this one"
+        );
+        assert!(
+            serde_json::to_value(&elsewhere)
+                .unwrap()
+                .get("defaultModel")
+                .is_none()
+        );
     }
 
     #[test]
