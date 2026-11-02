@@ -127,6 +127,15 @@ pub trait RoundRunner: Send + Sync + 'static {
         prompt: String,
         source: GoalRoundSource,
     ) -> BoxFuture<'static, Result<(), String>>;
+
+    /// Wait while the session's descendants (its delegated children and teammates, and theirs) still work, and
+    /// answer whether there was anything to wait for. DSH's round driver awaits `subagents.waitForChildren(agent)`
+    /// before it reserves a round and reads readiness again after it (dsh-goal-round-driver lib/index.js:130-134).
+    /// The default has no descendants to wait for.
+    fn wait_for_children(&self, session: &str) -> BoxFuture<'static, bool> {
+        let _ = session;
+        Box::pin(async { false })
+    }
 }
 
 /// What one chain did. Serialized `{rounds, stopped, blocked?, error?}`.
@@ -504,6 +513,11 @@ impl GoalDriver {
                         revision,
                         round,
                     };
+                    // A round waits for the session's progressing descendants (inventory A9); after a wait the
+                    // condition is read again, because the goal may have been paused, edited or completed meanwhile.
+                    if self.runner.wait_for_children(session).await {
+                        continue;
+                    }
                     self.set_round_running(session, true);
                     let ran = self.runner.run(session, prompt, source).await;
                     self.set_round_running(session, false);
@@ -963,6 +977,79 @@ mod tests {
             }
             other => panic!("expected a block, got {other:?}"),
         }
+    }
+
+    /// A runner whose sessions have one working child until `release` fires (inventory A9).
+    struct ChildrenRunner {
+        inner: TestRunner,
+        order: Arc<Mutex<Vec<String>>>,
+        settled: Arc<tokio::sync::Notify>,
+        children: Arc<Mutex<u32>>,
+    }
+
+    impl RoundRunner for ChildrenRunner {
+        fn run(
+            &self,
+            session: &str,
+            prompt: String,
+            source: GoalRoundSource,
+        ) -> BoxFuture<'static, Result<(), String>> {
+            self.order
+                .lock()
+                .unwrap()
+                .push(format!("round {}", source.round));
+            self.inner.run(session, prompt, source)
+        }
+
+        fn wait_for_children(&self, _session: &str) -> BoxFuture<'static, bool> {
+            let order = Arc::clone(&self.order);
+            let settled = Arc::clone(&self.settled);
+            let children = Arc::clone(&self.children);
+            Box::pin(async move {
+                if *children.lock().unwrap() == 0 {
+                    return false;
+                }
+                order.lock().unwrap().push("waiting".to_owned());
+                settled.notified().await;
+                *children.lock().unwrap() = 0;
+                order.lock().unwrap().push("children settled".to_owned());
+                true
+            })
+        }
+    }
+
+    /// Inventory A9: a round starts only after the session's progressing descendants settle, and the condition is
+    /// read again after the wait (DSH's round driver around `subagents.waitForChildren`).
+    #[tokio::test]
+    async fn a_round_waits_for_the_sessions_working_children() {
+        let (log, goals) = setup();
+        create(&goals, 2.0);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let settled = Arc::new(tokio::sync::Notify::new());
+        let driver = GoalDriver::new(
+            goals.clone(),
+            Arc::new(ChildrenRunner {
+                inner: runner(&log, &calls),
+                order: Arc::clone(&order),
+                settled: Arc::clone(&settled),
+                children: Arc::new(Mutex::new(1)),
+            }),
+        );
+        let chain = driver.advance("s1");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            *order.lock().unwrap(),
+            ["waiting"],
+            "no round starts while a child works"
+        );
+        settled.notify_one();
+        let outcome = chain.await;
+        assert_eq!(outcome.rounds, 2);
+        assert_eq!(
+            *order.lock().unwrap(),
+            ["waiting", "children settled", "round 1", "round 2"]
+        );
     }
 
     #[tokio::test]
