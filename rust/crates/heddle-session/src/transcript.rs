@@ -343,6 +343,193 @@ pub fn is_event_record(record: &serde_json::Value) -> bool {
         && record.get("type").is_some_and(serde_json::Value::is_string)
 }
 
+/// One whole frame that decoded, and its lines.
+#[derive(Debug, Clone)]
+struct ReadFrame {
+    start: usize,
+    end: usize,
+    lines: Vec<String>,
+}
+
+/// A framed transcript read past the torn frames in its middle ([`recover_transcript`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveredTranscript {
+    /// The lines of every frame kept, in order.
+    pub lines: Vec<String>,
+    /// The byte range of every frame kept, in order: the file a repair writes is these ranges, joined.
+    pub kept: Vec<Frame>,
+    /// The byte ranges left out, in order: each torn frame stepped over (with any frame its failed write left whole),
+    /// and a torn tail.
+    pub dropped: Vec<Frame>,
+}
+
+/// The lines of one frame's text, empty lines dropped, as [`decode_transcript`] splits them.
+fn frame_lines(text: &str) -> Vec<String> {
+    text.split('\n')
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The whole, decodable frames from `start` on, and where the walk stopped.
+fn walk_frames(buffer: &[u8], start: usize) -> (Vec<ReadFrame>, usize) {
+    let mut frames = Vec::new();
+    let mut cursor = start;
+    while cursor < buffer.len() {
+        let Some(end) = frame_end(buffer, cursor) else {
+            break;
+        };
+        if end <= cursor {
+            break;
+        }
+        let Some(text) = decode_frame(&buffer[cursor..end]) else {
+            break;
+        };
+        frames.push(ReadFrame {
+            start: cursor,
+            end,
+            lines: frame_lines(&text),
+        });
+        cursor = end;
+    }
+    (frames, cursor)
+}
+
+/// A line's `seq` when it is a session event ([`is_event_record`]), else `None`.
+fn seq_of(line: &str) -> Option<u64> {
+    let record = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    if !is_event_record(&record) {
+        return None;
+    }
+    record.get("seq").and_then(serde_json::Value::as_u64)
+}
+
+/// The first place after `from` where whole frames start again: a frame magic whose frame walks whole, decodes (its
+/// content checksum holds) and holds only session events, then every whole frame after it. `(start, frames, end)`.
+fn resync(buffer: &[u8], from: usize) -> Option<(usize, Vec<ReadFrame>, usize)> {
+    let mut at = from + 1;
+    while at + FRAME_MAGIC.len() <= buffer.len() {
+        let found = buffer[at..]
+            .windows(FRAME_MAGIC.len())
+            .position(|window| window == FRAME_MAGIC)?;
+        let start = at + found;
+        at = start + 1;
+        let Some(end) = frame_end(buffer, start) else {
+            continue;
+        };
+        let Some(text) = decode_frame(&buffer[start..end]) else {
+            continue;
+        };
+        let lines = frame_lines(&text);
+        if lines.is_empty() || !lines.iter().all(|line| seq_of(line).is_some()) {
+            continue;
+        }
+        let (rest, stopped) = walk_frames(buffer, end);
+        let mut frames = vec![ReadFrame { start, end, lines }];
+        frames.extend(rest);
+        return Some((start, frames, stopped));
+    }
+    None
+}
+
+/// Read a framed transcript **past a torn frame in its middle**, when whole frames follow it (#221); `None` when there
+/// is nothing to step over — the log is whole, plain text, or torn only at its tail, which the store cuts as it always
+/// has (J155). `recoverTranscript` in `src/session/transcript.ts`, keeping and dropping the same bytes.
+///
+/// A tear in the middle is what an append that failed part-way left before the rollback existed ([`crate::append`]):
+/// its partial frame, then everything the process appended after the disk had room again. Cutting at the tear, right
+/// for a crash, threw those turns away. Here the walk stops at the tear as before, then looks for the next frame magic
+/// whose frame walks whole, decodes with its content checksum, and holds only session events, and goes on from there. A
+/// false start is not a practical risk: four magic bytes, a frame header and block chain that walk to an end, a 32-bit
+/// checksum over the content, and JSON lines with a whole-number `seq`, a string `at` and a string `type` must all hold
+/// at once.
+///
+/// The sequence must also join. The writer never counted the event whose frame tore, so the first event after the tear
+/// carries that event's seq, `s`, and the last event kept before it must be `s - 1`. A batch write (a fork's seed, the
+/// turn closers) that tore part-way may have left its first frames whole; they carry `s`, `s + 1`, … and were never
+/// counted either, so they are dropped with the torn frame. When the seqs do not join that way, the walk does not step
+/// over that tear: from there on the bytes are a torn tail, as before.
+pub fn recover_transcript(buffer: &[u8]) -> Option<RecoveredTranscript> {
+    if !looks_compressed(buffer) {
+        return None;
+    }
+    let (mut kept, mut cursor) = walk_frames(buffer, 0);
+    let mut dropped = Vec::new();
+    while cursor < buffer.len() {
+        let Some((start, frames, end)) = resync(buffer, cursor) else {
+            break;
+        };
+        let Some(resumed) = frames
+            .first()
+            .and_then(|frame| frame.lines.first())
+            .and_then(|line| seq_of(line))
+        else {
+            break;
+        };
+        let mut orphans = kept.len();
+        while orphans > 0 {
+            let frame = &kept[orphans - 1];
+            if frame.lines.is_empty()
+                || !frame
+                    .lines
+                    .iter()
+                    .all(|line| seq_of(line).is_some_and(|seq| seq >= resumed))
+            {
+                break;
+            }
+            orphans -= 1;
+        }
+        let consecutive = kept[orphans..]
+            .iter()
+            .flat_map(|frame| frame.lines.iter().map(|line| seq_of(line)))
+            .enumerate()
+            .all(|(index, seq)| seq == Some(resumed + index as u64));
+        let last = (orphans > 0)
+            .then(|| kept[orphans - 1].lines.last().and_then(|line| seq_of(line)))
+            .flatten();
+        let joins = if orphans == 0 {
+            resumed == 0
+        } else {
+            resumed > 0 && last == Some(resumed - 1)
+        };
+        if !(joins && consecutive) {
+            break;
+        }
+        let from = if orphans < kept.len() {
+            kept[orphans].start
+        } else {
+            cursor
+        };
+        dropped.push(Frame {
+            start: from,
+            end: start,
+        });
+        kept.truncate(orphans);
+        kept.extend(frames);
+        cursor = end;
+    }
+    if dropped.is_empty() {
+        return None;
+    }
+    if cursor < buffer.len() {
+        dropped.push(Frame {
+            start: cursor,
+            end: buffer.len(),
+        });
+    }
+    Some(RecoveredTranscript {
+        lines: kept.iter().flat_map(|frame| frame.lines.clone()).collect(),
+        kept: kept
+            .iter()
+            .map(|frame| Frame {
+                start: frame.start,
+                end: frame.end,
+            })
+            .collect(),
+        dropped,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -495,5 +682,137 @@ mod tests {
         let frame = encode_frame(&format!("{line}\n"));
         let decoded = decode_transcript(&frame);
         assert_eq!(decoded.lines, vec![line.to_string()]);
+    }
+}
+
+/// Reading past a torn frame in the middle (#221), the same cases as `test/session-append-rollback.test.ts`.
+#[cfg(test)]
+mod recover_tests {
+    use super::*;
+
+    fn event(seq: u64, text: &str) -> Vec<u8> {
+        encode_frame(&format!(
+            "{{\"seq\":{seq},\"at\":\"2026-11-01T00:00:00.000Z\",\"type\":\"note\",\"text\":\"{text}\"}}\n"
+        ))
+    }
+
+    fn joined(parts: &[&[u8]]) -> Vec<u8> {
+        parts.concat()
+    }
+
+    fn texts(lines: &[String]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|line| {
+                serde_json::from_str::<serde_json::Value>(line).unwrap()["text"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_torn_frame_followed_by_whole_frames_is_stepped_over_and_they_are_kept() {
+        let (e0, e1, torn) = (event(0, "t1"), event(1, "t2"), event(2, "t4 never saved"));
+        let (e2, e3) = (event(2, "t6"), event(3, "t6 answer"));
+        let half = &torn[..torn.len() / 2];
+        let buffer = joined(&[&e0, &e1, half, &e2, &e3]);
+        assert!(decode_transcript(&buffer).torn);
+        let recovered = recover_transcript(&buffer).expect("whole frames follow the tear");
+        assert_eq!(texts(&recovered.lines), ["t1", "t2", "t6", "t6 answer"]);
+        let at = e0.len() + e1.len();
+        assert_eq!(
+            recovered.dropped,
+            vec![Frame {
+                start: at,
+                end: at + half.len()
+            }]
+        );
+        let kept: Vec<u8> = recovered
+            .kept
+            .iter()
+            .flat_map(|frame| buffer[frame.start..frame.end].to_vec())
+            .collect();
+        assert_eq!(
+            kept,
+            joined(&[&e0, &e1, &e2, &e3]),
+            "every frame kept is copied as it was"
+        );
+    }
+
+    #[test]
+    fn a_torn_tail_alone_is_left_to_the_cut() {
+        let (e0, e1) = (event(0, "t1"), event(1, "t2"));
+        let buffer = joined(&[&e0, &e1[..e1.len() - 3]]);
+        assert!(
+            recover_transcript(&buffer).is_none(),
+            "J155: the store cuts it"
+        );
+        assert!(
+            recover_transcript(&joined(&[&e0, &e1])).is_none(),
+            "a whole log has nothing to step over"
+        );
+    }
+
+    #[test]
+    fn the_whole_frames_a_failed_batch_left_before_its_tear_are_dropped_with_it() {
+        let (e0, e1) = (event(0, "t1"), event(1, "t2"));
+        let (orphan, torn) = (event(2, "closer one"), event(3, "closer two"));
+        let (e2, e3) = (event(2, "t6"), event(3, "t6 answer"));
+        let half = &torn[..torn.len() / 2];
+        let buffer = joined(&[&e0, &e1, &orphan, half, &e2, &e3]);
+        let recovered = recover_transcript(&buffer).unwrap();
+        assert_eq!(texts(&recovered.lines), ["t1", "t2", "t6", "t6 answer"]);
+        let at = e0.len() + e1.len();
+        assert_eq!(
+            recovered.dropped,
+            vec![Frame {
+                start: at,
+                end: at + orphan.len() + half.len()
+            }]
+        );
+    }
+
+    #[test]
+    fn frames_whose_seqs_do_not_join_are_not_stepped_onto() {
+        let (e0, e1, torn) = (event(0, "t1"), event(1, "t2"), event(2, "lost"));
+        let stray = event(7, "from elsewhere");
+        let buffer = joined(&[&e0, &e1, &torn[..torn.len() / 2], &stray]);
+        assert!(
+            recover_transcript(&buffer).is_none(),
+            "the tear stays a tail, cut as before"
+        );
+    }
+
+    #[test]
+    fn a_magic_inside_the_torn_bytes_is_not_taken_for_a_frame() {
+        let (e0, torn) = (event(0, "t1"), event(1, "lost"));
+        let mut garbage = torn[..torn.len() / 2].to_vec();
+        garbage.extend_from_slice(&FRAME_MAGIC);
+        garbage.extend_from_slice(b"\x24\x00\x00\x01not a frame at all");
+        let e1 = event(1, "t6");
+        let buffer = joined(&[&e0, &garbage, &e1]);
+        let recovered = recover_transcript(&buffer).unwrap();
+        assert_eq!(texts(&recovered.lines), ["t1", "t6"]);
+        assert_eq!(
+            recovered.dropped[0].end - recovered.dropped[0].start,
+            garbage.len()
+        );
+    }
+
+    #[test]
+    fn a_tear_after_the_last_run_is_dropped_as_a_tail() {
+        let (e0, torn, e1, tail) = (
+            event(0, "t1"),
+            event(1, "lost"),
+            event(1, "t6"),
+            event(2, "cut"),
+        );
+        let buffer = joined(&[&e0, &torn[..10], &e1, &tail[..tail.len() - 2]]);
+        let recovered = recover_transcript(&buffer).unwrap();
+        assert_eq!(texts(&recovered.lines), ["t1", "t6"]);
+        assert_eq!(recovered.dropped.len(), 2);
+        assert_eq!(recovered.dropped[1].end, buffer.len());
     }
 }

@@ -88,7 +88,16 @@ export async function validateRows(layers: readonly NamedLayer[], env: NodeJS.Pr
      * claim is that a bad value fails where it is written. So the resolved value is
      * inspected for the two silent failures a coerced config produces.
      */
-    for (const problem of inspectRow(resolved, label)) problems.push(problem)
+    const coerced = inspectRow(resolved, label)
+    for (const problem of coerced) problems.push(problem)
+    /**
+     * A rule the schema cannot spell, across fields (#212): the module's `configProblems(resolved)`, when it exports
+     * one, judges the resolved config as the component would when it runs, and each problem is the row's.
+     */
+    const rule = module.configProblems
+    if (coerced.length === 0 && typeof rule === 'function') {
+      for (const problem of (rule as (config: unknown) => readonly string[])(resolved)) problems.push(`${label}: ${problem}`)
+    }
   }
 
   return { rows: rows.length, checked, problems }

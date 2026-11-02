@@ -397,7 +397,8 @@ export function goalTools(goals: GoalService, config: GoalToolConfig = {}): Tool
                 reject(GOAL_TOOL_MESSAGES.resumePaused, 'GOAL_TOOL_RESUME_PAUSED')
               }
             }
-            const view = action === 'pause' ? goals.pause(session, ref) : goals.resume(session, ref)
+            /** The model's own pause, inside its own turn: the turn finishes normally (issue #190, DSH's rule). */
+            const view = action === 'pause' ? goals.pause(session, ref, { initiator: 'agent' }) : goals.resume(session, ref)
             return { output: JSON.stringify(viewOf(view)), data: { goal: view } }
           }
 

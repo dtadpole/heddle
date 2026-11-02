@@ -112,10 +112,20 @@ pub enum SessionError {
     #[error("could not name a session for {base}: a hundred already exist for that minute")]
     NamesExhausted { base: String },
     /// A write refused because another process holds the session's writer lock (`SessionOwnedError` in the
-    /// TypeScript build): DSH's `SessionAlreadyOwnedError` sentence, with the holder's pid in brackets when
-    /// the lock names one. `session "<id>" is already owned by an active write handle (process <pid>)`
-    #[error("session \"{id}\" is already owned by an active write handle{}", holder_suffix(.pid))]
-    AlreadyOwned { id: String, pid: Option<u32> },
+    /// TypeScript build): DSH's `SessionAlreadyOwnedError` sentence, with the holder's pid and command name in
+    /// brackets when the lock names one, then the lock file and how to clear it if that process is not heddle
+    /// (#202, [`crate::writer_lock::owned_sentence`]): `session "<id>" is already owned by an active write handle
+    /// (process <pid>, <name>). Its lock file is <id>.lock, beside the session's log; if process <pid> is not
+    /// heddle, delete that file and try again.`
+    #[error("{}", owned_message(.id, .pid, .name, .lock))]
+    AlreadyOwned {
+        id: String,
+        pid: Option<u32>,
+        /// The holder's command name, when the system said it.
+        name: Option<String>,
+        /// The lock file's name (`<id>.lock`, or `session.lock` in an old-layout directory).
+        lock: Option<String>,
+    },
     /// A branch heddle may not write, so a session cannot be filed in it (#106):
     /// `cannot write to "<folder>": permission denied`, the folder by its name and never its absolute path
     /// (the I/O error carried the definition's path). DSH files no session in the folder, so the code is
@@ -131,6 +141,18 @@ pub enum SessionError {
     /// create makes the folder). `MissingFolderError` in the TypeScript build, word for word.
     #[error("This workspace's folder no longer exists: \"{folder}\"")]
     MissingFolder { folder: String },
+    /// An append that did not reach the session's log (#221): `the session could not be saved: <reason>`, the reason in
+    /// words ([`crate::append::unsaved_reason`]: `no space left on device` for ENOSPC) and never the log's path, which
+    /// the I/O error carried into the turn's error frame. The append was cut back before this was answered
+    /// ([`crate::append`]), or, when the cut failed too, the session's writer refuses its later appends with this same
+    /// sentence until the session is opened again (`source` is `None` on those). `SessionUnsavedError` in the TypeScript
+    /// build, word for word.
+    #[error("the session could not be saved: {reason}")]
+    Unsaved {
+        reason: String,
+        #[source]
+        source: Option<std::io::Error>,
+    },
 }
 
 /// The last component of a path, or the path itself when it has none.
@@ -141,10 +163,14 @@ fn file_name(path: &str) -> String {
     )
 }
 
-/// ` (process <pid>)` when the lock named its holder, nothing otherwise.
-fn holder_suffix(pid: &Option<u32>) -> String {
-    pid.map(|pid| format!(" (process {pid})"))
-        .unwrap_or_default()
+/// The text of [`SessionError::AlreadyOwned`]: [`crate::writer_lock::owned_sentence`] over its fields.
+fn owned_message(
+    id: &str,
+    pid: &Option<u32>,
+    name: &Option<String>,
+    lock: &Option<String>,
+) -> String {
+    crate::writer_lock::owned_sentence(id, *pid, name.as_deref(), lock.as_deref())
 }
 
 impl SessionError {

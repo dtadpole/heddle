@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { after, test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { fixtureDir, heddleCommand, httpConfig, isolatedHome, isTitleRequest, refuseTitleRequest, removeDir, repoRoot, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, httpConfig, isolatedHome, isTitleRequest, readTranscript, refuseTitleRequest, removeDir, repoRoot, runCli, scriptedConfig, sessionsUnder, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * The chat view: one element per tool **call**, carrying its result.
@@ -59,6 +59,12 @@ async function startServer(label, steps, options = {}) {
         home,
         steps: typeof steps === 'function' ? steps(work) : steps ?? [{ toolCall: { name: 'list_dir', arguments: { path: work } } }, { text: 'it listed the folder' }],
       })
+  /** A small window puts the session under context pressure, which is what prunes a long tool result. */
+  if (options.contextWindow !== undefined) {
+    const written = JSON.parse(readFileSync(config, 'utf8'))
+    written.endpoints[0].contextWindow = options.contextWindow
+    writeFileSync(config, JSON.stringify(written))
+  }
   const child = await startCli(
     /**
      * `HEDDLE_CHECK_PATCH` names a patch layer to use **instead of** the project's, so this check can run while
@@ -206,6 +212,88 @@ test('a tool call and its result fold into one turn, and the page draws them as 
     assert.match(drawn.args, /path/, 'the arguments are inside that element')
     assert.match(drawn.result, /a\.txt/, 'and so is what the tool answered')
     assert.ok(drawn.kinds.includes('user') && drawn.kinds.includes('assistant'), `the person and the model are drawn too\nsaw: ${drawn.kinds.join(', ')}`)
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+test('a tool result pruned under context pressure is drawn once, as the tool returned it, live and after a reload, as DSH keeps the cut copy model-only', async (context) => {
+  /**
+   * #186 (developer-four's J125). When context pressure prunes a long tool result, the log gets a cut copy: a second
+   * `message` for the same call, marked `surfaceOp: { op: 'replace' }`. That copy is what the model is sent from then on.
+   * DSH's chat draws a tool result only from an append (`isAppendSurfaceEvent`: "replacement copies stay model-only").
+   * Before the fix, three views drew the copy anyway:
+   * - the live page appended it to the card's full output, so the output showed twice until a reload;
+   * - the session route returned it as an extra, unpaired tool turn;
+   * - the Trajectory ledger drew it as an extra "tool result" row.
+   *
+   * A 40,000-character file read in a 10,000-token window is over the 8,000-token threshold, and pruning it to 5,160
+   * characters clears the pressure, so no summary takes a scripted step.
+   */
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const big = `${Array.from({ length: 800 }, (_, index) => `line ${String(index + 1).padStart(4, '0')} ${'x'.repeat(39)}`).join('\n')}\n`
+  const server = await startServer(
+    'pruned-copy',
+    (work) => [{ toolCall: { name: 'read_file', arguments: { path: join(work, 'big.txt') } } }, { text: 'the file is read' }],
+    { sandboxRoot: true, contextWindow: 10_000 },
+  )
+  const browser = await openBrowser()
+  try {
+    writeFileSync(join(server.work, 'big.txt'), big)
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 25_000)
+    await sendMessage(browser, 'read the big file')
+    await browser.waitFor(
+      `!document.getElementById('send').hidden && [...document.querySelectorAll('#log .turn')].some((node) => node.dataset.kind === 'assistant')`,
+      30_000,
+    )
+
+    const session = sessionsUnder(join(server.home, 'sessions'))[0]
+    assert.ok(session, 'the turn recorded a session')
+    const events = readTranscript(join(server.home, 'sessions', session))
+    const results = events.filter((event) => event.type === 'message' && event.message?.role === 'tool')
+    const textOf = (event) => (event?.message?.content ?? []).map((part) => part.text ?? '').join('')
+    const copy = results.find((event) => event.surfaceOp?.op === 'replace')
+    assert.ok(copy, `the result was pruned under pressure, which is what this check needs\nsaw: ${events.map((event) => event.type).join(', ')}`)
+    const original = textOf(results.find((event) => event !== copy))
+    assert.equal(original, big, 'the log keeps what the tool returned')
+    assert.ok(textOf(copy).includes('[pruned,'), 'and the copy is the cut one')
+
+    const card = async () =>
+      JSON.parse(
+        await browser.evaluate(`JSON.stringify({
+          tools: document.querySelectorAll('#log .turn.tool').length,
+          result: document.querySelector('#log .turn.tool [data-result]')?.textContent ?? '',
+        })`),
+      )
+    const live = await card()
+    const lengths = `card ${live.result.length}, original ${original.length}, copy ${textOf(copy).length}`
+    assert.equal(live.tools, 1, `the live page draws one element for the call\n${lengths}`)
+    assert.equal(live.result.length, original.length, `and its output once, as the tool returned it, with no cut copy appended (${lengths})`)
+    assert.ok(!live.result.includes('[pruned,'), 'the cut copy is not drawn live')
+
+    await browser.gotoSession(server.url, session)
+    await browser.waitFor('document.querySelectorAll("#log .turn.tool [data-result]").length > 0', 20_000)
+    const reloaded = await card()
+    assert.deepEqual([reloaded.tools, reloaded.result.length], [1, original.length], 'a reload draws the same card')
+
+    const cookie = await cookieFor(server.url)
+    const view = await api(server.url, cookie, `/api/sessions/${encodeURIComponent(session)}`)
+    const turns = (view.body.turns ?? []).filter((entry) => entry.kind === 'tool')
+    assert.deepEqual(
+      turns.map((entry) => entry.result?.length),
+      [original.length],
+      'the session route returns one tool turn, holding the original, and no unpaired copy',
+    )
+    const ledger = await api(server.url, cookie, `/api/sessions/${encodeURIComponent(session)}?view=ledger`)
+    const rows = (ledger.body.rows ?? []).filter((row) => row.kind === 'tool')
+    assert.deepEqual(
+      rows.map((row) => row.record?.result?.length),
+      [original.length],
+      'the Trajectory ledger has one row for the call, holding the original, and no "tool result" row for the copy',
+    )
   } finally {
     browser.close()
     await server.close()
