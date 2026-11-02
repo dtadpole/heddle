@@ -2267,6 +2267,13 @@ fn without_nagle(
 /// has no delivery at all: `delegate` runs it for one task and settles it. Phase A measured both builds answering
 /// `200` and growing the child's log (R-developer-eight-26). A teammate (`teamId`) is a continuable child, as DSH's
 /// teammates are, and this route is the delivery the page uses for it, so it is not refused.
+/// Whether the session is a subagent's (`origin: "subagent"`, a delegate or a teammate): it runs on its own model.
+fn is_subagent_session(meta: Option<&SessionMeta>) -> bool {
+    meta.and_then(|meta| meta.rest.get("origin"))
+        .and_then(Value::as_str)
+        == Some("subagent")
+}
+
 fn subagent_turn_refusal(meta: Option<&SessionMeta>) -> Option<Value> {
     let meta = meta?;
     if meta.rest.get("origin").and_then(Value::as_str) != Some("subagent") {
@@ -2345,28 +2352,6 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
     };
     let sessions = &state.harness().sessions;
     let resume = body.str("session").filter(|id| !id.is_empty());
-    // A model the endpoint does not offer is refused before anything is opened or written (#239), as the switch
-    // route refuses it and as DSH's `requireModel` does (`session/model-unavailable`): recording it made every
-    // following turn fail with a name nobody could choose from the menu. The endpoint judged is the one this turn
-    // will use, as far as it is known before a session is opened (the request's, a resumed session's record, then
-    // the defaults); a folder's existing session is only known once opened, and is judged again below.
-    if let Some(model) = requested_model {
-        let recorded = resume
-            .and_then(|id| sessions.meta(id))
-            .map(|meta| session_request_selection(Some(&meta)))
-            .unwrap_or_default();
-        if let Some(prospect) = turn_selection(
-            requested_endpoint,
-            requested_model,
-            None,
-            &recorded,
-            state.options().default_endpoint.as_deref(),
-            models,
-        ) && let Some(problem) = models.model_problem(&prospect.endpoint, model)
-        {
-            return respond::text(StatusCode::BAD_REQUEST, format!("{problem}\n"));
-        }
-    }
     // A turn for a session that does not exist is the client's mistake, answered the way DSH answers it
     // (`session/not-found`, dsh-api-session-controller) and the way the other session routes do (`404`,
     // `no session <id>`), with the same shape as web.ts. It used to reach the resume and come back as a
@@ -2402,6 +2387,33 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
         ) && recorded != named
         {
             return preset_fixed(recorded);
+        }
+    }
+    // A model the endpoint does not offer is refused before anything is opened or written (#239), as the switch
+    // route refuses it and as DSH's `requireModel` does (`session/model-unavailable`): recording it made every
+    // following turn fail with a name nobody could choose from the menu. It comes after the refusals above, in
+    // web.ts's order, so a missing session is still a 404. The endpoint judged is the one this turn will use, as far
+    // as it is known before a session is opened (the request's, a resumed session's record, then the defaults); a
+    // folder's existing session is only known once opened, and is judged again below. A subagent's session (a
+    // teammate's) runs on its own model, not one a composer names (#175), so it is not judged.
+    let resumed_meta = resume.and_then(|id| sessions.meta(id));
+    if let Some(model) = requested_model
+        && !is_subagent_session(resumed_meta.as_ref())
+    {
+        let recorded = resumed_meta
+            .as_ref()
+            .map(|meta| session_request_selection(Some(meta)))
+            .unwrap_or_default();
+        if let Some(prospect) = turn_selection(
+            requested_endpoint,
+            requested_model,
+            None,
+            &recorded,
+            state.options().default_endpoint.as_deref(),
+            models,
+        ) && let Some(problem) = models.model_problem(&prospect.endpoint, model)
+        {
+            return respond::text(StatusCode::BAD_REQUEST, format!("{problem}\n"));
         }
     }
     let session = if let Some(resume) = resume {
@@ -2482,6 +2494,7 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
     // The named model against the endpoint now known for certain (a folder's existing session), before the record
     // is written.
     if let Some(model) = requested_model
+        && !is_subagent_session(meta.as_ref())
         && let Some(problem) = models.model_problem(&selection.endpoint, model)
     {
         return respond::text(StatusCode::BAD_REQUEST, format!("{problem}\n"));

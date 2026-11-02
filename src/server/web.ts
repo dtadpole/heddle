@@ -2959,10 +2959,11 @@ export function unknownTurnSession(
    * every following turn of the session fail with a name nobody could choose from the menu. The endpoint judged is the
    * one this turn will use, as far as it is known before a session is opened: the request's, a resumed session's
    * record, then the defaults. A folder's existing session is only known once opened, and is judged again below,
-   * before its record is written.
+   * before its record is written. A subagent's session (a teammate's) is not judged: it runs on its own model, not one
+   * a composer names (#175), so a model it was never going to use is no reason to refuse it.
    */
-  if (model !== undefined) {
-    const resumedRecord = typeof body.session === 'string' && body.session.length > 0 ? ctx.session.list().find((entry) => entry.id === body.session) : undefined
+  const resumedRecord = typeof body.session === 'string' && body.session.length > 0 ? ctx.session.list().find((entry) => entry.id === body.session) : undefined
+  if (model !== undefined && resumedRecord?.origin !== 'subagent') {
     const nominatedEarly = ctx.model.defaultEndpoint()
     const prospect = resolveTurnEndpoint({
       ...(requested !== undefined ? { requested } : {}),
@@ -3044,7 +3045,7 @@ export function unknownTurnSession(
   const runModel = model ?? (sameEndpoint ? record?.model : undefined)
   const runEndpoint = ctx.model.endpoint(endpoint)
   /** The named model against the endpoint now known for certain (a folder's existing session), before its record is written. */
-  const modelProblem = model !== undefined && runEndpoint !== undefined ? selectionProblem(runEndpoint, model) : null
+  const modelProblem = model !== undefined && runEndpoint !== undefined && record?.origin !== 'subagent' ? selectionProblem(runEndpoint, model) : null
   if (modelProblem !== null) {
     respond(response, 400, 'text/plain', `${modelProblem}\n`)
     return
