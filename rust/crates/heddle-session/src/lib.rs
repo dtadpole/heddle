@@ -32,6 +32,7 @@
 //! `_verifiers_/70-workspaces-sessions` judges once the command line composes this crate.
 
 pub mod activity;
+pub mod append;
 pub mod clock;
 pub mod command;
 pub mod definition;
@@ -111,7 +112,7 @@ pub use title::{
     TitleSpawn, TitleTask, normalize_session_title, title_from_answer,
 };
 pub use transcript::{
-    DecodedTranscript, FRAME_MAGIC, Frame, FrameExtent, LogHeader, TranscriptFormat,
-    decode_transcript, encode_frame, frame_end, frame_extent, is_compressed, is_event_record,
-    judge_log_header, looks_compressed, split_frames,
+    DecodedTranscript, FRAME_MAGIC, Frame, FrameExtent, LogHeader, RecoveredTranscript,
+    TranscriptFormat, decode_transcript, encode_frame, frame_end, frame_extent, is_compressed,
+    is_event_record, judge_log_header, looks_compressed, recover_transcript, split_frames,
 };
