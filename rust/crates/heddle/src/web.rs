@@ -539,6 +539,19 @@ fn commands_host(boot: &Boot, host: &PageHost) -> Arc<heddle_commands::Commands>
             .map(|turns| {
                 Arc::new(move |id: &str| turns.is_running(id)) as heddle_commands::TurnRunning
             }),
+        // And a running `/compact` holds its session in the same registry, so a turn sent meanwhile waits for it
+        // (#140) and the session's Stop reaches its summary call (#154).
+        turn_hold: services
+            .get::<heddle_agent::TurnRegistry>("turns")
+            .map(|turns| {
+                Arc::new(move |id: &str| {
+                    let live = turns.begin(id, None);
+                    (
+                        live.token().clone(),
+                        Box::new(live) as Box<dyn std::any::Any + Send>,
+                    )
+                }) as heddle_commands::TurnHold
+            }),
     })
     .with_contributed(contributed);
     for refusal in commands.refused() {
@@ -603,7 +616,14 @@ impl heddle_web_composer::status::StatusHost for Composer {
 impl heddle_web_composer::model_switcher::ModelHost for Composer {
     fn describe_endpoints(&self) -> heddle_web_composer::model_switcher::EndpointListing {
         let nominated = self.nominated.clone().or_else(|| self.models.nominated());
-        let view = heddle_config::describe_endpoints(&self.models.list(), nominated.as_deref());
+        // The default selection rides along, so a composer opening a fresh session shows and sends it (A104).
+        let selection = self.models.default_selection();
+        let view = heddle_config::describe_endpoints(&self.models.list(), nominated.as_deref())
+            .with_selection(
+                selection.endpoint.as_deref(),
+                selection.model,
+                selection.reasoning_effort,
+            );
         heddle_web_composer::model_switcher::EndpointListing {
             endpoints: view
                 .endpoints
@@ -611,6 +631,8 @@ impl heddle_web_composer::model_switcher::ModelHost for Composer {
                 .filter_map(|endpoint| endpoint.as_object().cloned())
                 .collect(),
             default: view.default,
+            default_model: view.default_model,
+            default_effort: view.default_effort,
         }
     }
 
@@ -821,6 +843,10 @@ impl heddle_web_files::host::FilesHost for PageHost {
             Ok(reading) => serde_json::to_value(reading)
                 .and_then(serde_json::from_value)
                 .map_err(|error| FileReadError::NotText(error.to_string())),
+            Err(heddle_workspace::FileReadError::Unreadable { name }) => {
+                Err(FileReadError::Unreadable { name })
+            }
+            Err(heddle_workspace::FileReadError::ReadFailed) => Err(FileReadError::ReadFailed),
             Err(error @ heddle_workspace::FileReadError::NotAFile(_)) => {
                 Err(FileReadError::NotAFile(error.to_string()))
             }

@@ -10,7 +10,7 @@
 //! | `message` role `user` | closes the open turn, opens turn *n+1* with a `user` record as its prologue |
 //! | `message` role `tool` | fills the open call it answers (by `toolCallId`, else the newest open one); an unmatched result is its own `tool` row; text starting `error` marks `state: error` |
 //! | `message` role `assistant` | an `assistant` record |
-//! | `session/created` | nothing |
+//! | `session/created`, `model/selection` | nothing — durable session state, not trajectory activity |
 //! | `model/request` | closes the open step and opens the next (the prologue folds into it); a `system`/`request` record carrying the estimate |
 //! | `assistant/chunk` | assembles one streamed answer: text and reasoning deltas, provider usage, TTFT; a `tool-call` chunk is a `tool` record in state `running`; `done` settles it |
 //! | `assistant/completed` | settles the stream; writes the answer only if the step does not already hold the same words; a `completed` note with finish reason and rounds |
@@ -633,7 +633,8 @@ impl Projector {
         let at = at_of(event);
         match type_of(event) {
             "message" => self.message(event, at),
-            "session/created" => {}
+            // Durable session state is followed by the model seat, not an activity row or a turn boundary.
+            "session/created" | "model/selection" => {}
             "model/request" => self.model_request(event, at),
             "assistant/chunk" => self.chunk(event, at),
             "assistant/completed" => self.completed(event, at),

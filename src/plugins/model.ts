@@ -55,6 +55,13 @@ export const Config = Schema.object({
   endpoints: Schema.array(endpointSchema).default([]),
   /** The endpoint a caller means when it does not name one. */
   default: Schema.string(),
+  /**
+   * The model and reasoning effort a new session starts with when it names none (DSH's default model selection).
+   * Checked when a session starts, not when written: a value the default endpoint no longer offers falls back to the
+   * endpoint's own model and level with a warning, so a stale default never fails a session.
+   */
+  defaultModel: Schema.string(),
+  defaultEffort: Schema.string(),
   /** Read the local file even when the layer named endpoints; off only in tests. */
   readLocalConfig: Schema.boolean().default(true),
 })
@@ -62,6 +69,8 @@ export const Config = Schema.object({
 export interface Config {
   readonly endpoints?: readonly Partial<EndpointConfig>[]
   readonly default?: string
+  readonly defaultModel?: string
+  readonly defaultEffort?: string
   readonly readLocalConfig?: boolean
 }
 
@@ -88,6 +97,10 @@ export default function model(ctx: Context, config: Config = {}): void {
   // The configuration's nominated default is recorded on the service, so a caller that does not name an
   // endpoint gets the one a person chose rather than the first one in the list.
   if (nominated !== undefined && service.endpoint(nominated) !== undefined) service.nominateDefault(nominated)
+  service.setDefaults({
+    ...(config.defaultModel !== undefined ? { model: config.defaultModel } : {}),
+    ...(config.defaultEffort !== undefined ? { effort: config.defaultEffort } : {}),
+  })
   /**
    * The machine's file applies to the next request without a restart, as DSH's provider settings do: before every
    * read and every call the service asks whether any candidate file changed (its path, modification time and size),
