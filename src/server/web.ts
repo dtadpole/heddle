@@ -40,7 +40,7 @@ import { SessionSearchQueryError, searchSessions } from '../session/search.ts'
 import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.ts'
 import { SessionFlagError } from '../session/store.ts'
 import { normalizeSessionTitle, TITLE_INVALID } from '../session/title-text.ts'
-import { flagVerb, storeWriteFailure, type SessionWriteError } from '../session/write-failure.ts'
+import { flagVerb, storeCreateFailure, storeWriteFailure, type SessionWriteError } from '../session/write-failure.ts'
 import { activitySessions, refusalSentence, rowActivity, sessionActivity, stopRowActivity } from '../session/activity.ts'
 import { handleScheduleRoute } from '../schedule/http.ts'
 import type { ScheduleService } from '../schedule/service.ts'
@@ -2055,7 +2055,11 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     const preset = newSessionPreset(ctx, named.preset)
-    /** A branch heddle cannot write is `400` with its code and the session layer's sentence (#106), not a raw `500`. */
+    /**
+     * A branch heddle cannot write is `400` with its code and the session layer's sentence (#106), not a raw `500`. A
+     * session store that cannot record the session is DSH's `gateway/internal`, `failed to create session: <reason>` in
+     * words and never the store's path (#149, `respondWriteFailure`).
+     */
     let created
     try {
       created = ctx.session.createAt(wanted, {
@@ -2063,8 +2067,13 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
         ...(preset !== undefined ? { preset } : {}),
       })
     } catch (error) {
-      if ((error as { code?: unknown }).code !== 'session/unwritable') throw error
-      respond(response, 400, 'application/json', `${JSON.stringify({ error: (error as Error).message, code: 'session/unwritable' })}\n`)
+      if ((error as { code?: unknown }).code === 'session/unwritable') {
+        respond(response, 400, 'application/json', `${JSON.stringify({ error: (error as Error).message, code: 'session/unwritable' })}\n`)
+        return
+      }
+      const failed = storeCreateFailure(error)
+      if (failed === undefined) throw error
+      respondWriteFailure(response, failed)
       return
     }
     const { handle, definition } = created
@@ -2098,7 +2107,16 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'the folder must be under a workspace root' })}\n`)
       return
     }
-    const handle = ctx.session.openAt(folder, body.new === true ? { fresh: true } : {})
+    /** A session the store cannot record is DSH's `gateway/internal` in words, never the store's path (#149). */
+    let handle: SessionHandle
+    try {
+      handle = ctx.session.openAt(folder, body.new === true ? { fresh: true } : {})
+    } catch (error) {
+      const failed = storeCreateFailure(error)
+      if (failed === undefined) throw error
+      respondWriteFailure(response, failed)
+      return
+    }
     const meta = ctx.session.list().find((entry) => entry.id === handle.id)
     respond(
       response,
@@ -2967,12 +2985,26 @@ export function unknownTurnSession(
    * the session layer's title coordinator asks the model for the title (`../session/title.ts`). A title given here would
    * read as a person's name, and no title would ever be generated.
    */
-  const handle: SessionHandle =
-    typeof body.session === 'string' && body.session.length > 0
-      ? ctx.session.start({ resume: body.session })
-      : folder !== null
-        ? ctx.session.openAt(folder, { ...(body.new === true ? { fresh: true } : {}), ...born })
-        : ctx.session.start({ cwd: process.cwd(), ...born })
+  /**
+   * A session this turn would create that the store cannot record is DSH's `gateway/internal`, `failed to create session:
+   * <reason>` in words and never the store's path (#149): it was Node's raw `500 internal error: EACCES … <absolute store
+   * path>`. A resumed session is opened, not created, so its failure is not read as one.
+   */
+  const resuming = typeof body.session === 'string' && body.session.length > 0
+  let handle: SessionHandle
+  try {
+    handle =
+      resuming && typeof body.session === 'string'
+        ? ctx.session.start({ resume: body.session })
+        : folder !== null
+          ? ctx.session.openAt(folder, { ...(body.new === true ? { fresh: true } : {}), ...born })
+          : ctx.session.start({ cwd: process.cwd(), ...born })
+  } catch (error) {
+    const failed = resuming ? undefined : storeCreateFailure(error)
+    if (failed === undefined) throw error
+    respondWriteFailure(response, failed)
+    return
+  }
   if (folder !== null) ctx.workspace?.ensureOwner(folder)
   /**
    * The same rule for a folder's existing session, which is only known once it is opened: another preset named for it
@@ -3597,7 +3629,10 @@ function respond(
   response.end(body)
 }
 
-/** `500 { error, code: 'gateway/internal' }`: a change the session store could not save (#149, `../session/write-failure.ts`). */
+/**
+ * `500 { error, code: 'gateway/internal' }`: a change the session store could not save, or a session it could not create
+ * (#149, `../session/write-failure.ts`).
+ */
 function respondWriteFailure(response: ServerResponse, failed: SessionWriteError): void {
   respond(response, 500, 'application/json', `${JSON.stringify({ error: failed.message, code: failed.code })}\n`)
 }

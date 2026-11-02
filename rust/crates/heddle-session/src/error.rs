@@ -206,6 +206,16 @@ impl SessionError {
             .map(|reason| format!("failed to {verb} session \"{id}\": {reason}"))
     }
 
+    /// `failed to create session: <reason>` for a session the store could not record — DSH's `rejectCreation` sentence
+    /// (`dsh-api-session-controller` lib/index.js:1085), which names no session since none was made — or `None` for an
+    /// error that is not a store write failure, such as a branch heddle cannot write its definition into (#106's
+    /// [`SessionError::Unwritable`]). Answered beside [`WRITE_FAILED_CODE`]; `storeCreateFailure` in
+    /// `src/session/write-failure.ts`.
+    pub fn create_failure(&self) -> Option<String> {
+        self.write_reason()
+            .map(|reason| format!("failed to create session: {reason}"))
+    }
+
     /// Wrap an I/O failure with the path it happened on.
     pub fn io(path: impl Into<String>, source: std::io::Error) -> Self {
         SessionError::Io {
@@ -267,6 +277,31 @@ mod tests {
         assert!(!sentence.contains("/home/"), "and no path: {sentence}");
         assert_eq!(refusal.write_failure("pin", "s"), None);
         assert_eq!(WRITE_FAILED_CODE, "gateway/internal", "DSH's code for it");
+    }
+
+    #[test]
+    fn a_session_the_store_cannot_create_is_dshs_creation_sentence_in_words_never_with_its_path() {
+        // #149 (J180): New session in a workspace whose store folder is unwritable answered `400 <absolute store
+        // path>/session-<id>.json: Permission denied (os error 13)`. DSH's sentence names no session, since none was
+        // made (`rejectCreation`, dsh-api-session-controller lib/index.js:1085); `storeCreateFailure` is the same.
+        let sentence = io(ErrorKind::PermissionDenied)
+            .create_failure()
+            .expect("an I/O failure is a write failure");
+        assert_eq!(sentence, "failed to create session: permission denied");
+        assert!(!sentence.contains("/home/"), "and no path: {sentence}");
+        assert_eq!(
+            io(ErrorKind::StorageFull).create_failure().as_deref(),
+            Some("failed to create session: no space left on device")
+        );
+        let unwritable = SessionError::Unwritable {
+            folder: "work".into(),
+        };
+        assert_eq!(
+            unwritable.create_failure(),
+            None,
+            "a branch heddle cannot write is #106's refusal, not a store write failure"
+        );
+        assert_eq!(SessionError::EmptyId.create_failure(), None);
     }
 
     #[test]
