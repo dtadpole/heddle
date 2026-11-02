@@ -12,7 +12,7 @@
 
 #![cfg(unix)]
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -101,8 +101,9 @@ impl Home {
                 .spawn()
                 .expect("the binary runs"),
         );
-        let stdout = read_all(child.0.stdout.take().expect("piped stdout"));
-        let stderr = read_all(child.0.stderr.take().expect("piped stderr"));
+        let what = format!("`heddle {}`", args.join(" "));
+        let stdout = Reader::spawn(child.0.stdout.take().expect("piped stdout"));
+        let stderr = Reader::spawn(child.0.stderr.take().expect("piped stderr"));
         let deadline = Instant::now() + RUN_LIMIT;
         let status = loop {
             if let Some(status) = child.0.try_wait().expect("the command can be waited on") {
@@ -112,15 +113,19 @@ impl Home {
                 let _ = child.0.kill();
                 let _ = child.0.wait();
                 panic!(
-                    "`heddle {}` did not exit within {} s; killed",
-                    args.join(" "),
-                    RUN_LIMIT.as_secs()
+                    "{what} did not exit within {} s; killed\n{}{}",
+                    RUN_LIMIT.as_secs(),
+                    stdout.text(),
+                    stderr.text()
                 );
             }
             std::thread::sleep(Duration::from_millis(20));
         };
-        let stdout = stdout.join().expect("stdout was read");
-        let stderr = stderr.join().expect("stderr was read");
+        // The exit does not close the pipes when a process it started still holds them, so their ends are waited for
+        // with a deadline too.
+        let pipes = Instant::now() + PIPE_LIMIT;
+        let stdout = stdout.finish(pipes, &what, "stdout");
+        let stderr = stderr.finish(pipes, &what, "stderr");
         (status.code(), stdout, stderr)
     }
 
@@ -185,6 +190,9 @@ impl Home {
 /// How long a command-line run may take before it is killed and named as a hang.
 const RUN_LIMIT: Duration = Duration::from_secs(60);
 
+/// How long a process's pipes may stay open after it exited, held by a process it started, before the test fails.
+const PIPE_LIMIT: Duration = Duration::from_secs(10);
+
 /// A child process killed and reaped when it goes out of scope, so a failing assertion never leaves it running.
 struct Guarded(Child);
 
@@ -197,13 +205,63 @@ impl Drop for Guarded {
     }
 }
 
-/// Read a stream to its end on its own thread, so a full pipe never stalls the process writing it.
-fn read_all(mut stream: impl Read + Send + 'static) -> std::thread::JoinHandle<String> {
-    std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = stream.read_to_end(&mut bytes);
-        String::from_utf8_lossy(&bytes).into_owned()
-    })
+/// A child's stream, read on its own thread so a full pipe never stalls the process writing it. What has arrived so
+/// far is kept, so a failure can show it, and the end of the stream — its close, or the read error — is sent once.
+struct Reader {
+    bytes: Arc<Mutex<Vec<u8>>>,
+    end: std::sync::mpsc::Receiver<std::io::Result<()>>,
+}
+
+impl Reader {
+    fn spawn(mut stream: impl Read + Send + 'static) -> Self {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let (sender, end) = std::sync::mpsc::channel();
+        let sink = Arc::clone(&bytes);
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 8192];
+            let outcome = loop {
+                match stream.read(&mut chunk) {
+                    Ok(0) => break Ok(()),
+                    Ok(read) => sink.lock().unwrap().extend_from_slice(&chunk[..read]),
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(error) => {
+                        // Kept in the text as well, so a server's output says it even though it is never finished.
+                        sink.lock().unwrap().extend_from_slice(
+                            format!("\n[reading this stream failed: {error}]\n").as_bytes(),
+                        );
+                        break Err(error);
+                    }
+                }
+            };
+            let _ = sender.send(outcome);
+        });
+        Reader { bytes, end }
+    }
+
+    /// What has arrived so far.
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.bytes.lock().unwrap()).into_owned()
+    }
+
+    /// The whole stream once it has ended, by `deadline`: a read error, or a pipe still open then, fails the test
+    /// naming `what` and showing what had arrived.
+    fn finish(self, deadline: Instant, what: &str, stream: &str) -> String {
+        match self
+            .end
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        {
+            Ok(Ok(())) => self.text(),
+            Ok(Err(error)) => panic!(
+                "reading the {stream} of {what} failed: {error}\n{}",
+                self.text()
+            ),
+            Err(_) => panic!(
+                "the {stream} of {what} was still open {} s after it exited: a process it started holds the pipe\n{}",
+                PIPE_LIMIT.as_secs(),
+                self.text()
+            ),
+        }
+    }
 }
 
 impl Drop for Home {
@@ -249,39 +307,32 @@ struct Server {
     child: Guarded,
     port: u16,
     token: String,
-    output: Arc<Mutex<String>>,
+    stdout: Reader,
+    stderr: Reader,
 }
 
 impl Server {
     fn start(home: &Home) -> Self {
         // Guarded from the moment it exists: a panic while it starts kills it.
+        let mut child = Guarded(
+            home.command(&["web", "--host", "127.0.0.1", "--port", "0"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("the server starts"),
+        );
+        let stdout = Reader::spawn(child.0.stdout.take().expect("piped stdout"));
+        let stderr = Reader::spawn(child.0.stderr.take().expect("piped stderr"));
         let mut server = Server {
-            child: Guarded(
-                home.command(&["web", "--host", "127.0.0.1", "--port", "0"])
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .expect("the server starts"),
-            ),
+            child,
             port: 0,
             token: String::new(),
-            output: Arc::new(Mutex::new(String::new())),
+            stdout,
+            stderr,
         };
-        let output = Arc::clone(&server.output);
-        for stream in [
-            Box::new(server.child.0.stdout.take().unwrap()) as Box<dyn Read + Send>,
-            Box::new(server.child.0.stderr.take().unwrap()) as Box<dyn Read + Send>,
-        ] {
-            let output = Arc::clone(&output);
-            std::thread::spawn(move || {
-                for line in BufReader::new(stream).lines().map_while(Result::ok) {
-                    output.lock().unwrap().push_str(&format!("{line}\n"));
-                }
-            });
-        }
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            let text = output.lock().unwrap().clone();
+            let text = server.output();
             if let Some(url) = text
                 .lines()
                 .find_map(|line| line.strip_prefix("heddle web: http://127.0.0.1:"))
@@ -309,6 +360,11 @@ impl Server {
 
     fn pid(&self) -> u32 {
         self.child.0.id()
+    }
+
+    /// Everything it has printed so far, standard output first.
+    fn output(&self) -> String {
+        format!("{}{}", self.stdout.text(), self.stderr.text())
     }
 
     /// One HTTP/1.1 exchange, read to its end.
@@ -375,7 +431,7 @@ impl Server {
             assert!(
                 Instant::now() < deadline,
                 "the server did not exit within 30 s of {signal}\n{}",
-                self.output.lock().unwrap()
+                self.output()
             );
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -416,7 +472,7 @@ fn a_stopped_server_leaves_no_lock(signal: &str, count: usize) {
         home.locks(),
         vec![],
         "a server stopped by SIG{signal} leaves no lock behind (it exited {code:?})\n{}",
-        server.output.lock().unwrap()
+        server.output()
     );
 }
 
