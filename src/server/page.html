@@ -9938,6 +9938,10 @@ events.addEventListener('session', (message) => {
     scheduleGoalRefresh()
   }
   if (event.type === 'todo/write' && payload.session === (current ?? composerKey)) scheduleTodoRefresh()
+  // A change to a session's queue on the host — a row added, removed, edited or claimed, by any page (#162).
+  if (event.type === 'agent/inbox/spliced' && event.target === 'next-turn' && typeof payload.session === 'string' && queues.has(payload.session)) {
+    void syncHostQueue(payload.session)
+  }
   if (event.type === 'model/request') {
     /**
      * A request from a session that was **not running** starts a new turn, so its clock starts here; a request from a
@@ -10767,6 +10771,7 @@ function adoptSession(id) {
   composerKey = id
   renderQueue()
   void pumpQueue(id)
+  void syncHostQueue(id)
 }
 
 function sessionRunning() {
@@ -10892,7 +10897,7 @@ function submitText(text, attachments, gesture) {
    * queue row. It used to go through the dock and sit there marked `Sending…` until its whole turn ended, which is
    * the owner's nit: idle sends are not queueing, so they must not look like they are.
    */
-  if (!anyRunning() && !queueOf().some((item) => item.status === 'pending')) {
+  if (!anyRunning() && !queueOf().some((item) => item.status === 'pending' || item.host === true)) {
     void sendNow(text, attachments)
     return
   }
@@ -10968,12 +10973,133 @@ async function sendNow(text, attachments = []) {
 
 /** Add one message to the wait: at the end for an ordinary submit, at the front for a steer that could not land. */
 function enqueue(text, where, attachments = []) {
+  /**
+   * A session that exists keeps its queue on the host (#162): DSH queues a message sent while a turn runs in the
+   * session's durable next-turn inbox and draws the dock from it, so a reload, another tab and another device see the
+   * same rows, and the host runs the first one as the next turn. Only a message queued before the session exists (the
+   * first turn of a fresh panel) waits in this page until that session does.
+   */
+  if (composerKey !== QUEUE_KEY_NONE && where !== 'steer') {
+    void hostEnqueue(composerKey, text, attachments)
+    return
+  }
   const item = { id: `queued-${++queueSeq}`, text, attachments, status: 'pending' }
   const queue = queueOf()
   if (where === 'steer') queue.unshift(item)
   else queue.push(item)
   renderQueue()
   void pumpQueue()
+}
+
+/** A fresh id for one send, which the host keeps on the row so a retry and this page's pending row find it (#162). */
+function newRequestId() {
+  return typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `request-${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+/**
+ * Queue a message on the host (#162). The row shows `Sending…`, with its actions disabled, until the host answers, as
+ * DSH's pending submission row does; the host's row then takes its place (matched by `requestId`). A refusal gives the
+ * words back to an untouched composer and leaves the row `Not sent`, as the pump does.
+ */
+async function hostEnqueue(key, text, attachments = [], requestId = newRequestId()) {
+  const queue = queueOf(key)
+  const item = { id: `queued-${++queueSeq}`, requestId, text, attachments, status: 'sending', host: true }
+  queue.push(item)
+  renderQueue()
+  try {
+    const response = await fetch('/api/turn', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        session: key,
+        prompt: text,
+        ...(attachments.length > 0 ? { attachments: attachments.map((file) => file.path) } : {}),
+        queue: true,
+        requestId,
+        detach: true,
+      }),
+    })
+    if (response.status !== 202) throw new Error((await response.text().catch(() => '')).trim() || `HTTP ${response.status}`)
+    const body = await response.json().catch(() => ({}))
+    if (body.queued === true) {
+      item.status = 'host'
+      item.hostId = body.id
+    } else {
+      // The session was free by the time it arrived: the host ran it at once, as a turn of its own.
+      const at = queue.indexOf(item)
+      if (at !== -1) queue.splice(at, 1)
+    }
+    renderQueue()
+    void syncHostQueue(key)
+  } catch (error) {
+    item.status = 'failed'
+    if (key === composerKey && field.value.trim() === '') {
+      field.value = text
+      growComposer()
+      const at = queue.indexOf(item)
+      if (at !== -1) queue.splice(at, 1)
+    }
+    add('denied', `the message could not be queued: ${(error && error.message) || error}`)
+    renderQueue()
+  }
+}
+
+/** The latest read of each session's host queue, so a late answer for an older read is dropped (#162). */
+const hostQueueReads = new Map()
+/**
+ * Draw a session's queue from the host's rows (#162): its next-turn inbox, oldest first. Rows this page is still
+ * sending stay at the end until the host lists them (by `requestId`); rows that only ever lived here (queued before the
+ * session existed) are kept as they are.
+ */
+async function syncHostQueue(key = composerKey) {
+  if (typeof key !== 'string' || key === QUEUE_KEY_NONE) return
+  const generation = (hostQueueReads.get(key) ?? 0) + 1
+  hostQueueReads.set(key, generation)
+  let items
+  try {
+    const response = await fetch(`/api/sessions/${encodeURIComponent(key)}/queue`, { cache: 'no-store' })
+    if (!response.ok) return
+    items = (await response.json()).items
+  } catch {
+    return
+  }
+  if (hostQueueReads.get(key) !== generation || !Array.isArray(items)) return
+  const queue = queueOf(key)
+  const listed = new Set(items.map((row) => row.requestId).filter((id) => typeof id === 'string'))
+  const local = queue.filter((item) => !item.host || (item.status !== 'host' && !listed.has(item.requestId)))
+  const rows = items.map((row) => {
+    const previous = queue.find((item) => item.host && (item.hostId === row.id || (row.requestId !== undefined && item.requestId === row.requestId)))
+    return {
+      id: previous?.id ?? `host-${row.id}`,
+      hostId: row.id,
+      ...(typeof row.requestId === 'string' ? { requestId: row.requestId } : {}),
+      text: typeof row.text === 'string' ? row.text : '',
+      attachments: previous?.attachments ?? [],
+      editable: row.editable !== false,
+      status: 'host',
+      host: true,
+    }
+  })
+  queue.splice(0, queue.length, ...rows, ...local)
+  if (editing !== null && !queue.some((item) => item.id === editing.id)) editing = null
+  if (key === composerKey) renderQueue()
+}
+
+/** Take a host row out of the queue: `removed`, or `claimed` when its turn already took it (#162). */
+async function hostRemove(key, item) {
+  try {
+    const response = await fetch(`/api/sessions/${encodeURIComponent(key)}/queue/remove`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: item.hostId }),
+    })
+    const body = await response.json().catch(() => ({}))
+    return body.outcome === 'removed'
+  } catch {
+    return false
+  } finally {
+    void syncHostQueue(key)
+  }
 }
 
 /**
@@ -11020,6 +11146,16 @@ async function steerItem(id) {
   const at = queue.findIndex((item) => item.id === id)
   if (at === -1) return
   const item = queue[at]
+  /**
+   * A host row is taken out of the host's queue first, so it cannot also run as the next turn; then it is steered, and
+   * queued again (at the end) if there is no turn to steer into (#162).
+   */
+  if (item !== undefined && item.host === true && item.status === 'host') {
+    const key = composerKey
+    if (!(await hostRemove(key, item))) return
+    if (!(await steerNow(item.text, item.attachments ?? []))) void hostEnqueue(key, item.text, item.attachments ?? [])
+    return
+  }
   if (item !== undefined && item.status !== 'sending' && (await steerNow(item.text, item.attachments ?? []))) {
     const landed = queue.findIndex((entry) => entry.id === id)
     if (landed !== -1) queue.splice(landed, 1)
@@ -11048,6 +11184,15 @@ async function steerQueue() {
   renderQueue()
   for (const item of [...queue]) {
     if (item.status === 'sending') continue
+    if (item.host === true && item.status === 'host') {
+      // A host row leaves the host's queue before it is steered (#162); one already claimed is its own turn now.
+      if (!(await hostRemove(composerKey, item))) continue
+      if (!(await steerNow(item.text, item.attachments ?? []))) {
+        void hostEnqueue(composerKey, item.text, item.attachments ?? [])
+        break
+      }
+      continue
+    }
     if (!(await steerNow(item.text, item.attachments ?? []))) break
     const at = queue.findIndex((entry) => entry.id === item.id)
     if (at !== -1) queue.splice(at, 1)
@@ -11060,7 +11205,9 @@ function removeItem(id) {
   const queue = queueOf()
   const at = queue.findIndex((item) => item.id === id)
   if (at === -1) return
-  queue.splice(at, 1)
+  const [gone] = queue.splice(at, 1)
+  // A host row is removed on the host too (#162); the redraw follows its answer.
+  if (gone !== undefined && gone.host === true && gone.status === 'host') void hostRemove(composerKey, gone)
   if (editing !== null && editing.id === id) editing = null
   renderQueue()
 }
@@ -11090,6 +11237,20 @@ function queueActions(item, isEditing) {
       item.text = text
       editing = null
       renderQueue()
+      // A host row is rewritten on the host (#162), keeping its place; a row its turn already took is not.
+      if (item.host === true && item.status === 'host') {
+        const key = composerKey
+        void fetch(`/api/sessions/${encodeURIComponent(key)}/queue/edit`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ id: item.hostId, text }),
+        })
+          .then(async (response) => {
+            if (!response.ok) add('denied', `the queued message could not be edited: ${(await response.json().catch(() => ({}))).error ?? response.status}`)
+          })
+          .catch(() => {})
+          .finally(() => void syncHostQueue(key))
+      }
     })
     action(closeIcon(), 'Cancel edit', false, () => {
       editing = null
@@ -11098,7 +11259,8 @@ function queueActions(item, isEditing) {
     return wrap
   }
   action(sendIcon(), 'Steer queued message', sending, () => void steerItem(item.id))
-  action(editIcon(), 'Edit queued message', sending, () => {
+  // DSH edits only rows whose every part is text; a row with an attachment is removed and sent again instead (#162).
+  action(editIcon(), 'Edit queued message', sending || item.editable === false, () => {
     editing = { id: item.id, text: item.text }
     renderQueue()
   })
