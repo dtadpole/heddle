@@ -49,6 +49,13 @@ asks its public `ask` DSH's one `plan-review` question with the plan under it an
 Keep planning or typed words keep planning with the words as feedback; a skip dismisses (plan mode stays). The
 question service is not on main yet; until it is, the tool refuses as above.
 
+The review is asked `continuable: false`, so only the turn that asked it can take the answer (#228). A review left
+open by a crash reads as cancelled (`interrupted`) after the restart and an Approve is refused, as DSH's "after a
+service reload while the review is pending, the call fails closed"; `/plan off` stays the manual escape. An approval
+leaves plan mode without the "switched back to the default mode" notice (`setPlanMode`'s `narrate: false`): the tool's
+result already says so, and DSH does not narrate the exit tool's transition. Judged across a crash by
+`_verifiers_/70-workspaces-sessions/check-plan-review-crash.mjs`.
+
 ## The composer
 
 The page lends `window.heddlePage.setModeChip` and `setPlaceholder`; the menu module (`src/commands/menu.js`) draws

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 
+import type { TurnRegistry } from '../agent/turns.ts'
 import type { SessionEvent, SessionHandle, SessionMeta, SessionStore } from '../session/store.ts'
 
 /**
@@ -417,9 +418,20 @@ export class GoalService extends Service {
     return this.view(handle, foldGoal(this.store.read(handle))) as GoalView
   }
 
-  /** Pause an active goal and stop automatic continuation. */
-  pause(handle: SessionHandle, ref: GoalRef): GoalView {
-    return this.transition(handle, ref, 'pause', ['active'], 'paused')
+  /**
+   * Pause an active goal and stop automatic continuation.
+   *
+   * A person's pause (the default: the composer's `/goal pause`, the goal bar's POST) also aborts the turn already
+   * running in the session, as Stop does, keeping queued input (issue #190). DSH's round driver: "a host-initiated
+   * pause also aborts the turn already running, while a model-initiated pause inside its own turn finishes normally"
+   * (dsh-goal-round-driver, the `goal/changed` listener: `agent.cancel({kind: 'user'}, {keepInbox: true})` unless the
+   * change came from the running agent itself). The model's own goal tool and the round driver pass
+   * `initiator: 'agent'`, which only pauses.
+   */
+  pause(handle: SessionHandle, ref: GoalRef, options: { readonly initiator?: 'person' | 'agent' } = {}): GoalView {
+    const view = this.transition(handle, ref, 'pause', ['active'], 'paused')
+    if ((options.initiator ?? 'person') === 'person') (this.ctx.get('turns') as TurnRegistry | undefined)?.abort(handle.id, 'goal paused by the user')
+    return view
   }
 
   /**

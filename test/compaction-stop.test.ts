@@ -68,7 +68,8 @@ test('a Stop while the summary call is in flight cancels it, and nothing lands',
 test('a summary that returned before the Stop is committed, as DSH commits an automatic one', async () => {
   const controller = new AbortController()
   const { store, context, session, workspace } = fixture(async () => {
-    controller.abort()
+    // The Stop comes once the call has answered in full: after this task, not inside the call.
+    setTimeout(() => controller.abort(), 0)
     return 'the briefing'
   })
   const generation = store.surface(session).replaceGeneration
@@ -76,6 +77,40 @@ test('a summary that returned before the Stop is committed, as DSH commits an au
   assert.equal(report.compacted, true)
   assert.ok(store.surface(session).replaceGeneration > generation, 'the replacement landed; the loop’s own check stops the turn')
 })
+
+/**
+ * #200: a streamed summary cut by a Stop does not throw. The completion hands back the text it had read, or none, once
+ * its signal fires. TS committed the cut text as the checkpoint (and /compact answered "Compacted …"), or refused an
+ * empty cut as "the summariser returned nothing"; Rust records both as stopped.
+ */
+for (const [form, cut] of [
+  ['part of the summary', 'a compact brief'],
+  ['nothing yet', ''],
+] as const) {
+  test(`a Stop that cuts the streamed summary after ${form} lands nothing and is recorded as stopped (#200)`, async () => {
+    const { store, context, session, workspace, types } = fixture(
+      (request) =>
+        new Promise<string>((resolve) => {
+          // The call ends the way a cut stream ends: it resolves with what it had read once the signal fires.
+          request.signal?.addEventListener('abort', () => resolve(cut), { once: true })
+        }),
+    )
+    const controller = new AbortController()
+    const generation = store.surface(session).replaceGeneration
+    const prepared = context.prepare(session, { cwd: workspace, endpoint: 'local', signal: controller.signal })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    controller.abort()
+    const report = await prepared
+
+    assert.equal(report.compacted, false, 'the cut summary did not compact')
+    assert.equal(store.surface(session).replaceGeneration, generation, 'no replacement landed')
+    assert.ok(!types().includes('compaction/summary') && !types().includes('compaction/end'), `no summary or end was written (${types().join(', ')})`)
+    const failed = store.read(session).find((event) => event.type === 'compaction/failed') as { stopped?: unknown; refused?: unknown; reason?: unknown } | undefined
+    assert.equal(failed?.stopped, true, `the span is closed as stopped (${JSON.stringify(failed)})`)
+    assert.equal(failed?.refused, undefined, 'not as refused')
+    assert.equal(failed?.reason, 'stopped by the caller', 'not as "the summariser returned nothing"')
+  })
+}
 
 test('a compaction with no signal, or one that never fires, runs to the end as before', async () => {
   const quiet = fixture(async (request) => {

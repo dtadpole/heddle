@@ -159,8 +159,9 @@ pub trait SubagentStore: Send + Sync {
     }
     /// Close the turn a writer that is gone left open in `session`, by taking its writer lock (DSH's write-open
     /// closers, written rather than only shown) and letting go again; whether there was one to close. `false`
-    /// while a live writer holds the session, and from the default, for a store that only creates and reads
-    /// children.
+    /// while a live writer holds the session, when only a command was left open (a `/compact` a restart cut,
+    /// #206: no answer was lost, and its closers wait for the next write-open), and from the default, for a store
+    /// that only creates and reads children.
     fn close_interrupted(&self, session: &SessionHandle) -> Result<bool, PortError> {
         let _ = session;
         Ok(false)
@@ -2434,6 +2435,58 @@ mod tests {
             "the next start reports nothing"
         );
         assert_eq!(notices.seen().len(), 1);
+    }
+
+    /// test/subagent.test.ts: a child whose only open item is a `/compact` a restart cut (#206) lost no answer, so
+    /// its parent is not told it was interrupted.
+    #[tokio::test]
+    async fn a_child_whose_only_open_item_is_a_cut_compact_is_not_reported_as_interrupted() {
+        let (sessions, _sessions_dir) = crate::adapters::tests::sessions_at("report-command-only");
+        let store = sessions.store();
+        let parent = store
+            .create(heddle_session::CreateOptions::default())
+            .unwrap();
+        let child = store
+            .create(heddle_session::CreateOptions {
+                parent_session: Some(parent.id.clone()),
+                origin: Some(heddle_session::SessionOrigin::Subagent),
+                delegation_depth: Some(1),
+                ..heddle_session::CreateOptions::default()
+            })
+            .unwrap();
+        // Its turn ended; then a /compact was waiting on its summary when the process exited.
+        for value in [
+            serde_json::json!({"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "the task"}]}}),
+            serde_json::json!({"type": "model/request", "messages": 1}),
+            serde_json::json!({"type": "assistant/completed", "text": "the answer"}),
+            serde_json::json!({"type": "turn/completed", "rounds": 1}),
+            serde_json::json!({"type": "command/run", "commandId": "cmd-1", "name": "compact", "source": {"kind": "user"}}),
+            serde_json::json!({"type": "compaction/start", "fromSeq": 1, "throughSeq": 3, "shadowedSeqs": [1, 2, 3]}),
+        ] {
+            store
+                .append(
+                    &child,
+                    heddle_session::NewEvent::try_from(value).unwrap(),
+                    heddle_session::AppendOptions::default(),
+                )
+                .unwrap();
+        }
+        store.release(&child);
+        let (service, notices) = report_service(&sessions);
+
+        assert_eq!(
+            service.report_interrupted(&[parent.id.clone(), child.id.clone()]),
+            0,
+            "no turn was cut, so the parent has nothing to hear"
+        );
+        service.settle(&parent.id).await;
+        assert!(notices.seen().is_empty());
+        assert_eq!(
+            written_kinds(&sessions, &child).last().map(String::as_str),
+            Some("compaction/start"),
+            "the sweep leaves the log to the next write-open"
+        );
+        assert!(!store.writer_held(&child));
     }
 
     #[tokio::test]
