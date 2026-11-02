@@ -127,6 +127,12 @@ export function turnEndOf(completed: TurnEndEvidence | undefined, closing: TurnE
 /** How one round is run: append the attributed user message and answer it with a turn. */
 export interface GoalDriverDeps {
   readonly run: (handle: SessionHandle, prompt: string, source: Record<string, unknown>) => Promise<unknown>
+  /**
+   * Whether a person's prompt waits in the session's queue (#162, #177). DSH's round driver yields to queued input
+   * (`competingQueued`): "A round prompt still queued when the agent reaches idle is removed from the inbox, so later
+   * human input does not wait behind it". The queued turn runs first, and its end asks for the next round again.
+   */
+  readonly competing?: (handle: SessionHandle) => boolean
 }
 
 /** What one `advance` call did. */
@@ -316,6 +322,9 @@ export class GoalDriver extends Service {
         }
         return { rounds, stopped: 'round-limit', blocked: decision.reason }
       }
+
+      /** A person's queued prompt goes first (#177); its turn's end requests the next round. */
+      if (this.deps.competing?.(handle) === true) return { rounds, stopped: 'yielded' }
 
       const before = view!.roundsStarted
       /** Where this round's own events start, so a round that was not admitted can be read back. */

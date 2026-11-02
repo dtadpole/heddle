@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 
 import { runTurn } from '../agent/loop.ts'
+import { pendingInbox } from '../session/inbox.ts'
 import { GoalDriver, isBlockedTurnEnd, turnEndOf, type TurnEndEvidence } from '../goal/driver.ts'
 
 /** Name this plugin is registered and logged under. */
@@ -39,6 +40,7 @@ export function apply(ctx: Context): void {
         ...(meta?.model !== undefined ? { model: meta.model } : {}),
       })
     },
+    competing: (handle) => pendingInbox(ctx.session.store, handle)['next-turn'].length > 0,
   })
 
   /**
