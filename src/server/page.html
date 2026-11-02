@@ -11085,6 +11085,37 @@ async function syncHostQueue(key = composerKey) {
   if (key === composerKey) renderQueue()
 }
 
+/**
+ * Steer a host row: one host operation moves it out of the queue and into the running turn's next step, so every page
+ * sees it move at once (#162, developer-ten's review). `false` when nothing runs to steer into or its turn took it.
+ */
+async function hostSteer(key, item) {
+  try {
+    const response = await fetch(`/api/sessions/${encodeURIComponent(key)}/queue/steer`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: item.hostId }),
+    })
+    const body = await response.json().catch(() => ({}))
+    if (body.outcome === 'claimed') add('denied', 'that queued message was already sent')
+    return body.outcome === 'steered'
+  } catch {
+    return false
+  } finally {
+    void syncHostQueue(key)
+  }
+}
+
+/**
+ * Send a host row again: taken out and queued anew, at the end. The host runs it once the session is free; a queue
+ * a Stop held is released by it, as by any send (#162). The host has no move-to-front, so this is the honest stand-in
+ * for a local row's move to the front.
+ */
+async function hostResend(key, item) {
+  if (!(await hostRemove(key, item))) return
+  await hostEnqueue(key, item.text, item.attachments ?? [])
+}
+
 /** Take a host row out of the queue: `removed`, or `claimed` when its turn already took it (#162). */
 async function hostRemove(key, item) {
   try {
@@ -11152,8 +11183,10 @@ async function steerItem(id) {
    */
   if (item !== undefined && item.host === true && item.status === 'host') {
     const key = composerKey
-    if (!(await hostRemove(key, item))) return
-    if (!(await steerNow(item.text, item.attachments ?? []))) void hostEnqueue(key, item.text, item.attachments ?? [])
+    if (!(await hostSteer(key, item))) {
+      // Nothing runs to steer into: the row is sent again, which is the person acting, so a queue their Stop held drains.
+      await hostResend(key, item)
+    }
     return
   }
   if (item !== undefined && item.status !== 'sending' && (await steerNow(item.text, item.attachments ?? []))) {
@@ -11185,12 +11218,8 @@ async function steerQueue() {
   for (const item of [...queue]) {
     if (item.status === 'sending') continue
     if (item.host === true && item.status === 'host') {
-      // A host row leaves the host's queue before it is steered (#162); one already claimed is its own turn now.
-      if (!(await hostRemove(composerKey, item))) continue
-      if (!(await steerNow(item.text, item.attachments ?? []))) {
-        void hostEnqueue(composerKey, item.text, item.attachments ?? [])
-        break
-      }
+      // One host operation moves the row into the running turn (#162); a refusal means the turn has ended.
+      if (!(await hostSteer(composerKey, item))) break
       continue
     }
     if (!(await steerNow(item.text, item.attachments ?? []))) break
@@ -11259,8 +11288,7 @@ function queueActions(item, isEditing) {
     return wrap
   }
   action(sendIcon(), 'Steer queued message', sending, () => void steerItem(item.id))
-  // DSH edits only rows whose every part is text; a row with an attachment is removed and sent again instead (#162).
-  action(editIcon(), 'Edit queued message', sending || item.editable === false, () => {
+  action(editIcon(), 'Edit queued message', sending, () => {
     editing = { id: item.id, text: item.text }
     renderQueue()
   })
@@ -11303,7 +11331,9 @@ function queueAttachmentStrip(attachments) {
 function queueRow(item) {
   const row = document.createElement('li')
   row.className = 'row'
-  row.dataset.status = item.status
+  // A host row waits as a local one does; `data-host` says where it is kept (#162).
+  row.dataset.status = item.status === 'host' ? 'pending' : item.status
+  if (item.host === true) row.dataset.host = 'true'
   row.dataset.id = item.id
   if (editing !== null && editing.id === item.id) {
     const editor = document.createElement('textarea')
