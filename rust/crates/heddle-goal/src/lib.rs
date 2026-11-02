@@ -55,6 +55,6 @@ pub use service::{
     CreateGoal, DEFAULT_MAX_GOAL_ROUNDS, EditGoal, FoldedGoal, GOAL_CHANGE_EVENT,
     GOAL_CHANGE_VERSION, GoalActivation, GoalBlockReason, GoalChange, GoalConfig, GoalError,
     GoalErrorCode, GoalId, GoalIds, GoalOperation, GoalPhase, GoalRef, GoalService, GoalSnapshot,
-    GoalView, MAX_BLOCK_MESSAGE_LENGTH, MAX_OBJECTIVE_LENGTH, RandomGoalIds, decode_goal_change,
-    fold_goal, goal_change_event,
+    GoalView, MAX_BLOCK_MESSAGE_LENGTH, MAX_OBJECTIVE_LENGTH, PauseInterrupter, RandomGoalIds,
+    decode_goal_change, fold_goal, goal_change_event,
 };

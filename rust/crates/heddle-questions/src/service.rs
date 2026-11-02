@@ -21,6 +21,9 @@ use crate::model::{
     QuestionError, codes, validate_answers, validate_questions,
 };
 
+/// Why a request only its own turn could take reads as cancelled once that turn is gone without an answer (#228).
+pub const INTERRUPTED_REASON: &str = "interrupted";
+
 /// How a call waits: `Legacy` until an answer, `Timed` until a deadline (DSH's two tool definitions).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Mode {
@@ -126,6 +129,8 @@ pub struct FoldedRequest {
     pub deadline: Option<String>,
     /// A timed wait ran out.
     pub expired: bool,
+    /// False when the request is answerable only while the turn that asked it waits ([`QuestionService::ask_with`]).
+    pub continuable: bool,
     /// The final event, if any.
     pub settled: Option<Settled>,
 }
@@ -172,6 +177,7 @@ pub fn fold_questions(events: &[Value]) -> Vec<FoldedRequest> {
                     .and_then(Value::as_str)
                     .map(str::to_owned),
                 expired: false,
+                continuable: event.get("continuable") != Some(&Value::Bool(false)),
                 settled: None,
             });
             continue;
@@ -331,6 +337,25 @@ impl QuestionService {
         timeout: Option<&Value>,
         cancel: Option<CancellationToken>,
     ) -> Result<AskOutcome, QuestionError> {
+        self.ask_with(session, raw, timeout, cancel, true).await
+    }
+
+    /// [`Self::ask`], saying whether the request may outlive its turn (`ask`'s `continuable` in the TypeScript build).
+    ///
+    /// `continuable: false` asks a question only this turn can take: if the turn ends without an answer and without a
+    /// Stop (the process died), the request reads as cancelled (`interrupted`) instead of `continued`, and an answer is
+    /// refused (#228). DSH keeps only `ask_user_question` calls answerable past their turn; `exit_plan_mode`'s plan
+    /// review fails closed after a reload. It is written on `question/asked` only when false. It is meant for untimed
+    /// waits: a timed wait that runs out writes `pending` and drops its waiter, so the request then reads as cancelled
+    /// and refuses an answer.
+    pub async fn ask_with(
+        &self,
+        session: &str,
+        raw: &Value,
+        timeout: Option<&Value>,
+        cancel: Option<CancellationToken>,
+        continuable: bool,
+    ) -> Result<AskOutcome, QuestionError> {
         let questions = validate_questions(raw)?;
         let seconds = self.wait_seconds(timeout);
         if cancel.as_ref().is_some_and(CancellationToken::is_cancelled) {
@@ -345,11 +370,11 @@ impl QuestionService {
                 Utc::now() + chrono::Duration::seconds(i64::try_from(seconds).unwrap_or(i64::MAX)),
             )
         });
-        self.append(
-            session,
-            "question/asked",
-            json!({ "requestId": id, "questions": questions, "timed": seconds.is_some(), "askedAt": iso_now(), "deadline": deadline }),
-        )?;
+        let mut asked = json!({ "requestId": id, "questions": questions, "timed": seconds.is_some(), "askedAt": iso_now(), "deadline": deadline });
+        if !continuable {
+            asked["continuable"] = Value::Bool(false);
+        }
+        self.append(session, "question/asked", asked)?;
         let (sender, mut receiver) = oneshot::channel();
         let hold = Arc::new(Notify::new());
         self.waiters.lock().expect("waiters").insert(
@@ -472,8 +497,14 @@ impl QuestionService {
                 format!("question request '{id}' is already {kind}"),
             ));
         }
-        let answers = validate_answers(&request.questions, raw)?;
         let waiting = self.waiters.lock().expect("waiters").contains_key(id);
+        if !waiting && !request.continuable {
+            return Err(QuestionError::new(
+                codes::SETTLED,
+                format!("question request '{id}' is already cancelled"),
+            ));
+        }
+        let answers = validate_answers(&request.questions, raw)?;
         let late = !waiting;
         self.append(
             session,
@@ -568,6 +599,11 @@ impl QuestionService {
             }
             None if waiter.is_some() => {
                 view.insert("state".into(), json!("waiting"));
+            }
+            None if !request.continuable => {
+                view.insert("deadline".into(), Value::Null);
+                view.insert("state".into(), json!("cancelled"));
+                view.insert("reason".into(), json!(INTERRUPTED_REASON));
             }
             None => {
                 view.insert("deadline".into(), Value::Null);

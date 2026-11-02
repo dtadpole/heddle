@@ -7,7 +7,8 @@
 //!
 //! Supported keywords: `type` (one name or a list), `properties`, `required`, `additionalProperties`
 //! (a boolean or a schema; absent allows anything, as Schemastery's object did), `items`, `enum`,
-//! `const`, `anyOf`, `default` and `description`. Any other keyword is ignored rather than refused, so a
+//! `const`, `anyOf`, `minimum`, `maximum`, `default`, `description`, and `x-heddle-rule` (a named rule
+//! across fields, judged at the root once the value fits). Any other keyword is ignored rather than refused, so a
 //! schema written for a richer validator still loads. Defaults are documentation here: a component
 //! fills its own when it reads its configuration.
 
@@ -99,6 +100,15 @@ pub struct Schema {
     /// What the value is for, for a reader.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// A rule across fields this crate knows by name (`x-heddle-rule`), judged once the value fits every
+    /// other keyword: [`crate::context_rule::CONTEXT_BUDGET_RULE`] is the context row's budget (#212). An
+    /// unknown name judges nothing, as an unknown keyword does.
+    #[serde(
+        rename = "x-heddle-rule",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub rule: Option<String>,
 }
 
 /// One way a value does not fit its schema.
@@ -149,6 +159,12 @@ impl Schema {
     pub fn check(&self, value: &Value) -> Vec<SchemaProblem> {
         let mut problems = Vec::new();
         self.check_into(value, "", &mut problems);
+        // A rule across fields assumes the fields are what the schema says, so it speaks only after they are.
+        if problems.is_empty()
+            && self.rule.as_deref() == Some(crate::context_rule::CONTEXT_BUDGET_RULE)
+        {
+            problems.extend(crate::context_rule::context_budget_problems(value));
+        }
         problems
     }
 

@@ -22,7 +22,10 @@ import type { SessionEvent } from './store.ts'
  * 1. one tool `message` per call the turn left unanswered, in call order — the shape the loop commits a result in;
  * 2. `assistant/completed`, the turn's answer record, with the text and reasoning the turn streamed and an `ended`
  *    reason, which is how a turn stopped early already says so;
- * 3. `turn/completed`, carrying DSH's cause as `reason: { kind }` beside the rounds the turn ran.
+ * 3. `turn/completed`, carrying DSH's cause as `reason: { kind }` beside the rounds the turn ran;
+ * 4. for a command the process left running, `command/done` of kind `error`, preceded by a stopped `compaction/failed`
+ *    when it is a `/compact` cut mid-summary (#206). heddle logs a command as DSH does (dsh-commands: `command/run`
+ *    before the handler, `command/done` after it settles), so a restart between the two leaves a run with no end.
  *
  * Sequences continue the log and every closer reuses the last real event's time, as DSH's do: a repair is not activity,
  * and a deterministic closer is what lets the read and the write produce the same events.
@@ -49,13 +52,27 @@ export interface CloserCause {
 /** A crashed or killed writer's turn: DSH's `interruptedTurnClosers` cause. */
 export const INTERRUPTED: CloserCause = { kind: 'interrupted' }
 
-/** What a closer says, by cause: the answer to an open call, and the reason the turn's record gives. */
-const CLOSER_TEXT: Readonly<Record<CloserCause['kind'], { readonly result: string; readonly ended: string }>> = {
+/**
+ * What a closer says, by cause: the answer to an open call, the reason the turn's record gives, the answer to a command
+ * left running, and the reason a compaction that command left open is closed with (#206).
+ */
+const CLOSER_TEXT: Readonly<
+  Record<CloserCause['kind'], { readonly result: string; readonly ended: string; readonly command: string; readonly compaction: string }>
+> = {
   interrupted: {
     result: 'error (INTERRUPTED): the turn ended before this call answered',
     ended: 'the process exited before this turn finished, so the turn was closed; unfinished tool calls have unknown outcomes',
+    command: 'The process exited before this command finished.',
+    compaction: 'the process exited before the compaction finished',
   },
 }
+
+/**
+ * What a command whose compaction was cut answers: DSH's words for a cancelled `/compact` (dsh-command-compact
+ * `cancelled`), the same `COMPACT_CANCELLED` the Stop route answers with (src/commands/builtins.ts). The session layer
+ * does not import the commands layer, so the words are restated here and a test holds the two equal.
+ */
+export const COMPACTION_CANCELLED = 'Compaction cancelled.'
 
 /** The events that end a turn in heddle's log: the loop's own end, and a teammate's failed turn. */
 const TURN_ENDS: ReadonlySet<string> = new Set(['turn/completed', 'turn/failed'])
@@ -76,17 +93,29 @@ function textOf(message: { readonly content?: readonly { readonly type?: string;
  * The one exception is a turn's automatic compaction, its pre-step: a `compaction/start` after a prompt that has had no
  * turn end opens the turn too (#154). A process killed while that summary ran left the prompt unanswered with nothing
  * saying why; DSH appends `turn/start` before the pre-step, so its `openTurnClosers` closes such a turn as interrupted.
- * A `/compact` on its own has no prompt after the last turn end and stays as it was. The span itself needs no closer: a
- * compaction is log-only until its replacement note, so a `compaction/start` with no end leaves the surface unchanged,
- * and the next turn compacts again. A call is open from its `tool-call` chunk
+ * A `/compact` on its own has no prompt after the last turn end and opens no turn (its command is closed below). The
+ * span needs no closer as a turn's: a compaction is log-only until its replacement note, so a `compaction/start` with
+ * no end leaves the surface unchanged, and the next turn compacts again. A call is open from its `tool-call` chunk
  * until a tool message names it; a turn end forgets the calls it leaves, as DSH's recovery does at its boundaries, so an
  * old turn is never reopened (the request-time repair answers its calls for the model).
+ *
+ * **A command left running is closed too** (#206). A `command/run` with no `command/done` is a row the page draws as
+ * Running… for good, and nothing tells the person the command did not happen. Each such command gets a
+ * `command/done` of kind `error`, after the turn's closers when there are any, in the order the commands ran. A command
+ * that left its compaction open (a `compaction/start` after its `command/run`, with no `compaction/end` or
+ * `compaction/failed` since) is a `/compact` cut mid-summary: its span is closed first with a `compaction/failed` marked
+ * `stopped`, the record a Stop writes (src/context/compaction.ts `stopped`), and the command answers "Compaction
+ * cancelled.", as DSH settles a cancelled `/compact`. Any other command answers the generic words. Such a compaction is
+ * the command's, not a turn's pre-step, so it does not open a turn. A command a closer has answered is no longer open,
+ * so a second restart writes nothing more.
  *
  * @param events - the log as the store holds it, possibly ending inside a turn.
  * @param cause - why the turn is being closed: selects the words and the turn's `reason`.
  * @returns the events to append after `events`, with their seqs and times assigned.
  */
 export function openTurnClosers(events: readonly SessionEvent[], cause: CloserCause): SessionEvent[] {
+  /** Commands run with no `command/done` yet, by id in run order, each with the compaction span it left open, if any. */
+  const commands = new Map<string, { span?: { readonly fromSeq: unknown; readonly throughSeq: unknown } }>()
   let open = false
   /** Unanswered call ids in the order the model asked for them; a Map keeps insertion order across deletes. */
   let pending = new Map<string, true>()
@@ -129,8 +158,21 @@ export function openTurnClosers(events: readonly SessionEvent[], cause: CloserCa
         else if (chunk?.type === 'done' && typeof chunk.finishReason === 'string') finishReason = chunk.finishReason
         break
       }
-      case 'compaction/start':
-        if (prompted) open = true
+      case 'command/run':
+        if (typeof event.commandId === 'string') commands.set(event.commandId, {})
+        break
+      case 'command/done':
+        if (typeof event.commandId === 'string') commands.delete(event.commandId)
+        break
+      case 'compaction/start': {
+        const running = [...commands.values()].at(-1)
+        if (running !== undefined) running.span = { fromSeq: event.fromSeq, throughSeq: event.throughSeq }
+        else if (prompted) open = true
+        break
+      }
+      case 'compaction/end':
+      case 'compaction/failed':
+        for (const command of commands.values()) delete command.span
         break
       case 'message': {
         const message = event.message as { role?: string; toolCallId?: unknown; content?: readonly { type?: string; text?: string }[] } | undefined
@@ -145,33 +187,49 @@ export function openTurnClosers(events: readonly SessionEvent[], cause: CloserCa
     }
   }
   const last = events.at(-1)
-  if (!open || last === undefined) return []
+  if ((!open && commands.size === 0) || last === undefined) return []
 
   const words = CLOSER_TEXT[cause.kind]
   const at = last.at
   let seq = events.length
-  const rounds = Math.max(0, requests - retries)
   const closers: SessionEvent[] = []
-  for (const toolCallId of pending.keys()) {
+  if (open) {
+    const rounds = Math.max(0, requests - retries)
+    for (const toolCallId of pending.keys()) {
+      closers.push({
+        seq: seq++,
+        at,
+        type: 'message',
+        message: { role: 'tool', toolCallId, content: [{ type: 'text', text: words.result }] },
+      })
+    }
     closers.push({
       seq: seq++,
       at,
-      type: 'message',
-      message: { role: 'tool', toolCallId, content: [{ type: 'text', text: words.result }] },
+      type: 'assistant/completed',
+      text,
+      reasoning,
+      ...(finishReason !== undefined ? { finishReason } : {}),
+      rounds,
+      denials: errors + pending.size,
+      ended: [words.ended],
     })
+    closers.push({ seq: seq++, at, type: 'turn/completed', rounds, reason: { kind: cause.kind } })
   }
-  closers.push({
-    seq: seq++,
-    at,
-    type: 'assistant/completed',
-    text,
-    reasoning,
-    ...(finishReason !== undefined ? { finishReason } : {}),
-    rounds,
-    denials: errors + pending.size,
-    ended: [words.ended],
-  })
-  closers.push({ seq: seq++, at, type: 'turn/completed', rounds, reason: { kind: cause.kind } })
+  for (const [commandId, { span }] of commands) {
+    if (span !== undefined) {
+      closers.push({
+        seq: seq++,
+        at,
+        type: 'compaction/failed',
+        ...(span.fromSeq !== undefined ? { fromSeq: span.fromSeq } : {}),
+        ...(span.throughSeq !== undefined ? { throughSeq: span.throughSeq } : {}),
+        stopped: true,
+        reason: words.compaction,
+      })
+    }
+    closers.push({ seq: seq++, at, type: 'command/done', commandId, kind: 'error', text: span !== undefined ? COMPACTION_CANCELLED : words.command })
+  }
   return closers
 }
 
