@@ -3159,15 +3159,13 @@ export function unknownTurnSession(
   if (body.queue === true || (body.detach === true && pendingInbox(ctx.session.store, handle)['next-turn'].length > 0)) {
     const requestId = typeof body.requestId === 'string' && body.requestId.length > 0 ? body.requestId : undefined
     const queued = queueRequest(ctx, handle, [{ type: 'text', text: body.prompt }, ...attachments], requestId)
-    if (queued !== undefined) {
-      respond(
-        response,
-        202,
-        'application/json',
-        `${JSON.stringify({ session: handle.id, queued: true, id: queued.item.id, ...(queued.item.requestId !== undefined ? { requestId: queued.item.requestId } : {}), duplicate: queued.duplicate })}\n`,
-      )
-      return
-    }
+    respond(
+      response,
+      202,
+      'application/json',
+      `${JSON.stringify({ session: handle.id, queued: true, id: queued.item.id, ...(queued.item.requestId !== undefined ? { requestId: queued.item.requestId } : {}), duplicate: queued.duplicate })}\n`,
+    )
+    return
   }
   const activeTurns = state.running.get(handle.id) ?? 0
   state.running.set(handle.id, activeTurns + 1)

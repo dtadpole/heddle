@@ -19,7 +19,7 @@ import type { SessionHandle } from '../session/store.ts'
  * goal driver's next round (#177).
  *
  * Routes:
- * - `POST /api/turn {queue: true, requestId}` on a busy session appends one row and answers `202 {queued, id, requestId}`
+ * - `POST /api/turn {queue: true, requestId}` appends one row (on a free session too; the drain runs it at once) and answers `202 {queued, id, requestId}`
  *   (see `queueRequest`); a retry with the same `requestId` answers the same row.
  * - `GET /api/sessions/<id>/queue` — `{items: [{id, requestId?, text, content}]}`.
  * - `POST /api/sessions/<id>/queue/remove {id}` — `{outcome: 'removed'}`, or `409 {outcome: 'claimed'}` when its turn
@@ -66,25 +66,23 @@ export function queuedItems(ctx: Context, handle: SessionHandle): readonly Queue
 }
 
 /**
- * Queue a prompt sent to a session that is busy, or that already has prompts waiting (so the order is kept), and answer
- * the row; `undefined` when the session is free and the prompt should run at once. A retry of the same request answers
- * the row it queued the first time (`duplicate: true`).
+ * Queue a prompt and answer its row. A send with `queue: true` **always** lands in the queue, even on a free session,
+ * where the drain then runs it at once (developer-twelve's review): so every such send is keyed by its `requestId`, and
+ * a page whose answer was lost can post the same request again without ever making a second row or a second turn. A
+ * retry of the same request answers the row it queued the first time (`duplicate: true`), claimed or not.
  */
 export function queueRequest(
   ctx: Context,
   handle: SessionHandle,
   content: readonly ContentPart[],
   requestId: string | undefined,
-): { readonly item: QueueItem; readonly duplicate: boolean } | undefined {
+): { readonly item: QueueItem; readonly duplicate: boolean } {
   const store = ctx.session.store
   if (requestId !== undefined) {
     // Claimed or not: a retry of a request the host already took is answered with that row, never a second one.
     const already = queuedByRequest(store, handle, requestId)
     if (already !== undefined) return { item: itemOf(already), duplicate: true }
   }
-  const turns = ctx.get('turns') as TurnRegistry | undefined
-  const busy = turns?.isRunning(handle.id) === true
-  if (!busy && pendingInbox(store, handle)['next-turn'].length === 0) return undefined
   const message = queueTurn(store, handle, content, undefined, requestId !== undefined ? { requestId } : {})
   // A new send is the person acting again: a queue held by their Stop may drain once the session is free.
   held.get(ctx)?.delete(handle.id)
