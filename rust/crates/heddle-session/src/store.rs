@@ -12,7 +12,8 @@
 //! - **One process writes a session at a time.** The first append takes a writer lock beside the log
 //!   ([`lock_path`]: `<id>.lock`, or `session.lock` in an old-layout directory, holding the holder's pid, boot
 //!   and start — the TypeScript build's file, byte for byte, [`crate::writer_lock`]) and keeps it until
-//!   [`SessionStore::release`] or the store is dropped. Another process's append is refused with
+//!   [`SessionStore::release`], the store is dropped, or the process ends ([`release_held_writer_locks`], which
+//!   the `heddle` binary calls on every way out, #248). Another process's append is refused with
 //!   [`SessionError::AlreadyOwned`], DSH's `session "<id>" is already owned by an active write handle`; a lock
 //!   whose holder is gone is taken over, also when its pid now names another process (#202).
 //!   Taking the lock drops the fold, so the first write re-reads what a previous holder appended. Without
@@ -140,10 +141,32 @@ pub fn lock_path(handle: &SessionHandle) -> String {
 /// The lock files this process holds, and how many stores in it hold each; the last to let go removes it.
 static HELD_BY_PROCESS: LazyLock<Mutex<HashMap<PathBuf, usize>>> = LazyLock::new(Default::default);
 
+/// Whether this process has begun to end (#248), behind the lock every log write and every lock take holds while it
+/// runs. [`release_held_writer_locks`] takes it for writing, sets it, and only then removes the lock files, so it waits
+/// for a write in progress to finish, and no write starts after it: each one finds the flag and refuses with
+/// [`SessionError::Exiting`]. The order is always this gate, then [`HELD_BY_PROCESS`].
+static WRITE_GATE: std::sync::RwLock<bool> = std::sync::RwLock::new(false);
+
+/// Run one write to a session log, or one lock take, under [`WRITE_GATE`]: refused, with nothing written, once the
+/// process is exiting. The gate is held only for the write itself; nothing called inside takes it again.
+fn gated<T>(write: impl FnOnce() -> Result<T, SessionError>) -> Result<T, SessionError> {
+    let exiting = WRITE_GATE.read().unwrap_or_else(PoisonError::into_inner);
+    if *exiting {
+        return Err(SessionError::Exiting);
+    }
+    write()
+}
+
+/// Whether this process has begun to end and writes no session log any more ([`release_held_writer_locks`]).
+pub fn exiting() -> bool {
+    *WRITE_GATE.read().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// Remove a lock file only if it still names this process, so letting go never removes another's lock.
+/// Its identity is checked as well as its pid ([`crate::writer_lock::names_this_process`]).
 fn remove_own_lock(path: &Path) {
     if let Ok(text) = std::fs::read_to_string(path)
-        && crate::writer_lock::parse_lock(&text).map(|lock| lock.pid) == Some(std::process::id())
+        && crate::writer_lock::names_this_process(&text)
     {
         let _ = std::fs::remove_file(path);
     }
@@ -163,6 +186,12 @@ fn remove_own_lock(path: &Path) {
 /// (`false`): only a fresh take is a write-open after whatever wrote the session before, which is when an
 /// unfinished turn is closed ([`crate::repair`]).
 fn acquire_writer_lock(path: &Path, id: &str) -> Result<bool, SessionError> {
+    // A process that is exiting takes no new lock: nothing would remove it (#248).
+    gated(|| acquire_writer_lock_open(path, id))
+}
+
+/// [`acquire_writer_lock`] under the gate.
+fn acquire_writer_lock_open(path: &Path, id: &str) -> Result<bool, SessionError> {
     use crate::writer_lock::{
         LockVerdict, SystemProbe, epoch_seconds, format_lock, judge_lock, own_lock, parse_lock,
         read_lock_file, stamp_lock,
@@ -245,6 +274,37 @@ fn release_writer_lock(path: &Path) {
     }
     held.remove(path);
     remove_own_lock(path);
+}
+
+/// Let go of every writer lock this process holds, whichever store took it: the process is ending (#248).
+///
+/// The process shell calls it on every way out of a run — a server stopped by SIGTERM or SIGINT, a command line that
+/// returns, a failure, a panic that unwinds out of the run — because [`SessionStore`]'s `Drop` is not one of them: a
+/// store a spawned task or a listener still holds is never dropped, and the process ends without dropping its statics.
+/// So every lock file the Rust build wrote stayed on disk naming a dead pid (the live 3097 store held 782 such), and
+/// one whose pid came round again refused the session. The TypeScript build lets go in its `exit` handler
+/// (`acquireWriterLock` in `src/session/store.ts`). A file is removed only while it still names this process, by pid
+/// and identity, so another holder's lock is never touched.
+///
+/// It first ends every write in this process: a spawned turn can outlive the server's graceful close, and a write it
+/// made after its lock file was gone could interleave with another process that took the lock. So it takes
+/// [`WRITE_GATE`] for writing, which waits for a write in progress, and sets it; from then on every append, record,
+/// seed, truncation and lock take refuses with [`SessionError::Exiting`] (`the session could not be saved: the process
+/// is exiting`) and writes nothing. The files are removed while the gate is still held. It cannot be undone: call it
+/// only when the process is ending.
+pub fn release_held_writer_locks() {
+    let mut exiting = WRITE_GATE.write().unwrap_or_else(PoisonError::into_inner);
+    *exiting = true;
+    let paths: Vec<PathBuf> = HELD_BY_PROCESS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .drain()
+        .map(|(path, _)| path)
+        .collect();
+    for path in paths {
+        remove_own_lock(&path);
+    }
+    drop(exiting);
 }
 
 /// The meter sections of one request.
@@ -604,6 +664,10 @@ impl SessionStore {
     /// Create a session filed under its workspace folder: write `<id>.json`, create the empty log, and
     /// append `session/created` with the `cwd`.
     pub fn create(&self, options: CreateOptions) -> Result<SessionHandle, SessionError> {
+        // A process that is exiting files no new session: its first append would be refused (#248).
+        if exiting() {
+            return Err(SessionError::Exiting);
+        }
         let id = options
             .id
             .clone()
@@ -925,7 +989,7 @@ impl SessionStore {
                     bytes.extend(line.into_bytes());
                 }
             }
-            append_bytes(loaded, &handle.transcript, &bytes)?;
+            gated(|| append_bytes(loaded, &handle.transcript, &bytes))?;
             Arc::make_mut(&mut loaded.events).extend(records.iter().cloned());
             records
                 .iter()
@@ -1142,8 +1206,9 @@ impl SessionStore {
     }
 
     /// Let go of the session's writer lock, so another process may write it. Nothing has to call this:
-    /// dropping the store lets go of every lock, and a lock whose holder died is taken over by the next
-    /// writer. A later append takes the lock again.
+    /// dropping the store lets go of every lock, the process lets go of every lock it holds when it ends
+    /// ([`release_held_writer_locks`], #248), and a lock whose holder died is taken over by the next writer. A
+    /// later append takes the lock again.
     pub fn release(&self, handle: &SessionHandle) {
         let path = self
             .state
@@ -1244,7 +1309,7 @@ impl SessionStore {
                 bytes.extend(line.into_bytes());
             }
         }
-        append_bytes(loaded, &handle.transcript, &bytes)?;
+        gated(|| append_bytes(loaded, &handle.transcript, &bytes))?;
         Arc::make_mut(&mut loaded.events).extend(records.into_iter().map(Arc::new));
         Ok(())
     }
@@ -1302,7 +1367,7 @@ impl SessionStore {
             .loaded
             .get_mut(&handle.id)
             .expect("the log is loaded before an append");
-        append_bytes(loaded, &handle.transcript, &bytes)?;
+        gated(|| append_bytes(loaded, &handle.transcript, &bytes))?;
         Arc::make_mut(&mut loaded.events).push(record.clone());
         Ok(record)
     }
@@ -1361,7 +1426,12 @@ impl SessionStore {
                         for frame in &recovery.kept {
                             whole.extend_from_slice(&bytes[frame.start..frame.end]);
                         }
-                        if crate::append::replace_whole(&handle.transcript, &whole).is_ok() {
+                        // A process that began to end meanwhile replaces nothing and records nothing (#248).
+                        let replaced = gated(|| {
+                            crate::append::replace_whole(&handle.transcript, &whole)
+                                .map_err(|error| SessionError::io(&handle.transcript, error))
+                        });
+                        if replaced.is_ok() {
                             dropped = recovery
                                 .dropped
                                 .iter()
@@ -1379,16 +1449,26 @@ impl SessionStore {
                         }
                     } else {
                         dropped = bytes.len().saturating_sub(decoded.readable_bytes);
-                        if dropped > 0
-                            && let Ok(file) = std::fs::OpenOptions::new()
-                                .write(true)
-                                .open(&handle.transcript)
-                        {
-                            let _ = file.set_len(decoded.readable_bytes as u64);
+                        if dropped > 0 {
+                            let cut = gated(|| {
+                                if let Ok(file) = std::fs::OpenOptions::new()
+                                    .write(true)
+                                    .open(&handle.transcript)
+                                {
+                                    let _ = file.set_len(decoded.readable_bytes as u64);
+                                }
+                                Ok(())
+                            });
+                            // A process that began to end meanwhile cuts nothing and records nothing; it reads the
+                            // whole frames, as a reader without the lock does.
+                            if cut.is_err() {
+                                dropped = 0;
+                            }
                         }
                     }
                 }
-                Err(SessionError::AlreadyOwned { .. }) => {}
+                // Another holder's, or a process that is exiting: read the whole frames and leave the file alone.
+                Err(SessionError::AlreadyOwned { .. } | SessionError::Exiting) => {}
                 Err(error) => return Err(error),
             }
         }
