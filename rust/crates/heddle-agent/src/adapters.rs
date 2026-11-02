@@ -199,6 +199,17 @@ impl SessionPort for Sessions {
         }
     }
 
+    /// One call to the session, which reads each position's own event with one index of the log (#159).
+    fn user_input_seqs(&self, session: &SessionHandle) -> std::collections::BTreeSet<u64> {
+        match self.service.user_input_seqs(session) {
+            Ok(seqs) => seqs,
+            Err(error) => {
+                read_failed(session, "reading the surface's user messages", error);
+                std::collections::BTreeSet::new()
+            }
+        }
+    }
+
     fn folder(&self, session: &SessionHandle) -> Option<PathBuf> {
         self.service.folder(session).map(PathBuf::from)
     }
@@ -801,6 +812,95 @@ pub(crate) mod tests {
         (service, root)
     }
 
+    /// Issue #159: each step of a long session asks the steering check two or three times, and through this port it
+    /// asked every surface node's role, each of which indexed the whole log: about 2.4 s a step at 300 short turns on
+    /// the TS build, and the same shape here. The session is 300 turns of 166 streamed deltas (about 51K events),
+    /// written as frames; the check through the port must cost milliseconds and answer every prompt.
+    #[test]
+    fn the_steering_check_of_a_300_turn_session_takes_milliseconds_through_the_port() {
+        let (sessions, sessions_dir) = sessions_at("long-steering");
+        let seeded = sessions.store().create(CreateOptions::default()).unwrap();
+        let mut seq = sessions.store().count(&seeded).unwrap();
+        sessions.store().release(&seeded);
+        let mut bytes = Vec::new();
+        let mut put = |kind: &str, fields: serde_json::Value| {
+            let event = heddle_session::SessionEvent {
+                seq,
+                at: "2026-11-01T00:00:00.000Z".to_string(),
+                kind: kind.to_string(),
+                fields: fields.as_object().cloned().unwrap(),
+            };
+            bytes.extend(heddle_session::encode_frame(&format!(
+                "{}\n",
+                event.to_line()
+            )));
+            seq += 1;
+        };
+        for turn in 0..300 {
+            put(
+                "message",
+                json!({ "message": { "role": "user", "content": [{ "type": "text", "text": format!("question {turn}") }] } }),
+            );
+            put(
+                "model/request",
+                json!({ "endpoint": "scripted", "messages": turn * 2 + 1, "tools": [] }),
+            );
+            for index in 0..166 {
+                put(
+                    "assistant/chunk",
+                    json!({ "chunk": { "type": "text-delta", "text": format!(" word{index}") } }),
+                );
+            }
+            put(
+                "assistant/chunk",
+                json!({ "chunk": { "type": "done", "finishReason": "stop" } }),
+            );
+            put(
+                "assistant/completed",
+                json!({ "text": "answer", "finishReason": "stop", "rounds": 1 }),
+            );
+            put("turn/completed", json!({ "rounds": 1 }));
+        }
+        {
+            use std::io::Write;
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&seeded.transcript)
+                .unwrap()
+                .write_all(&bytes)
+                .unwrap();
+        }
+        // A process that opens the session and writes to it, as a server taking a turn in it does.
+        let reader = Arc::new(SessionService::new(
+            &heddle_session::SessionConfig {
+                root: Some(sessions_dir.path().to_str().unwrap().to_owned()),
+            },
+            &heddle_config::Env::default(),
+            None,
+        ));
+        let handle = reader
+            .store()
+            .open(&seeded.id)
+            .expect("the session is on disk");
+        reader.store().claim(&handle).unwrap();
+        assert!(reader.store().count(&handle).unwrap() > 50_000);
+        let port = Sessions::new(Arc::clone(&reader));
+
+        let started = std::time::Instant::now();
+        let users = crate::turn::user_input_seqs(&port, &handle);
+        let first = started.elapsed();
+        assert_eq!(users.len(), 300, "every prompt is new-input territory");
+        let started = std::time::Instant::now();
+        for _ in 0..3 {
+            assert_eq!(crate::turn::user_input_seqs(&port, &handle), users);
+        }
+        let each = started.elapsed() / 3;
+        assert!(
+            each < std::time::Duration::from_millis(100),
+            "the steering check at 300 turns took {each:?} a call (the first {first:?})"
+        );
+    }
+
     #[test]
     fn the_session_port_records_the_prompt_and_reads_it_back_as_input() {
         let (sessions, _sessions_dir) = sessions_at("port");
@@ -822,6 +922,14 @@ pub(crate) mod tests {
             .filter(|seq| port.node_role(&handle, *seq) == Some(Role::User))
             .collect();
         assert_eq!(users.len(), 1, "{surface:?}");
+        assert_eq!(
+            port.user_input_seqs(&handle),
+            users
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<u64>>(),
+            "asked in one call, the port answers what it answers node by node (#159)"
+        );
         let events = sessions.events(&handle).unwrap();
         let message = events.last().unwrap();
         assert_eq!(message.kind, "message");

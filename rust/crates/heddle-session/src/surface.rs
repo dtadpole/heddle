@@ -242,6 +242,66 @@ pub fn index_by_seq<E: Borrow<SessionEvent>>(events: &[E]) -> HashMap<u64, &Sess
     by_seq
 }
 
+/// A log read by seq, which [`derive_message`] reads its events through: the map [`index_by_seq`] builds, or a
+/// store's kept index ([`IndexedEvents`]).
+pub trait SeqLookup {
+    /// The event the log holds at `seq`.
+    fn event(&self, seq: u64) -> Option<&SessionEvent>;
+}
+
+impl<S: std::hash::BuildHasher> SeqLookup for HashMap<u64, &SessionEvent, S> {
+    fn event(&self, seq: u64) -> Option<&SessionEvent> {
+        self.get(&seq).copied()
+    }
+}
+
+/// A snapshot of one session's log with the store's index of it by seq (issue #159).
+///
+/// The store keeps the index beside its fold and extends it as the log grows ([`crate::SessionStore::indexed`]), so a
+/// caller that derives node after node reads one index instead of building a map of the whole log per node. It answers
+/// what [`index_by_seq`] over the same events answers: the last event written with a seq is the one found.
+#[derive(Clone)]
+pub struct IndexedEvents {
+    events: crate::event::Events,
+    positions: std::sync::Arc<HashMap<u64, usize>>,
+}
+
+impl IndexedEvents {
+    /// Index `events` from the start, for a caller with a log the store does not keep.
+    pub fn new(events: crate::event::Events) -> Self {
+        let mut positions = HashMap::with_capacity(events.len());
+        for (at, event) in events.iter().enumerate() {
+            positions.insert(event.seq, at);
+        }
+        Self {
+            events,
+            positions: std::sync::Arc::new(positions),
+        }
+    }
+
+    /// A snapshot over an index the store keeps; every position names an event of `events`.
+    pub(crate) fn kept(
+        events: crate::event::Events,
+        positions: std::sync::Arc<HashMap<u64, usize>>,
+    ) -> Self {
+        Self { events, positions }
+    }
+
+    /// The events, in log order.
+    pub fn events(&self) -> &crate::event::Events {
+        &self.events
+    }
+}
+
+impl SeqLookup for IndexedEvents {
+    fn event(&self, seq: u64) -> Option<&SessionEvent> {
+        self.positions
+            .get(&seq)
+            .and_then(|at| self.events.get(*at))
+            .map(|event| event.as_ref())
+    }
+}
+
 /// The message one node derives to, or `None` when it produces none.
 ///
 /// A `message` or `context/note` node is its `message` field, when that parses and has content. A chunk
@@ -270,8 +330,8 @@ pub fn index_by_seq<E: Borrow<SessionEvent>>(events: &[E]) -> HashMap<u64, &Sess
 ///
 /// A `message` field that does not parse as a [`Message`] derives to `None` (the TypeScript build passed
 /// such an object through unchecked; no writer produces one).
-pub fn derive_message(by_seq: &HashMap<u64, &SessionEvent>, seq: u64) -> Option<Message> {
-    let event = by_seq.get(&seq)?;
+pub fn derive_message<L: SeqLookup + ?Sized>(by_seq: &L, seq: u64) -> Option<Message> {
+    let event = by_seq.event(seq)?;
     if event.kind == "message" || event.kind == "context/note" {
         let message = serde_json::from_value::<Message>(event.get("message")?.clone()).ok()?;
         if message.content.is_empty() {
@@ -284,7 +344,7 @@ pub fn derive_message(by_seq: &HashMap<u64, &SessionEvent>, seq: u64) -> Option<
     }
     let mut content: Vec<ContentPart> = Vec::new();
     let mut index = seq;
-    while let Some(next) = by_seq.get(&index) {
+    while let Some(next) = by_seq.event(index) {
         if next.kind != "assistant/chunk" {
             // A message held for the step boundary, an inbox splice or any other note written while the model
             // streamed is not part of its step (#30): the step runs to its `done`, a new request or the turn's end.
@@ -300,9 +360,24 @@ pub fn derive_message(by_seq: &HashMap<u64, &SessionEvent>, seq: u64) -> Option<
             index += 1;
             continue;
         }
-        let chunk = next
-            .get("chunk")
-            .and_then(|value| serde_json::from_value::<Chunk>(value.clone()).ok());
+        let value = next.get("chunk");
+        // A text or reasoning delta is read in place (#159): deltas are most of a long log, and cloning each into a
+        // `Chunk` was most of the time a step spent deriving its request. Every other chunk deserializes below.
+        if let Some((reasoning, text)) = value.and_then(stream_delta) {
+            match (reasoning, content.last_mut()) {
+                (false, Some(ContentPart::Text { text: last })) => last.push_str(text),
+                (false, _) => content.push(ContentPart::Text {
+                    text: text.to_owned(),
+                }),
+                (true, Some(ContentPart::Reasoning { text: last })) => last.push_str(text),
+                (true, _) => content.push(ContentPart::Reasoning {
+                    text: text.to_owned(),
+                }),
+            }
+            index += 1;
+            continue;
+        }
+        let chunk = value.and_then(|value| serde_json::from_value::<Chunk>(value.clone()).ok());
         match chunk {
             Some(Chunk::TextDelta { text }) => match content.last_mut() {
                 Some(ContentPart::Text { text: last }) => last.push_str(&text),
@@ -331,6 +406,19 @@ pub fn derive_message(by_seq: &HashMap<u64, &SessionEvent>, seq: u64) -> Option<
             source: None,
         })
     }
+}
+
+/// A streamed delta read in place: whether it is reasoning, and its text. It answers exactly where deserializing the
+/// chunk answers [`Chunk::TextDelta`] or [`Chunk::ReasoningDelta`]: an object tagged `text-delta` or `reasoning-delta`
+/// with a string `text` (the enum ignores other fields), and `None` for every other chunk, which deserializes as before.
+fn stream_delta(value: &Value) -> Option<(bool, &str)> {
+    let object = value.as_object()?;
+    let reasoning = match object.get("type")?.as_str()? {
+        "text-delta" => false,
+        "reasoning-delta" => true,
+        _ => return None,
+    };
+    Some((reasoning, object.get("text")?.as_str()?))
 }
 
 /// The message one node derives to, indexing the log first.
@@ -1067,5 +1155,39 @@ mod tests {
         }
         let by_seq = index_by_seq(&finished);
         assert!(derive_message(&by_seq, 2).is_some());
+    }
+
+    /// The in place read of a delta (#159) answers what deserializing the chunk answers, for every shape: a delta with
+    /// fields the enum ignores, a text that is not a string, a missing text, other chunk types, and no object at all.
+    #[test]
+    fn a_delta_read_in_place_is_what_deserializing_the_chunk_reads() {
+        for value in [
+            json!({ "type": "text-delta", "text": "a" }),
+            json!({ "type": "reasoning-delta", "text": "b" }),
+            json!({ "type": "text-delta", "text": "c", "extra": 1 }),
+            json!({ "type": "text-delta", "text": "\u{e9}\n\"quoted\"" }),
+            json!({ "type": "text-delta", "text": "" }),
+            json!({ "type": "text-delta", "text": 7 }),
+            json!({ "type": "reasoning-delta", "text": null }),
+            json!({ "type": "text-delta" }),
+            json!({ "type": "done", "finishReason": "stop" }),
+            json!({ "type": "tool-call", "id": "x", "name": "bash", "arguments": "{}" }),
+            json!({ "type": "tool-call-delta", "index": 0, "argumentsDelta": "{" }),
+            json!({ "type": "Text-Delta", "text": "case" }),
+            json!({ "text": "no tag" }),
+            json!("text-delta"),
+            json!(null),
+        ] {
+            let expected = match serde_json::from_value::<Chunk>(value.clone()).ok() {
+                Some(Chunk::TextDelta { text }) => Some((false, text)),
+                Some(Chunk::ReasoningDelta { text }) => Some((true, text)),
+                _ => None,
+            };
+            assert_eq!(
+                stream_delta(&value).map(|(reasoning, text)| (reasoning, text.to_owned())),
+                expected,
+                "{value}"
+            );
+        }
     }
 }

@@ -1184,14 +1184,10 @@ pub fn has_new_input(before: &BTreeSet<u64>, after: &BTreeSet<u64>) -> bool {
     after.iter().any(|seq| !before.contains(seq))
 }
 
-/// The surface positions that hold a user message.
+/// The surface positions that hold a user message, asked of the session in one call
+/// ([`SessionPort::user_input_seqs`], #159).
 pub fn user_input_seqs(session: &dyn SessionPort, handle: &SessionHandle) -> BTreeSet<u64> {
-    session
-        .surface(handle)
-        .nodes
-        .into_iter()
-        .filter(|seq| session.node_role(handle, *seq) == Some(Role::User))
-        .collect()
+    session.user_input_seqs(handle)
 }
 
 /// Add one round's reported usage to the turn's total; see [`merge_token_usage`].

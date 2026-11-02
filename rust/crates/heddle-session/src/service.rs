@@ -514,6 +514,15 @@ impl SessionService {
         self.store.derive_node(handle, seq)
     }
 
+    /// The surface positions that hold a user message, which is what "new input" means to a running turn: the
+    /// positions whose [`SessionService::node`] is a user's, read from each position's own event with one index (#159).
+    pub fn user_input_seqs(
+        &self,
+        handle: &SessionHandle,
+    ) -> Result<std::collections::BTreeSet<u64>, SessionError> {
+        self.store.user_input_seqs(handle)
+    }
+
     /// Every event so far, for a caller that wants to show it.
     ///
     /// A session no live writer holds reads **balanced**: a turn its writer left unfinished is followed by the

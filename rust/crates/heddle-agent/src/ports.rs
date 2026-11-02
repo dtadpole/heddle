@@ -156,6 +156,19 @@ pub trait SessionPort: Send + Sync {
     /// The role of the message at one surface position, if it is a message.
     fn node_role(&self, session: &SessionHandle, seq: u64) -> Option<Role>;
 
+    /// The surface positions that hold a user message, which is what "new input" means to a running turn.
+    ///
+    /// The provided answer asks [`SessionPort::node_role`] of every position. A port over a real store answers it in
+    /// one call (#159): asked node by node, each answer indexed the whole log, so the check cost (surface nodes) ×
+    /// (log events), up to three times a step.
+    fn user_input_seqs(&self, session: &SessionHandle) -> std::collections::BTreeSet<u64> {
+        self.surface(session)
+            .nodes
+            .into_iter()
+            .filter(|seq| self.node_role(session, *seq) == Some(Role::User))
+            .collect()
+    }
+
     /// The conversation's own folder, where instruction files are read; `None` falls back to the workspace.
     fn folder(&self, session: &SessionHandle) -> Option<PathBuf>;
 
