@@ -1,6 +1,6 @@
 ---
 title: Browser Use
-version: 1.2.0
+version: 1.4.0
 description: A browser this repository drives over the Chrome DevTools protocol, with the harness browser's tool surface, one command per tool and one long-lived session behind them.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-17, asking for a browser tool under _tools_ that replicates the DSH browser MCP
@@ -105,7 +105,8 @@ try {
 locations, and `HEDDLE_BROWSER=/path/to/chrome` names one that is elsewhere. Nothing is installed by
 npm. The profile and the session record live under `.heddle-tmp/browser/` in this checkout;
 `HEDDLE_BROWSER_HOME` moves them, and removing the profile forgets every login. `cli.mjs status` says
-what is running, `cli.mjs stop` ends it.
+what is running, `cli.mjs stop` ends it. `HEDDLE_BROWSER_ARGS` adds Chrome flags to every start (spaces, or a
+JSON array), e.g. `--log-net-log=/tmp/net.json`; a running host keeps its flags until it is stopped.
 
 **Watching it work.** The command line is headed by default, so a person can watch and sign in; a check
 is headless by default. The tool's own surface verifier runs headed with
@@ -141,6 +142,10 @@ other's pages.
 - **Command+V pastes on a Mac, headless.** The Mac menu makes `Meta+A/C/X/V/Z` editing commands and a
   protocol key event never reaches it, so `press_key` sends the command. A visible browser shares the
   owner's clipboard, so copy, cut and paste are `withheld` there; use `start --headless`.
+- **An upload can go through the control a person clicks.** A hidden file input has no accessibility
+  node, hence no uid. Given the control's uid, `upload_file` clicks it with the chooser intercepted, so
+  no native picker is drawn, and gives the files to the input the chooser names. No chooser in 3 s is an
+  error, and so is a switch-off Chrome refuses; the next upload_file retries it first.
 - **The no-sandbox retry.** A machine whose outer confinement forbids Chrome's own sandbox gets a
   second start with `--no-sandbox`, and `status` says which start it was. Silently weakening a browser
   would be wrong; failing on every confined machine would be useless.

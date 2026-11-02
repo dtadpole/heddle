@@ -103,9 +103,9 @@ pub use store::{
     is_framed, lock_path, log_name, meta_name, read_log_header, skipped_log_line, transcript_in,
 };
 pub use surface::{
-    SURFACE_EVENT_TYPES, SurfaceReplacement, SurfaceState, completed_prefix, derive_message,
-    derive_node_message, fold_surface, fork_seed, index_by_seq, inherited_by_fork, inherits_answer,
-    is_surface_eligible,
+    IndexedEvents, SURFACE_EVENT_TYPES, SeqLookup, SurfaceReplacement, SurfaceState,
+    completed_prefix, derive_message, derive_node_message, fold_surface, fork_seed, index_by_seq,
+    inherited_by_fork, inherits_answer, is_surface_eligible,
 };
 pub use title::{
     LlmTitles, SESSION_TITLE_PURPOSE, SessionTitles, TitleAnswer, TitleDone, TitleModel,

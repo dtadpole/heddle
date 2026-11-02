@@ -9,7 +9,9 @@
 use futures::StreamExt;
 use serde_json::Value;
 
-use crate::adapter::{Adapter, ChunkStream, Folded, PreparedCall, StreamFold, fold_sse};
+use crate::adapter::{
+    Adapter, ChunkStream, Folded, PreparedCall, StreamFold, fold_sse, stream_cut,
+};
 use crate::error::ModelError;
 use crate::http::{Method, WireRequest, WireResponse, wire};
 use crate::sse::SseEvent;
@@ -56,7 +58,10 @@ impl Adapter for ChatAdapter {
                 Ok(WireResponse::Json(answer)) => Box::pin(futures::stream::iter(
                     chunks_from_chat_json(&answer).into_iter().map(Ok),
                 )),
-                Ok(WireResponse::Stream { body, .. }) => fold_sse(body, Box::new(ChatFold::new())),
+                Ok(WireResponse::Stream { body, .. }) => fold_sse(
+                    body,
+                    Box::new(ChatFold::new().with_endpoint(endpoint.name.clone())),
+                ),
                 Err(error) => crate::adapter::error_stream(error),
             };
             stream
@@ -359,7 +364,9 @@ pub fn chunks_from_chat_json(answer: &Value) -> Vec<Chunk> {
 }
 
 /// The streamed fold: deltas, live tool-call fragments, assembly by `index`, `done` on `finish_reason` with usage
-/// from the same frame; `[DONE]` with no finish frame is a plain `stop`.
+/// from the same frame; `[DONE]` with no finish frame is a plain `stop`. A body that ends on neither was cut and fails
+/// `STREAM_CLOSED`, with no half-written call emitted; a `data: {"error": …}` frame fails `REMOTE` in the provider's
+/// words (#173).
 ///
 /// A finish frame without usage holds its `done` (#69): with `include_usage`, an OpenAI-shaped stream reports
 /// usage in its own last frame, `choices: []`, after the finish frame and before `[DONE]`. The held `done` goes
@@ -368,11 +375,19 @@ pub fn chunks_from_chat_json(answer: &Value) -> Vec<Chunk> {
 pub struct ChatFold {
     calls: Vec<(u32, crate::types::ToolCall)>,
     finished: Option<String>,
+    /// The endpoint's name, for the failures this fold reports.
+    endpoint: String,
 }
 
 impl ChatFold {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Name the endpoint in the failures this fold reports.
+    pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.endpoint = endpoint.into();
+        self
     }
 
     /// The call the provider's slot names, created on first sight.
@@ -402,6 +417,12 @@ impl StreamFold for ChatFold {
             // An unparseable `data:` is skipped, as the TypeScript read loop does.
             Err(_) => return Ok(Folded::default()),
         };
+        // A provider that fails after its headers says so in the stream, then closes (#173: DeepSeek's chat route,
+        // OpenAI-shaped gateways, vLLM). It was skipped as a frame with no choices, so the fragment before it became a
+        // finished answer; it fails the call in the provider's words, as the Messages route's `event: error` does.
+        if let Some(error) = parsed.get("error").filter(|error| !error.is_null()) {
+            return Err(streamed_failure(&self.endpoint, error));
+        }
         if self.finished.is_some() {
             let usage =
                 crate::usage::openai_chat_usage(parsed.get("usage").unwrap_or(&Value::Null));
@@ -518,12 +539,48 @@ impl StreamFold for ChatFold {
         })
     }
 
-    fn end(&mut self) -> Vec<Chunk> {
-        vec![Chunk::Done {
-            finish_reason: self.finished.take().unwrap_or_else(|| "stop".into()),
-            usage: None,
-        }]
+    fn end(&mut self) -> Result<Vec<Chunk>, ModelError> {
+        // A finish frame whose usage frame never came still finished. A body with neither a finish frame nor `[DONE]`
+        // was cut (#173): it used to end `stop`, so the fragment went back to the model as a complete answer.
+        match self.finished.take() {
+            Some(finish_reason) => Ok(vec![Chunk::Done {
+                finish_reason,
+                usage: None,
+            }]),
+            None => Err(stream_cut(&self.endpoint, "finish_reason or [DONE]")),
+        }
     }
+}
+
+/// A failure the provider reported inside a stream, in its own words: `'<endpoint>' reported <type> — <message>`, the
+/// Messages route's sentence (#173, `streamedFailure`). An error object's `type` names it, else its `code`; a bare
+/// string is the message.
+pub fn streamed_failure(endpoint: &str, error: &Value) -> ModelError {
+    let named = |key: &str| {
+        error
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+    };
+    let kind = named("type")
+        .or_else(|| named("code"))
+        .unwrap_or("an error");
+    let said = match named("message") {
+        Some(message) => message.to_string(),
+        None => match error.as_str() {
+            Some(text) => text.to_string(),
+            None => serde_json::to_string(error)
+                .unwrap_or_default()
+                .chars()
+                .take(200)
+                .collect(),
+        },
+    };
+    ModelError::new(
+        format!("'{endpoint}' reported {kind} — {said}"),
+        endpoint,
+        crate::error::code::REMOTE,
+    )
 }
 
 #[cfg(test)]
@@ -643,7 +700,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("{error}"));
         assert!(folded.chunks.is_empty() && !folded.finished);
         assert_eq!(
-            fold.end(),
+            fold.end().expect("a finish frame was seen"),
             vec![Chunk::Done {
                 finish_reason: "max_output_tokens".into(),
                 usage: None,
@@ -720,17 +777,72 @@ mod tests {
     }
 
     #[test]
-    fn a_body_that_ends_without_a_finish_frame_finishes_stop_and_an_unparseable_frame_is_skipped() {
+    fn a_body_that_ends_without_a_finish_frame_was_cut_and_an_unparseable_frame_is_skipped() {
+        // #173: it used to finish `stop`, so the fragment went back to the model as a complete answer.
+        let mut fold = ChatFold::new().with_endpoint("deepseek");
+        fold.event(&delta(
+            serde_json::json!({ "delta": { "content": "PARTIAL-99 " } }),
+        ))
+        .expect("folds");
+        let cut = fold.end().expect_err("a cut stream fails");
+        assert_eq!(cut.code, crate::error::code::STREAM_CLOSED);
         assert_eq!(
-            ChatFold::new().end(),
-            vec![Chunk::Done {
-                finish_reason: "stop".into(),
-                usage: None,
-            }]
+            cut.to_string(),
+            "'deepseek' ended its stream before the answer finished (no finish_reason or [DONE])"
         );
         let folded = ChatFold::new().event(&sse("not json")).expect("skips");
         assert!(folded.chunks.is_empty());
         assert!(!folded.finished);
+    }
+
+    #[test]
+    fn a_tool_call_the_cut_left_half_written_is_never_emitted() {
+        let mut fold = ChatFold::new().with_endpoint("deepseek");
+        let mut chunks = Vec::new();
+        for frame in [
+            serde_json::json!({ "delta": { "content": "Running it now. " } }),
+            serde_json::json!({ "delta": { "tool_calls": [{ "index": 0, "id": "call-1", "function": { "name": "bash", "arguments": "{\"command\": \"echo DRO" } }] } }),
+        ] {
+            chunks.extend(fold.event(&delta(frame)).expect("folds").chunks);
+        }
+        assert!(fold.end().is_err(), "the cut fails the answer");
+        assert!(
+            !chunks
+                .iter()
+                .any(|chunk| matches!(chunk, Chunk::ToolCall(_))),
+            "no assembled call: {chunks:?}"
+        );
+    }
+
+    #[test]
+    fn an_error_object_in_the_stream_fails_in_the_providers_words() {
+        let mut fold = ChatFold::new().with_endpoint("deepseek");
+        fold.event(&delta(
+            serde_json::json!({ "delta": { "content": "Partial answer before the error" } }),
+        ))
+        .expect("folds");
+        let error = fold
+            .event(&sse(&serde_json::json!({
+                "error": { "message": "Internal server error (fake mid-stream)", "type": "server_error", "code": "internal_error" }
+            })
+            .to_string()))
+            .expect_err("the provider's failure fails the call");
+        assert_eq!(error.code, crate::error::code::REMOTE);
+        assert_eq!(
+            error.to_string(),
+            "'deepseek' reported server_error — Internal server error (fake mid-stream)"
+        );
+        // A gateway that names only a code, or says it as a bare string.
+        let coded = streamed_failure(
+            "gw",
+            &serde_json::json!({ "code": "overloaded", "message": "busy" }),
+        );
+        assert_eq!(coded.to_string(), "'gw' reported overloaded — busy");
+        let bare = streamed_failure("gw", &serde_json::json!("upstream went away"));
+        assert_eq!(
+            bare.to_string(),
+            "'gw' reported an error — upstream went away"
+        );
     }
 
     #[test]

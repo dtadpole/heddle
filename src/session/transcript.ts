@@ -131,6 +131,72 @@ export function splitFrames(buffer: Buffer): readonly Frame[] {
   return frames
 }
 
+/**
+ * The decompressed size a frame's header declares (RFC 8878 §3.1.1.1.4, `Frame_Content_Size`), or `undefined` when the
+ * header declares none or is cut short. {@link encodeFrame} always declares it, because the whole line is known.
+ */
+export function frameContentSize(buffer: Buffer, start: number): number | undefined {
+  const descriptor = buffer[start + 4]
+  if (descriptor === undefined) return undefined
+  const flag = descriptor >> 6
+  const singleSegment = (descriptor & 0x20) !== 0
+  const cursor = start + 5 + (singleSegment ? 0 : 1) + ([0, 1, 2, 4][descriptor & 0x03] ?? 0)
+  const size = flag === 0 ? (singleSegment ? 1 : 0) : ([0, 2, 4, 8][flag] ?? 0)
+  if (size === 0 || cursor + size > buffer.length) return undefined
+  if (size === 1) return buffer[cursor]
+  if (size === 2) return buffer.readUInt16LE(cursor) + 256
+  if (size === 4) return buffer.readUInt32LE(cursor)
+  const value = buffer.readBigUInt64LE(cursor)
+  return value > BigInt(Number.MAX_SAFE_INTEGER) ? undefined : Number(value)
+}
+
+/** The largest output buffer a read sizes up front; a frame that holds more takes further chunks, as zlib always does. */
+const SIZED_CHUNK_MAX = 4 * 1024 * 1024
+
+/**
+ * One frame's text, for a **read-only** path: the output buffer is sized to the frame rather than zlib's 16 KiB default.
+ *
+ * Measured on a 1.74 M-event store (#257): the whole store decoded in 5.1 s instead of 7.9 s, because an event is a
+ * few hundred bytes and the default allocated 16 KiB for each one. The text is the same; a frame that does not decode
+ * throws as `zstdDecompressSync` throws. The writer's paths ({@link decodeTranscript}, the repair) do not use it.
+ */
+export function decodeFrameSized(buffer: Buffer, start: number, end: number): string {
+  const declared = frameContentSize(buffer, start)
+  const chunkSize = Math.min(SIZED_CHUNK_MAX, Math.max(64, declared !== undefined ? declared + 1 : (end - start) * 8))
+  return zstdDecompressSync(buffer.subarray(start, end), { chunkSize }).toString('utf8')
+}
+
+/** One whole frame a reader decoded: its byte range in the buffer, and its lines. */
+export interface FrameLines {
+  readonly start: number
+  readonly end: number
+  readonly lines: readonly string[]
+}
+
+/**
+ * The whole frames from `start` on, decoded **one at a time**, for a read-only caller that pauses between them (#257).
+ *
+ * The same frames {@link decodeTranscript} reads, split into lines the same way: the walk stops at the first frame
+ * that is incomplete or does not decode, so a reader that starts again from the last frame's end later reads exactly
+ * what a whole read would then. It never repairs, never writes and takes no lock. A plain-text log is not frames, and
+ * yields nothing.
+ */
+export function* readFrames(buffer: Buffer, start = 0): Generator<FrameLines, void, undefined> {
+  let cursor = start
+  while (cursor < buffer.length) {
+    const end = frameEnd(buffer, cursor)
+    if (end === undefined || end <= cursor) return
+    let text: string
+    try {
+      text = decodeFrameSized(buffer, cursor, end)
+    } catch {
+      return
+    }
+    yield { start: cursor, end, lines: frameLines(text) }
+    cursor = end
+  }
+}
+
 /** One event, compressed as one frame with a content checksum. */
 export function encodeFrame(line: string): Buffer {
   return zstdCompressSync(Buffer.from(line, 'utf8'), {

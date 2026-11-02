@@ -29,6 +29,12 @@ pub mod code {
     pub const BAD_BODY: &str = "BAD_BODY";
     /// The provider reported a failure inside its event stream.
     pub const REMOTE: &str = "REMOTE";
+    /// A stream ended before its route's terminal event (#173): DSH's `STREAM_CLOSED`. A cut stream's text is a
+    /// fragment, so it is a failure, never a `stop`.
+    pub const STREAM_CLOSED: &str = "STREAM_CLOSED";
+    /// An answer that finished `stop` with no text, reasoning or tool call (#173): DSH's `EMPTY_RESPONSE_CODE`, the
+    /// first of its default retryable codes.
+    pub const EMPTY_RESPONSE: &str = "EMPTY_RESPONSE";
     /// The scripted endpoint's file could not be read, or a step failed the call without naming a code.
     pub const SCRIPT: &str = "SCRIPT";
     /// The call was abandoned by its caller.

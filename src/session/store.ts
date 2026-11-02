@@ -16,6 +16,7 @@ import {
 } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
+import { performance } from 'node:perf_hooks'
 import { zstdCompressSync } from 'node:zlib'
 
 import type { Chunk, ContentPart, Message } from '../llm/types.ts'
@@ -27,7 +28,7 @@ import { SessionTitles } from './title.ts'
 import { decodeTranscript, encodeFrame, isEventRecord, judgeLogHeader, type LogHeader } from './transcript.ts'
 import { normalizeSessionTitle } from './title-text.ts'
 
-import { formatLock, judgeLock, type LockFile, ownedSentence, ownLock, parseLock, stampLock } from './writer-lock.ts'
+import { formatLock, judgeLock, type LockFile, namesThisProcess, ownedSentence, ownLock, parseLock, stampLock } from './writer-lock.ts'
 
 /**
  * The session store.
@@ -322,12 +323,16 @@ export function endsStep(type: string): boolean {
  * input at the next step boundary. So a message that lands while a run is open is held. It is placed when the run
  * closes, or, when the step called tools, once their results are placed, so a call and its result stay adjacent. A
  * new request, the turn's end or a replacement places whatever is still held.
+ *
+ * `from` continues an earlier fold, for a reader that folds a log as it grows (the content search, #257). It must be
+ * the state folded through a **quiet** event ({@link quietsSurface}): every other variable of the fold is empty there,
+ * so folding the rest of the log from it gives what folding the whole log gives.
  */
-export function foldSurface(events: readonly SessionEvent[]): SurfaceState {
-  const nodes: number[] = []
-  const replacements: SurfaceReplacement[] = []
-  let contentGeneration = 0
-  let replaceGeneration = 0
+export function foldSurface(events: readonly SessionEvent[], from?: SurfaceState): SurfaceState {
+  const nodes: number[] = from === undefined ? [] : [...from.nodes]
+  const replacements: SurfaceReplacement[] = from === undefined ? [] : [...from.replacements]
+  let contentGeneration = from?.contentGeneration ?? 0
+  let replaceGeneration = from?.replaceGeneration ?? 0
   let openChunk: number | undefined
   /** The tool calls of the open run. */
   let runCalls = new Set<string>()
@@ -416,6 +421,19 @@ export function foldSurface(events: readonly SessionEvent[]): SurfaceState {
 }
 
 /**
+ * Whether the fold is **quiet** after this event: no chunk run open, no tool result awaited and no message held, so its
+ * whole state is the surface it has placed. A step's end is quiet (a request or a `turn/*`), and so is a replacement:
+ * both close the run and place what was held ({@link foldSurface}). A replacement that is itself a chunk is left out,
+ * because a search document's chunk run reads on through the chunks that follow it. A search folding a growing log
+ * keeps the surface at its last quiet event and folds only what follows it (#257).
+ */
+export function quietsSurface(event: SessionEvent): boolean {
+  if (typeof event?.type !== 'string') return false
+  if (isReplacementOp(event.surfaceOp as SurfaceOp | undefined)) return event.type !== 'assistant/chunk'
+  return endsStep(event.type)
+}
+
+/**
  * The message one node derives to, or null when it produces none.
  *
  * A chunk run derives **one part per block, not one per delta**: consecutive `text-delta`s join into one `text` part
@@ -474,20 +492,32 @@ export function deriveMessage(bySeq: ReadonlyMap<number, SessionEvent>, seq: num
 }
 
 /**
- * The events a fork inherits: everything up to the **last completed turn**.
+ * The events a fork inherits: everything up to the **last completed turn**, and the standalone events after it until the
+ * next turn begins.
  *
- * DSH cuts its fork seed at `latestCompletedPrefixBoundary` and refuses a source with no completed turn. A session here can
+ * DSH cuts its fork seed at `latestCompletedPrefixBoundary`, "the latest completed-turn prefix, including standalone events
+ * before the next turn begins": it walks past the last `turn/end` until a turn starts, a user message is appended or the
+ * inbox is spliced (dsh-api-session-controller). So a `/permission read-only`, a `/plan` or a `/compact` made after the
+ * last turn reaches the branch (issue #232; "forked agents inherit logged plan state", dsh-plan-mode). A session here can
  * hold a user message whose answer never arrived; copying that dangling half-turn would ask the model to continue work it
- * never saw finish, so the cut excludes it. A log with no `turn/completed` returns as it is — callers decide whether that is
- * forkable at all (the service refuses it).
+ * never saw finish, so the cut stops before it. A log with no `turn/completed` returns as it is — callers decide whether
+ * that is forkable at all (the service refuses it).
  */
 export function completedPrefix(events: readonly SessionEvent[]): readonly SessionEvent[] {
   let boundary: number | undefined
-  for (const event of events) {
-    if (event.type === 'turn/completed') boundary = event.seq
+  for (let index = 0; index < events.length; index += 1) {
+    if (events[index]!.type === 'turn/completed') boundary = index
   }
   if (boundary === undefined) return events
-  return events.filter((event) => event.seq <= boundary)
+  let end = boundary
+  for (let index = boundary + 1; index < events.length && !beginsTurn(events[index]!); index += 1) end = index
+  return events.slice(0, end + 1)
+}
+
+/** Whether an event begins a turn, where the fork cut's walk past the last completed turn stops (DSH's turn start, appended user message, inbox splice). */
+function beginsTurn(event: SessionEvent): boolean {
+  if (event.type === 'message') return (event.message as { readonly role?: unknown } | undefined)?.role === 'user'
+  return event.type === 'agent/inbox/spliced' || event.type === 'model/request' || event.type === 'assistant/chunk'
 }
 
 /**
@@ -513,19 +543,22 @@ export function inheritsAnswer(events: readonly SessionEvent[]): boolean {
  * Whether a fork inherits an event of this type.
  *
  * DSH's seed is the source's exact event prefix (`buildForkSeed`, dsh-session/lib/types/fork.js:18-27), and a child
- * here inherits the same — with four exceptions, each an event that belongs to the **source** rather than to the
+ * here inherits the same — with three exceptions, each an event that belongs to the **source** rather than to the
  * conversation, and that this store has no inherited-prefix mark to neutralise (DSH passes `inheritedEventCount` to every
  * projection, dsh-session/lib/index.js:1418-1426; heddle's folds read the whole log):
  *
  * - `session/created`: the child writes its own, with its own clock.
  * - `transcript/repaired`: it reports bytes cut from the source's file, not the child's.
- * - `goal/change`: heddle arms an active goal whenever a process folds one (src/goal/service.ts, `activationOf`), so an
- *   inherited goal would start spending rounds in the branch; DSH disarms it after a fork.
  * - `team/*`: the team journal names the source as its Lead (`teamId`), and `foldTeam` refuses a foreign one, so a
  *   copied journal would break the child's team tools.
  */
+/*
+ * A `goal/change` is inherited (issue #166): the branch keeps the goal, its phase, revisions and round count, as DSH's
+ * does, and the goal service reads an inherited active goal as disarmed (`foldGoal`'s `inheritedByFork`, from the
+ * seed's older times), so it spends no rounds in the branch until a person resumes it there.
+ */
 export function inheritedByFork(type: string): boolean {
-  return type !== 'session/created' && type !== 'transcript/repaired' && type !== 'goal/change' && !type.startsWith('team/')
+  return type !== 'session/created' && type !== 'transcript/repaired' && !type.startsWith('team/')
 }
 
 /** A recorded field that names one other event by its seq, in a log-only record (a compaction's own bookkeeping). */
@@ -736,10 +769,13 @@ export function lockPath(handle: SessionHandle): string {
 const heldByProcess = new Map<string, number>()
 let exitHookInstalled = false
 
-/** Remove a lock file only if it still names this process, so letting go never removes somebody else's lock. */
+/**
+ * Remove a lock file only if it still names this process, by pid and identity (`namesThisProcess`), so letting go never
+ * removes somebody else's lock.
+ */
 function removeOwnLock(path: string): void {
   try {
-    if (parseLock(readFileSync(path, 'utf8'))?.pid === process.pid) unlinkSync(path)
+    if (namesThisProcess(readFileSync(path, 'utf8'))) unlinkSync(path)
   } catch {
     // Already gone, or unreadable: there is nothing of ours left to remove.
   }
@@ -832,6 +868,15 @@ function releaseWriterLock(path: string): void {
   removeOwnLock(path)
 }
 
+/**
+ * How long a {@link SessionStore.list} answer is kept (#257). Every open tab polls the server every 2 s, and a poll's
+ * handlers listed the store several times each: hang 5 was those scans, back to back, on a cold file cache.
+ */
+export const LIST_MEMO_MS = 1_000
+
+/** Writes to each store root's records in this process, by root: a memo older than the last write is not used. */
+const recordWrites = new Map<string, number>()
+
 export class SessionStore {
   readonly root: string
   private readonly onEvent: ((handle: SessionHandle, event: SessionEvent) => void) | undefined
@@ -877,6 +922,20 @@ export class SessionStore {
   private readonly surfaceCache = new Map<string, { readonly count: number; readonly state: SurfaceState }>()
 
   /**
+   * Each loaded log's index by seq ({@link bySeq}), keyed by the fold's own event array and extended as the log grows.
+   *
+   * Issue #159: a turn's steering check derived every surface node, and each derivation indexed the **whole log** again,
+   * so one check cost (surface nodes) × (log events), up to three times a step: about 2.4 s a step at 300 short turns,
+   * with the TS server's event loop held throughout. A log only grows by appending to that array, and dropping the fold
+   * (`claim`) gives the session a new array, so an index kept per array and extended by what was appended answers what
+   * `indexBySeq(read(handle))` answers, built once per load.
+   */
+  private readonly seqIndexes = new WeakMap<readonly SessionEvent[], { readonly bySeq: Map<number, SessionEvent>; indexed: number }>()
+
+  /** How many times a log was indexed from its first event, for a check that a step indexes none (#159). */
+  private seqIndexBuildCount = 0
+
+  /**
    * The automatic titles of this store's sessions (`./title.ts`, DSH's first-prompt title). Idle until a model is
    * attached, which the session plugin does; it lives on the store so every service over this store shares one record
    * of which call may still land.
@@ -895,6 +954,20 @@ export class SessionStore {
 
   /** The unreadable whole logs `loads` has already named, so a second sweep does not name one twice. */
   private readonly reportedLoads = new Set<string>()
+
+  /**
+   * The last {@link list} answer, kept for {@link LIST_MEMO_MS} (#257): requests that list at once, or one right after
+   * another, share one read of the store. Any write to the records through a store over this root in this process ends
+   * it ({@link recordWrites}), so this process never lists from before its own write; another process's write shows
+   * within the memo's life.
+   */
+  private listed: { readonly at: number; readonly writes: number; readonly metas: readonly SessionMeta[] } | undefined
+
+  /** How many times the whole store was read. */
+  private scans = 0
+
+  /** Where each session's record was last found, by id; verified before it is used ({@link metaFile}). */
+  private readonly recordPaths = new Map<string, string>()
 
   constructor(
     root: string = defaultSessionRoot(),
@@ -970,6 +1043,8 @@ export class SessionStore {
         2,
       )}\n`,
     )
+    this.recordPaths.set(id, handle.meta)
+    this.wroteRecords()
     appendFileSync(handle.transcript, '')
     this.append(handle, { type: 'session/created', cwd })
     return handle
@@ -988,7 +1063,7 @@ export class SessionStore {
    * with nothing visible left clears, as a blank one does; refusing it is the route's answer, as in DSH.
    */
   rename(id: SessionId, title: string): SessionMeta | null {
-    const current = this.list().find((meta) => meta.id === id)
+    const current = this.metaById(id)
     if (current === undefined) return null
     const trimmed = normalizeSessionTitle(title)
     const next: SessionMeta = {
@@ -999,6 +1074,7 @@ export class SessionStore {
     const meta = this.metaFile(id)
     if (meta === null) return null
     writeFileSync(meta, `${JSON.stringify(next, null, 2)}\n`)
+    this.wroteRecords()
     /**
      * After the write, as with `onEvent`: a listener never announces a title the record does not hold. A listener that
      * throws is logged and swallowed: the rename has landed, and the first-message fallback that renames inside
@@ -1020,13 +1096,14 @@ export class SessionStore {
    * unknown session.
    */
   recordPreset(id: SessionId, preset: string): SessionMeta | null {
-    const current = this.list().find((meta) => meta.id === id)
+    const current = this.metaById(id)
     if (current === undefined) return null
     if (current.preset !== undefined || preset.trim().length === 0) return current
     const next: SessionMeta = { ...current, preset: preset.trim() }
     const meta = this.metaFile(id)
     if (meta === null) return null
     writeFileSync(meta, `${JSON.stringify(next, null, 2)}\n`)
+    this.wroteRecords()
     return next
   }
 
@@ -1040,7 +1117,7 @@ export class SessionStore {
    * is true of the session.
    */
   flags(id: SessionId, patch: { readonly pinned?: boolean; readonly archived?: boolean }): SessionMeta | null {
-    const current = this.list().find((meta) => meta.id === id)
+    const current = this.metaById(id)
     if (current === undefined) return null
     const next: SessionMeta = { ...current }
     if (patch.pinned !== undefined) {
@@ -1067,6 +1144,7 @@ export class SessionStore {
     const meta = this.metaFile(id)
     if (meta === null) return null
     writeFileSync(meta, `${JSON.stringify(next, null, 2)}\n`)
+    this.wroteRecords()
     return next
   }
 
@@ -1121,7 +1199,7 @@ export class SessionStore {
   ): SessionHandle | null {
     const from = this.open(source)
     if (from === null) return null
-    const meta = this.list().find((one) => one.id === source)
+    const meta = this.metaById(source)
     const handle = this.create({
       ...(meta?.cwd !== undefined ? { cwd: meta.cwd } : {}),
       ...(meta?.endpoint !== undefined ? { endpoint: meta.endpoint } : {}),
@@ -1185,7 +1263,7 @@ export class SessionStore {
     id: SessionId,
     selection: { readonly endpoint: string; readonly model?: string; readonly reasoningEffort?: string },
   ): SessionMeta | null {
-    const current = this.list().find((meta) => meta.id === id)
+    const current = this.metaById(id)
     if (current === undefined) return null
     const endpoint = selection.endpoint.trim()
     if (endpoint.length === 0) return null
@@ -1199,6 +1277,7 @@ export class SessionStore {
     const meta = this.metaFile(id)
     if (meta === null) return null
     writeFileSync(meta, `${JSON.stringify(next, null, 2)}\n`)
+    this.wroteRecords()
     return next
   }
 
@@ -1213,14 +1292,21 @@ export class SessionStore {
   private metaFile(id: SessionId): string | null {
     const legacy = join(this.root, id, 'meta.json')
     if (existsSync(legacy)) return legacy
+    /** Where the record was last found, while it is still there: a lookup by id need not walk every folder (#257). */
+    const known = this.recordPaths.get(id)
+    if (known !== undefined && existsSync(known)) return known
     try {
       for (const name of readdirSync(this.root)) {
         const candidate = join(this.root, name, metaName(id))
-        if (existsSync(candidate)) return candidate
+        if (existsSync(candidate)) {
+          this.recordPaths.set(id, candidate)
+          return candidate
+        }
       }
     } catch {
       return null
     }
+    this.recordPaths.delete(id)
     return null
   }
 
@@ -1307,6 +1393,24 @@ export class SessionStore {
    * log cannot be read is left out, and named once ({@link SessionStore.logReadable}).
    */
   list(): readonly SessionMeta[] {
+    const writes = recordWrites.get(this.root) ?? 0
+    const kept = this.listed
+    if (kept === undefined || kept.writes !== writes || performance.now() - kept.at >= LIST_MEMO_MS) {
+      const at = performance.now()
+      this.listed = { at, writes, metas: this.scan() }
+    }
+    /** Copies, so a caller that changes what it was given changes nothing another caller reads. */
+    return (this.listed as { readonly metas: readonly SessionMeta[] }).metas.map((meta) => ({ ...meta }))
+  }
+
+  /** How many times {@link list} has read the whole store, for a check that one did not (#257). */
+  get listScans(): number {
+    return this.scans
+  }
+
+  /** The whole store's records, read from disk: every folder walked, every record read, every log's head judged. */
+  private scan(): readonly SessionMeta[] {
+    this.scans += 1
     let names: string[]
     try {
       names = readdirSync(this.root)
@@ -1314,12 +1418,13 @@ export class SessionStore {
       return []
     }
     const metas = new Map<string, SessionMeta>()
-    const remember = (text: string, dir: string): void => {
+    const remember = (text: string, dir: string, path: string): void => {
       try {
         const meta = JSON.parse(text) as SessionMeta
         if (typeof meta?.id !== 'string' || metas.has(meta.id)) return
         if (!this.logReadable(this.transcriptFor(dir, meta.id))) return
         metas.set(meta.id, meta)
+        if (basename(path) === metaName(meta.id)) this.recordPaths.set(meta.id, path)
       } catch {
         // A file that is not metadata is not a reason to lose the sessions that are.
       }
@@ -1328,7 +1433,7 @@ export class SessionStore {
       const at = join(this.root, name)
       if (name.startsWith('session-')) {
         try {
-          remember(readFileSync(join(at, 'meta.json'), 'utf8'), at)
+          remember(readFileSync(join(at, 'meta.json'), 'utf8'), at, join(at, 'meta.json'))
         } catch {
           // A session directory without readable metadata is skipped, as it always was.
         }
@@ -1343,13 +1448,39 @@ export class SessionStore {
       for (const entry of entries) {
         if (!entry.startsWith('session-') || !entry.endsWith('.json')) continue
         try {
-          remember(readFileSync(join(at, entry), 'utf8'), at)
+          remember(readFileSync(join(at, entry), 'utf8'), at, join(at, entry))
         } catch {
           continue
         }
       }
     }
     return [...metas.values()].sort((left, right) => (left.created < right.created ? 1 : -1))
+  }
+
+  /**
+   * One session's record, found **without listing the store** (#257): the record `list()` holds for `id`, or
+   * `undefined` when it holds none — no record, a record naming another id, or a log that cannot be read.
+   *
+   * Hang 5 of #257 was a 2 s poll per open tab that asked `list().find(id)` four times per request: every call read
+   * all 1,700 records and judged every log's head, on a cold file cache after a restart. This reads one record, from
+   * where it was last found ({@link metaFile}), and judges one log. It always reads the file, so a writer that reads
+   * a record before it rewrites it reads the current one.
+   */
+  metaById(id: SessionId): SessionMeta | undefined {
+    const path = this.metaFile(id)
+    if (path === null) return undefined
+    try {
+      const meta = JSON.parse(readFileSync(path, 'utf8')) as SessionMeta
+      if (typeof meta?.id !== 'string' || meta.id !== id) return undefined
+      return this.logReadable(this.transcriptFor(dirname(path), id)) ? meta : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /** A write to this store's records: no `list()` in this process answers from before it. */
+  private wroteRecords(): void {
+    recordWrites.set(this.root, (recordWrites.get(this.root) ?? 0) + 1)
   }
 
   /**
@@ -1676,10 +1807,11 @@ export class SessionStore {
      * endpoints *is* the validation; there is no hole to check for, because the slice defines the
      * span rather than assuming it.
      */
-    const events = this.read(handle)
+    /** One index for every node the span shadows (#159): a compaction's span is most of the surface. */
+    const bySeq = this.bySeq(handle)
     const replacement = isSurfaceEligible(event.type) ? (event.message as Message | undefined) : undefined
     const head = shadowedSeqs[0]
-    const headMessage = head === undefined ? null : deriveNodeMessage(events, head)
+    const headMessage = head === undefined ? null : deriveMessage(bySeq, head)
     if (startIdx === 0 && headMessage?.role === 'system') {
       if (replacement?.role !== 'system' || shadowedSeqs.length !== 1) {
         throw new Error(
@@ -1688,7 +1820,7 @@ export class SessionStore {
       }
     }
     for (const seq of shadowedSeqs) {
-      const original = deriveNodeMessage(events, seq)
+      const original = deriveMessage(bySeq, seq)
       if (original?.role !== 'tool') continue
       /**
        * A tool result may only be rewritten by a tool result for the same call — and only over
@@ -1747,9 +1879,55 @@ export class SessionStore {
     return state
   }
 
+  /**
+   * The log indexed by seq: what `indexBySeq(read(handle))` answers, without indexing the whole log on every call (#159).
+   *
+   * Kept per loaded log and extended by the events appended since the last call, so a caller that derives node after
+   * node pays for the index once per load rather than once per node. The map is the store's own and grows with the
+   * log; a caller must not change it.
+   */
+  bySeq(handle: SessionHandle): ReadonlyMap<number, SessionEvent> {
+    const events = this.read(handle)
+    let index = this.seqIndexes.get(events)
+    if (index === undefined) {
+      index = { bySeq: new Map(), indexed: 0 }
+      this.seqIndexes.set(events, index)
+      this.seqIndexBuildCount += 1
+    }
+    /** Later events win a seq, as `indexBySeq` lets them. */
+    for (; index.indexed < events.length; index.indexed += 1) {
+      const event = events[index.indexed]!
+      index.bySeq.set(event.seq, event)
+    }
+    return index.bySeq
+  }
+
+  /** How many times this store has indexed a log from its first event ({@link bySeq}); a step should add none (#159). */
+  get seqIndexBuilds(): number {
+    return this.seqIndexBuildCount
+  }
+
   /** One node's message, or null when the node produces none. */
   deriveNode(handle: SessionHandle, seq: number): Message | null {
-    return deriveNodeMessage(this.read(handle), seq)
+    return deriveMessage(this.bySeq(handle), seq)
+  }
+
+  /**
+   * The surface positions that hold a user message: what "new input" means to a running turn (the steering check in
+   * `src/agent/loop.ts`), and the positions where `deriveNode(handle, seq)?.role === 'user'`.
+   *
+   * Read from each position's own event (#159): a user message is a `message` or `context/note` event, while a chunk run
+   * derives to an assistant message or to nothing, so no run is assembled to answer it, and the index is the one
+   * {@link bySeq} keeps. The check used to derive every node, indexing the whole log for each.
+   */
+  userInputSeqs(handle: SessionHandle): ReadonlySet<number> {
+    const bySeq = this.bySeq(handle)
+    const held = new Set<number>()
+    for (const seq of this.surface(handle).nodes) {
+      const type = bySeq.get(seq)?.type
+      if ((type === 'message' || type === 'context/note') && deriveMessage(bySeq, seq)?.role === 'user') held.add(seq)
+    }
+    return held
   }
 
   /**
@@ -1759,8 +1937,7 @@ export class SessionStore {
    * shows up here and nowhere else, while `read()` still returns everything that ever happened.
    */
   deriveMessages(handle: SessionHandle): readonly RecordedMessage[] {
-    const events = this.read(handle)
-    const bySeq = indexBySeq(events)
+    const bySeq = this.bySeq(handle)
     const messages: RecordedMessage[] = []
     for (const seq of this.surface(handle).nodes) {
       const message = deriveMessage(bySeq, seq)
@@ -1892,6 +2069,7 @@ export class SessionStore {
         ...(added > 0 ? { turns: (meta.turns ?? 0) + added } : {}),
       }
       writeFileSync(path, `${JSON.stringify(updated, null, 2)}\n`)
+      this.wroteRecords()
     } catch {
       // A session without readable metadata is still a usable session; the count
       // is a convenience and losing it must not lose the turn.

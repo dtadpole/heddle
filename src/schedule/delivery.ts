@@ -71,6 +71,12 @@ export interface DeliveryHost {
   startTurn(sessionId: string, text: string, source: typeof SCHEDULE_SOURCE): Promise<void>
   /** Find that user message in the session's own log at or after `cursor`; the proof a delivery needs. */
   find(sessionId: string, cursor: number, text: string): { readonly messageId: string } | undefined
+  /**
+   * Resolves once the session has nothing in flight, when the host can tell (the live-turn registry): a turn, or a
+   * hold such as `/compact`'s, which writes no turn event (issue #197). `undefined` leaves the wake-up to
+   * {@link ScheduleDriver.turnEnded} and the busy recheck. The Rust driver's `when_idle`.
+   */
+  whenIdle?(sessionId: string): Promise<void> | undefined
 }
 
 /** A timer handle, whatever the injected timer functions return. */
@@ -207,9 +213,19 @@ export class ScheduleDriver implements ScheduleDriverHandle {
       try {
         this.host.resolve(task.sessionId)
         if (this.host.isBusy(task.sessionId)) {
-          /** Heddle's followup: the reminder becomes the session's next turn, once the one in flight ends. */
+          /**
+           * Heddle's followup: the reminder becomes the session's next turn, once the one in flight ends. A host that
+           * can say when the session goes idle wakes the driver then, whatever held it: DSH replays a wake latched
+           * during maintenance as soon as the maintenance settles (dsh-agent-loop `runMaintenance`), so a reminder due
+           * during `/compact` runs right after it, not at the next busy recheck (issue #197).
+           */
+          const newly = !this.waiting.has(task.sessionId)
           this.waiting.add(task.sessionId)
           for (const member of group) deferred.add(member.record.id)
+          if (newly) {
+            const sessionId = task.sessionId
+            void this.host.whenIdle?.(sessionId)?.then(() => this.turnEnded(sessionId))
+          }
           continue
         }
         this.waiting.delete(task.sessionId)

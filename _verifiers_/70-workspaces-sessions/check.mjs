@@ -4,12 +4,13 @@
  * words in those comments, never backticks.
  */
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, realpathSync, truncateSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { test } from 'node:test'
 
-import { decodeTranscript } from '../../src/session/transcript.ts'
+import { decodeTranscript, encodeFrame } from '../../src/session/transcript.ts'
 import { chatDouble, fixtureDir, heddleCommand, httpConfig, isolatedHome, isTitleRequest, parseJson, readTranscript, refuseTitleRequest, removeDir, repoRoot, runCli, scriptedConfig, sessionsUnder, skipUnless, transcriptFile } from '../../_tools_/verify-runner/lib.mjs'
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
 
@@ -1799,6 +1800,95 @@ test('after a crash, a session whose lock names a pid now another live process\'
   }
 })
 
+test('a server stopped with SIGTERM, and a command line that exits, leave no lock on the sessions they wrote (#248)', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * Issue #248 by its steps: run turns from the command line, and with the server, stop the server with SIGTERM the way a
+   * service manager stops it, and look for the lock files. Measured before the fix: the Rust build left every one, each
+   * naming a dead pid (its release was in a destructor no exit ran; the live 3097 store held 926 lock files, 782 of them
+   * naming dead pids), and once such a pid named another live process the session refused every write. The TypeScript
+   * build let go of them all on both exits. DSH's lock is a kernel flock, which dies with its holder
+   * (dsh-session-persistence-jsonl lib/index.js:692-716; its release, :724-734, closes the descriptor).
+   */
+  const { readdirSync } = await import('node:fs')
+  const h = harness('lock-release')
+  const serverArgs = ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')]
+  let live
+  try {
+    /** Every lock file under the session root, with what it says. */
+    const locksLeft = () => {
+      const found = []
+      const walk = (dir) => {
+        let entries = []
+        try {
+          entries = readdirSync(dir, { withFileTypes: true })
+        } catch {
+          return
+        }
+        for (const entry of entries) {
+          if (entry.isDirectory()) walk(join(dir, entry.name))
+          else if (entry.name.endsWith('.lock')) found.push(`${entry.name}: ${readFileSync(join(dir, entry.name), 'utf8').trim()}`)
+        }
+      }
+      walk(join(h.home, 'sessions'))
+      return found
+    }
+    const newSession = async () => {
+      const made = await runCli(adminArgs(h, ['session', 'new', h.work, '--json']), { env: h.env, cwd: h.work })
+      assert.equal(made.code, 0, `the session was created\n${made.stdout}${made.stderr}`)
+      const id = parseJson(made.stdout)?.session
+      assert.ok(typeof id === 'string', `it has an id\n${made.stdout}`)
+      return id
+    }
+
+    /** The server: three sessions it writes, so it holds a lock on each, then SIGTERM. The command line made them; its own exit is judged below. */
+    const ids = [await newSession(), await newSession(), await newSession()]
+    live = await startServer(serverArgs, { ...h.env, HOME: h.home })
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    for (const id of ids) {
+      const response = await fetch(new URL('/api/turn', live.url), {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ session: id, prompt: 'remember the word loom' }),
+      })
+      const stream = await response.text()
+      assert.equal(response.status, 200, `the server's turn in ${id} ran\n${stream}`)
+      assert.ok(!stream.includes('event: error'), `and did not fail\n${stream}`)
+    }
+    const held = locksLeft()
+    assert.equal(held.length, 3, `the server holds a lock on each session it wrote\n${held.join('\n')}`)
+    for (const lock of held) assert.equal(lock.split(': ')[1].split(/\s+/)[0], String(live.pid), `${lock} names the server, process ${live.pid}`)
+    const server = live
+    live = undefined
+    const code = await server.stop('SIGTERM')
+    assert.deepEqual(locksLeft(), [], `a server stopped with SIGTERM leaves no lock behind (it exited ${code})\n${server.output()}`)
+
+    /** The command line: a new session's turn, a made session resumed, and a turn that fails after it wrote its prompt. */
+    const first = await runCli([...h.args, '--turn', 'remember the word loom'], { env: h.env, cwd: h.work })
+    assert.equal(first.code, 0, `the command line's turn ran\n${first.stdout}${first.stderr}`)
+    assert.deepEqual(locksLeft(), [], 'a command line that exits after its turn leaves no lock behind')
+    const resumed = await newSession()
+    assert.deepEqual(locksLeft(), [], 'making a session leaves no lock behind')
+    const again = await runCli([...h.args, '--resume', resumed, '--turn', 'and again'], { env: h.env, cwd: h.work })
+    assert.equal(again.code, 0, `the resumed turn ran\n${again.stdout}${again.stderr}`)
+    assert.deepEqual(locksLeft(), [], 'nor does a resumed turn')
+    const broken = join(h.home, 'broken.json')
+    writeFileSync(broken, JSON.stringify({ default: 'scripted', endpoints: [{ name: 'scripted', kind: 'scripted', baseUrl: join(h.home, 'no-such-script.json'), model: 'scripted' }] }))
+    const failed = await runCli([...h.args, '--resume', resumed, '--turn', 'this one fails'], { env: { ...h.env, HEDDLE_CONFIG: broken }, cwd: h.work })
+    assert.notEqual(failed.code, 0, `the turn failed: its script cannot be read\n${failed.stdout}${failed.stderr}`)
+    assert.ok(
+      readTranscript(join(h.home, 'sessions', resumed)).some((event) => event.type === 'message' && event.message?.content?.[0]?.text === 'this one fails'),
+      'after it wrote its prompt, so it held the lock',
+    )
+    assert.deepEqual(locksLeft(), [], 'nor does a turn that fails')
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 test('a session log that is not a readable log is left out after a restart, and the server still starts whole (#130)', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   /**
@@ -2170,12 +2260,29 @@ function startServer(args, env) {
       })
       let output = ''
       let settled = false
+      /** Resolves with the exit code (or the signal's name) once the server is gone. */
+      const exited = new Promise((done) => child.once('exit', (code, signal) => done(code ?? signal)))
+      /**
+       * Stop it the way a service manager or a person does (SIGTERM, SIGINT), and wait for it to exit: at most 15 s, then
+       * it is killed and the check fails naming the hang rather than waiting for ever.
+       */
+      const stop = async (signal) => {
+        child.kill(signal)
+        const late = Symbol('late')
+        let timer
+        const outcome = await Promise.race([exited, new Promise((done) => (timer = setTimeout(() => done(late), 15_000)))])
+        clearTimeout(timer)
+        if (outcome !== late) return outcome
+        child.kill('SIGKILL')
+        await exited
+        assert.fail(`the server did not exit within 15 s of ${signal}, so it was killed\n${output}`)
+      }
       const onData = (chunk) => {
         output += chunk.toString()
         const match = /heddle web: (http:\/\/\S+)/.exec(output)
         if (match && !settled) {
           settled = true
-          resolvePromise({ url: match[1], pid: child.pid, kill: () => child.kill('SIGKILL'), output: () => output })
+          resolvePromise({ url: match[1], pid: child.pid, kill: () => child.kill('SIGKILL'), stop, output: () => output })
         }
       }
       child.stdout.on('data', onData)
@@ -8095,6 +8202,144 @@ test('opening a session that holds long answers leaves the server answering: /he
   }
 })
 
+test('the first content search and the team panel\'s polls over four hundred sessions leave the server answering: /healthz never waits (#257)', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  /**
+   * Issue #257: the live TS server stopped answering for about 12 s and its supervisor killed it as hung. Measured on
+   * scratch servers, the cause is the first content search in a process: it decoded every session log on the event
+   * loop, one zstd call per event frame, 12.9 s on a store the size of the live one (1,670 sessions, 0.9 M events).
+   *
+   * The store here is smaller, so the check stays short: 400 sessions of about a thousand events each, one streamed
+   * answer apiece, written as the store writes them (one zstd frame per event) beside a session the binary made, so
+   * the layout is the binary's own. Measured on main 2ebe8741, the first search held /healthz for seconds.
+   *
+   * Judged from a supervisor's seat: /healthz is probed every 100 ms from the moment the server is up while the first
+   * content search runs, and must answer every probe within 1 s; the search must still answer exactly.
+   *
+   * Hang 5 of #257 (captured) was the team panel's poll: every open tab asks /api/team for its session every 2 s, and
+   * one poll read the whole store four times. So the same server then takes four pages polling /api/team every 200 ms
+   * for three seconds, and /healthz must still answer every probe within 1 s.
+   */
+  const h = harness('search-liveness')
+  const SESSIONS = 400
+  const CHUNKS = 1_000
+  mkdirSync(h.work, { recursive: true })
+  let live
+  try {
+    const made = await runCli([...h.args, '--new', '--turn', 'the session the store is built beside'], { env: h.env, cwd: h.work })
+    assert.equal(made.code, 0, `the binary made a session\n${made.stdout}${made.stderr}`)
+    const [templateId] = sessionsUnder(join(h.home, 'sessions'))
+    const folder = dirname(transcriptFile(join(h.home, 'sessions', templateId)))
+    const template = JSON.parse(readFileSync(join(folder, `${templateId}.json`), 'utf8'))
+    const at = '2026-11-01T17:25:35.000Z'
+    const frame = (event) => encodeFrame(`${JSON.stringify(event)}\n`)
+    /** Every session's answer is the same thousand chunks, so their frames are made once. */
+    const answer = Buffer.concat([
+      frame({ seq: 2, at, type: 'model/request', endpoint: 'scripted', messages: 1, tools: [] }),
+      ...Array.from({ length: CHUNKS }, (_, index) => frame({ seq: 3 + index, at, type: 'assistant/chunk', chunk: { type: 'text-delta', text: ` word${index % 50}` } })),
+      frame({ seq: 3 + CHUNKS, at, type: 'assistant/chunk', chunk: { type: 'done', finishReason: 'stop' } }),
+      frame({ seq: 4 + CHUNKS, at, type: 'assistant/completed', text: 'x', finishReason: 'stop' }),
+      frame({ seq: 5 + CHUNKS, at, type: 'turn/completed' }),
+    ])
+    const ids = []
+    for (let index = 0; index < SESSIONS; index += 1) {
+      const id = `session-${randomUUID()}`
+      ids.push(id)
+      const prefix = Buffer.concat([
+        frame({ seq: 0, at, type: 'session/created', cwd: h.work }),
+        frame({ seq: 1, at, type: 'message', message: { role: 'user', content: [{ type: 'text', text: `please count to a thousand, lantern-${index}` }] } }),
+      ])
+      writeFileSync(join(folder, basename(transcriptFile(join(h.home, 'sessions', templateId))).replace(templateId, id)), Buffer.concat([prefix, answer]))
+      const created = new Date(Date.parse('2026-10-20T00:00:00.000Z') + index * 60_000).toISOString()
+      writeFileSync(join(folder, `${id}.json`), `${JSON.stringify({ ...template, id, created, title: `liveness ${index}`, turns: 1 }, null, 2)}\n`)
+    }
+
+    live = await startServer(['web', '--host', '127.0.0.1', '--port', '0', ...h.args], { ...h.env, HOME: h.home })
+    const origin = new URL(live.url).origin
+    const cookie = String((await fetch(live.url, { redirect: 'manual' })).headers.get('set-cookie') ?? '').split(';')[0]
+    const probes = []
+    let probing = true
+    const prober = (async () => {
+      while (probing) {
+        const started = Date.now()
+        let ok = false
+        try {
+          ok = (await fetch(origin + '/healthz', { signal: AbortSignal.timeout(3000) })).ok
+        } catch {
+          ok = false
+        }
+        probes.push({ ms: Date.now() - started, ok })
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 100))
+      }
+    })()
+    const search = async (query) => {
+      const response = await fetch(`${origin}/api/sessions/search?q=${encodeURIComponent(query)}`, { headers: { cookie }, signal: AbortSignal.timeout(120_000) })
+      return { status: response.status, body: await response.json() }
+    }
+    let found
+    let common
+    let searchMs = 0
+    /** Four pages, each polling /api/team for its own session every 200 ms, as the team panel does every 2 s. */
+    const polls = []
+    let polling = true
+    const poller = async (id) => {
+      while (polling) {
+        const started = Date.now()
+        let status = 0
+        try {
+          const response = await fetch(`${origin}/api/team?session=${encodeURIComponent(id)}`, { headers: { cookie }, signal: AbortSignal.timeout(10_000) })
+          status = response.status
+          await response.text()
+        } catch {
+          status = 0
+        }
+        polls.push({ ms: Date.now() - started, status })
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 200))
+      }
+    }
+    let searchProbes = 0
+    try {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 300))
+      const started = Date.now()
+      found = await search('lantern 7')
+      searchMs = Date.now() - started
+      common = await search('word7 word8')
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 300))
+      searchProbes = probes.length
+      const pollers = [11, 101, 201, 301].map((index) => poller(ids[index]))
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 3_000))
+      polling = false
+      await Promise.all(pollers)
+    } finally {
+      polling = false
+      probing = false
+      await prober
+    }
+
+    const slowest = Math.max(...probes.map((probe) => probe.ms))
+    const missed = probes.filter((probe) => !probe.ok || probe.ms > 1000)
+    const pollTimes = polls.map((poll) => poll.ms).sort((left, right) => left - right)
+    context.diagnostic(`first search ${searchMs} ms; ${probes.length} probes, slowest ${slowest} ms`)
+    context.diagnostic(`team polls: ${polls.length}, median ${pollTimes[Math.floor(pollTimes.length / 2)]} ms, slowest ${pollTimes.at(-1)} ms; probes while polling: ${probes.length - searchProbes}, slowest ${Math.max(0, ...probes.slice(searchProbes).map((probe) => probe.ms))} ms`)
+    assert.equal(
+      missed.length,
+      0,
+      `/healthz waited while the first content search ran (${searchMs} ms) or the team panel polled: ${missed.length} of ${probes.length} probes missed 1 s, the slowest took ${slowest} ms`,
+    )
+    assert.ok(polls.length >= 20, `the four pages polled the team route (${polls.length} polls)`)
+    assert.deepEqual([...new Set(polls.map((poll) => poll.status))], [200], 'and every poll was answered')
+    assert.equal(found.status, 200, `the search answered\n${JSON.stringify(found.body).slice(0, 300)}`)
+    assert.deepEqual(found.body, { items: [{ sessionId: ids[7], snippet: 'please count to a thousand, lantern-7' }], hasMore: false }, 'and found the one session that holds the phrase')
+    assert.equal(common.status, 200)
+    assert.equal(common.body.items.length, 20, 'a phrase every answer holds fills the page')
+    assert.equal(common.body.hasMore, true, 'and says there is more')
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 test("a session is Last updated by a person's latest prompt, not by the answer or the tool work written after it", async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()), CAPABILITY)) return
   /**
@@ -8132,6 +8377,119 @@ test("a session is Last updated by a person's latest prompt, not by the answer o
     const relisted = (await sessionsOf(h)).find((meta) => meta.id === id)
     assert.equal(relisted?.updated, again?.at, `the next prompt re-dates it\nsaw: ${JSON.stringify(relisted)}`)
   } finally {
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test('a step in a session of a hundred and fifty turns reaches its model request at once, and /healthz never waits (#159)', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  /**
+   * Issue #159 (both builds): each model step of a long session asked the steering check, did a user message arrive,
+   * two or three times, and the check derived every surface node, each derivation indexing the whole log again. So
+   * the wait before every model request grew with the square of the session's length: measured on main 40182eed with
+   * the session below, 2.4 s a step on the TS build, the server's event loop held for as long, so every other user of
+   * the server waited too. A long agentic session is where heddle is meant to be used.
+   *
+   * The session is 150 short turns, each a prompt and an answer of 166 streamed deltas (about 25,700 log records),
+   * written as the store writes them (one zstd frame per record) into a session the binary made, so the layout is
+   * the binary's own. The turn is three scripted bash steps and an answer. Judged from the log's own times: the wait
+   * from each tool result to the next model request must stay under 500 ms (main waited 0.6-1.3 s on TS and 1.4-1.7 s
+   * on a debug Rust build; the fix 15-44 ms on TS and 80-310 ms on a debug Rust build under load); and from a
+   * supervisor's seat, /healthz probed every 50 ms during the turn must answer every probe within 1 s.
+   */
+  const h = harness('step-index')
+  const TURNS = 150
+  const DELTAS = 166
+  const STEPS = 3
+  scriptedConfig({
+    home: h.home,
+    steps: [...Array.from({ length: STEPS }, () => ({ toolCall: { name: 'bash', arguments: { command: 'true' } } })), { text: 'three steps done' }],
+  })
+  const folder = join(h.work, 'long-session')
+  mkdirSync(folder, { recursive: true })
+  let live
+  try {
+    const made = await runCli(adminArgs(h, ['session', 'new', folder, '--json']), { env: h.env, cwd: h.work })
+    assert.equal(made.code, 0, `the session was created\n${made.stdout}${made.stderr}`)
+    const created = parseJson(made.stdout)
+    const log = transcriptFile(join(h.home, 'sessions', created.session))
+    const { encodeFrame } = await import('../../src/session/transcript.ts')
+    let seq = readTranscript(log).length
+    const at = '2026-11-01T12:00:00.000Z'
+    const frames = []
+    const put = (event) => frames.push(encodeFrame(`${JSON.stringify({ seq: seq++, at, ...event })}\n`))
+    for (let turn = 0; turn < TURNS; turn += 1) {
+      put({ type: 'message', message: { role: 'user', content: [{ type: 'text', text: `question ${turn}: explain the next part` }] } })
+      put({ type: 'model/request', endpoint: 'scripted', model: 'scripted', messages: turn * 2 + 1, tools: [] })
+      for (let index = 0; index < DELTAS; index += 1) put({ type: 'assistant/chunk', chunk: { type: 'text-delta', text: index % 8 === 7 ? `${index}\n` : ` word${index}` } })
+      put({ type: 'assistant/chunk', chunk: { type: 'done', finishReason: 'stop' } })
+      put({ type: 'assistant/completed', text: 'answer', reasoning: '', finishReason: 'stop', rounds: 1, denials: 0 })
+      put({ type: 'turn/completed', rounds: 1 })
+    }
+    writeFileSync(log, Buffer.concat(frames), { flag: 'a' })
+    const seeded = seq
+
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    assert.ok(cookie.length > 0, 'the server issued a cookie')
+
+    const probes = []
+    let probing = true
+    const prober = (async () => {
+      while (probing) {
+        const started = Date.now()
+        let ok = false
+        try {
+          ok = (await fetch(origin + '/healthz', { signal: AbortSignal.timeout(5000) })).ok
+        } catch {
+          ok = false
+        }
+        probes.push({ ms: Date.now() - started, ok })
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 50))
+      }
+    })()
+    let status
+    let stream
+    try {
+      const turn = await fetch(new URL('/api/turn', live.url), {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ session: created.session, prompt: 'run three quick commands' }),
+      })
+      status = turn.status
+      stream = await turn.text()
+    } finally {
+      probing = false
+      await prober
+    }
+    assert.equal(status, 200, `the turn ran through the server\n${String(stream).slice(-600)}`)
+
+    const events = readTranscript(log).filter((event) => event.seq >= seeded)
+    const waits = []
+    let toolAt
+    for (const event of events) {
+      if (event.type === 'message' && event.message?.role === 'tool') toolAt = Date.parse(event.at)
+      if (event.type === 'model/request' && toolAt !== undefined) {
+        waits.push(Date.parse(event.at) - toolAt)
+        toolAt = undefined
+      }
+    }
+    const slowest = Math.max(...probes.map((probe) => probe.ms))
+    const missed = probes.filter((probe) => !probe.ok || probe.ms > 1000).length
+    const shown = `tool result to next model request: ${waits.join(' / ')} ms; /healthz slowest ${slowest} ms over ${probes.length} probes`
+    context.diagnostic(shown)
+    assert.equal(waits.length, STEPS, `each of the ${STEPS} tool results was followed by a model request\n${shown}\n${events.map((event) => event.type).join(', ')}`)
+    assert.ok(Math.max(...waits) < 500, `a step in a ${TURNS}-turn session waited before its model request: ${shown}`)
+    assert.equal(missed, 0, `/healthz waited while the long session's steps ran: ${missed} of ${probes.length} probes missed 1 s; ${shown}`)
+    assert.ok(events.some((event) => event.type === 'turn/completed'), 'the turn completed')
+  } finally {
+    live?.kill()
     removeDir(h.home)
     removeDir(h.work)
   }

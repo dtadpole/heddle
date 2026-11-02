@@ -45,6 +45,55 @@ pub fn round_target(
     Ok((endpoint, recorded("model")))
 }
 
+/// DSH's `waitForChildren` (dsh-subagent lib/index.js:1296-1330): join every descendant of `session` that is working,
+/// leave the idle ones (a parked teammate) alone, and look again until none works; answers whether anything was
+/// waited for. A descendant is a session whose subagent parent chain (`parent_of`, which answers only for a
+/// subagent's record, never a fork's) reaches `session`.
+pub async fn wait_for_descendants(
+    turns: &heddle_agent::TurnRegistry,
+    parent_of: &(dyn Fn(&str) -> Option<String> + Send + Sync),
+    session: &str,
+) -> bool {
+    let descends = |id: &str| {
+        let mut current = id.to_owned();
+        for _ in 0..32 {
+            match parent_of(&current) {
+                Some(parent) if parent == session => return true,
+                Some(parent) => current = parent,
+                None => return false,
+            }
+        }
+        false
+    };
+    let mut observed = false;
+    loop {
+        let progressing: Vec<String> = turns
+            .running()
+            .into_iter()
+            .filter(|id| id != session && descends(id))
+            .collect();
+        if progressing.is_empty() {
+            return observed;
+        }
+        observed = true;
+        for id in &progressing {
+            turns.when_idle(id).await;
+        }
+    }
+}
+
+/// The subagent parent a session's record names: `parentSession` when its `origin` is `subagent`; a fork's
+/// `parentSession` is not followed.
+pub fn subagent_parent(meta: Option<&SessionMeta>) -> Option<String> {
+    let map = meta?.as_map();
+    if map.get("origin").and_then(Value::as_str) != Some("subagent") {
+        return None;
+    }
+    map.get("parentSession")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
 /// A [`RoundRunner`] that answers each round with one real turn.
 pub struct AgentRoundRunner {
     runtime: AgentRuntime,
@@ -95,6 +144,18 @@ impl RoundRunner for AgentRoundRunner {
                 .map_err(|error| error.to_string())
         })
     }
+
+    fn wait_for_children(&self, session: &str) -> BoxFuture<'static, bool> {
+        let Some(turns) = self.runtime.turns.clone() else {
+            return Box::pin(async { false });
+        };
+        let store = Arc::clone(&self.store);
+        let session = session.to_owned();
+        Box::pin(async move {
+            let parent_of = move |id: &str| subagent_parent(store.meta(id).as_ref());
+            wait_for_descendants(&turns, &parent_of, &session).await
+        })
+    }
 }
 
 #[cfg(test)]
@@ -108,6 +169,54 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// Inventory A9: the wait joins a working subagent descendant (a grandchild included), ignores a fork and the
+    /// session itself, and says whether it waited.
+    #[tokio::test]
+    async fn the_descendant_wait_joins_working_subagents_and_not_a_fork() {
+        let turns = heddle_agent::TurnRegistry::new();
+        let parents: std::collections::HashMap<&str, &str> =
+            [("child", "lead"), ("grandchild", "child")]
+                .into_iter()
+                .collect();
+        let parent_of = move |id: &str| parents.get(id).map(|parent| (*parent).to_owned());
+        assert!(
+            !wait_for_descendants(&turns, &parent_of, "lead").await,
+            "nothing works: no wait"
+        );
+        let own = turns.begin("lead", None);
+        let fork = turns.begin("fork", None);
+        assert!(
+            !wait_for_descendants(&turns, &parent_of, "lead").await,
+            "the session's own turn and a fork's are not its descendants"
+        );
+        let grandchild = turns.begin("grandchild", None);
+        let waiter = tokio::spawn({
+            let turns = turns.clone();
+            let parent_of = parent_of.clone();
+            async move { wait_for_descendants(&turns, &parent_of, "lead").await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!waiter.is_finished(), "a working grandchild holds the wait");
+        grandchild.settle();
+        assert!(waiter.await.unwrap(), "and the wait reports that it waited");
+        own.settle();
+        fork.settle();
+    }
+
+    #[test]
+    fn only_a_subagent_record_names_its_parent() {
+        let meta = |value: serde_json::Value| SessionMeta::from_value(value).unwrap();
+        let child = meta(json!({"id": "c", "parentSession": "p", "origin": "subagent"}));
+        let fork = meta(json!({"id": "f", "parentSession": "p"}));
+        assert_eq!(subagent_parent(Some(&child)).as_deref(), Some("p"));
+        assert_eq!(
+            subagent_parent(Some(&fork)),
+            None,
+            "a fork is a session of its own"
+        );
+        assert_eq!(subagent_parent(None), None);
+    }
     use crate::driver::{GoalDriver, ROUND_LIMIT_CODE};
     use crate::service::{CreateGoal, GoalConfig, GoalPhase, GoalService};
 

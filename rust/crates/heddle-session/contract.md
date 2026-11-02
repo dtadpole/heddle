@@ -40,7 +40,17 @@ grounded_in:
   `session "<id>" is already owned by an active write handle (process <pid>, <name>). Its lock file is
   <id>.lock, beside the session's log; if process <pid> is not heddle, delete that file and try again.`
   `test/session-lock.fixtures.json` holds the lines both suites read. One machine and one pid namespace,
-  as before: a pid names a process on the machine that wrote it.
+  as before: a pid names a process on the machine that wrote it. A process lets go of every lock it holds
+  when it ends, removing each file only while it still names this process by pid and identity (#248): the
+  TypeScript build in its `exit` handler, the Rust build in the `heddle` binary's shell after a run returns
+  (a server stopped by SIGTERM or SIGINT, a command line done or failed) or a panic unwinds out of it
+  (`store::release_held_writer_locks`). Before it removes a file the Rust release ends every write in the
+  process: under the lock each log write and lock take holds while it runs, it sets the exiting state, so a
+  write in progress finishes first and every later append, record, seed, truncation, lock take or create is
+  refused with `SessionError::Exiting` (`the session could not be saved: the process is exiting`,
+  `session/exiting`) and writes nothing. A turn that outlives the server's close therefore never writes a log
+  whose lock another process may already hold. The TypeScript build needs no such state: its `exit` handler
+  runs on the one thread, after which nothing else runs.
 
 ## Decisions a dependent crate should know
 

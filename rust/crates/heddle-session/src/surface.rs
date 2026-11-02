@@ -242,6 +242,66 @@ pub fn index_by_seq<E: Borrow<SessionEvent>>(events: &[E]) -> HashMap<u64, &Sess
     by_seq
 }
 
+/// A log read by seq, which [`derive_message`] reads its events through: the map [`index_by_seq`] builds, or a
+/// store's kept index ([`IndexedEvents`]).
+pub trait SeqLookup {
+    /// The event the log holds at `seq`.
+    fn event(&self, seq: u64) -> Option<&SessionEvent>;
+}
+
+impl<S: std::hash::BuildHasher> SeqLookup for HashMap<u64, &SessionEvent, S> {
+    fn event(&self, seq: u64) -> Option<&SessionEvent> {
+        self.get(&seq).copied()
+    }
+}
+
+/// A snapshot of one session's log with the store's index of it by seq (issue #159).
+///
+/// The store keeps the index beside its fold and extends it as the log grows ([`crate::SessionStore::indexed`]), so a
+/// caller that derives node after node reads one index instead of building a map of the whole log per node. It answers
+/// what [`index_by_seq`] over the same events answers: the last event written with a seq is the one found.
+#[derive(Clone)]
+pub struct IndexedEvents {
+    events: crate::event::Events,
+    positions: std::sync::Arc<HashMap<u64, usize>>,
+}
+
+impl IndexedEvents {
+    /// Index `events` from the start, for a caller with a log the store does not keep.
+    pub fn new(events: crate::event::Events) -> Self {
+        let mut positions = HashMap::with_capacity(events.len());
+        for (at, event) in events.iter().enumerate() {
+            positions.insert(event.seq, at);
+        }
+        Self {
+            events,
+            positions: std::sync::Arc::new(positions),
+        }
+    }
+
+    /// A snapshot over an index the store keeps; every position names an event of `events`.
+    pub(crate) fn kept(
+        events: crate::event::Events,
+        positions: std::sync::Arc<HashMap<u64, usize>>,
+    ) -> Self {
+        Self { events, positions }
+    }
+
+    /// The events, in log order.
+    pub fn events(&self) -> &crate::event::Events {
+        &self.events
+    }
+}
+
+impl SeqLookup for IndexedEvents {
+    fn event(&self, seq: u64) -> Option<&SessionEvent> {
+        self.positions
+            .get(&seq)
+            .and_then(|at| self.events.get(*at))
+            .map(|event| event.as_ref())
+    }
+}
+
 /// The message one node derives to, or `None` when it produces none.
 ///
 /// A `message` or `context/note` node is its `message` field, when that parses and has content. A chunk
@@ -270,8 +330,8 @@ pub fn index_by_seq<E: Borrow<SessionEvent>>(events: &[E]) -> HashMap<u64, &Sess
 ///
 /// A `message` field that does not parse as a [`Message`] derives to `None` (the TypeScript build passed
 /// such an object through unchecked; no writer produces one).
-pub fn derive_message(by_seq: &HashMap<u64, &SessionEvent>, seq: u64) -> Option<Message> {
-    let event = by_seq.get(&seq)?;
+pub fn derive_message<L: SeqLookup + ?Sized>(by_seq: &L, seq: u64) -> Option<Message> {
+    let event = by_seq.event(seq)?;
     if event.kind == "message" || event.kind == "context/note" {
         let message = serde_json::from_value::<Message>(event.get("message")?.clone()).ok()?;
         if message.content.is_empty() {
@@ -284,7 +344,7 @@ pub fn derive_message(by_seq: &HashMap<u64, &SessionEvent>, seq: u64) -> Option<
     }
     let mut content: Vec<ContentPart> = Vec::new();
     let mut index = seq;
-    while let Some(next) = by_seq.get(&index) {
+    while let Some(next) = by_seq.event(index) {
         if next.kind != "assistant/chunk" {
             // A message held for the step boundary, an inbox splice or any other note written while the model
             // streamed is not part of its step (#30): the step runs to its `done`, a new request or the turn's end.
@@ -300,9 +360,24 @@ pub fn derive_message(by_seq: &HashMap<u64, &SessionEvent>, seq: u64) -> Option<
             index += 1;
             continue;
         }
-        let chunk = next
-            .get("chunk")
-            .and_then(|value| serde_json::from_value::<Chunk>(value.clone()).ok());
+        let value = next.get("chunk");
+        // A text or reasoning delta is read in place (#159): deltas are most of a long log, and cloning each into a
+        // `Chunk` was most of the time a step spent deriving its request. Every other chunk deserializes below.
+        if let Some((reasoning, text)) = value.and_then(stream_delta) {
+            match (reasoning, content.last_mut()) {
+                (false, Some(ContentPart::Text { text: last })) => last.push_str(text),
+                (false, _) => content.push(ContentPart::Text {
+                    text: text.to_owned(),
+                }),
+                (true, Some(ContentPart::Reasoning { text: last })) => last.push_str(text),
+                (true, _) => content.push(ContentPart::Reasoning {
+                    text: text.to_owned(),
+                }),
+            }
+            index += 1;
+            continue;
+        }
+        let chunk = value.and_then(|value| serde_json::from_value::<Chunk>(value.clone()).ok());
         match chunk {
             Some(Chunk::TextDelta { text }) => match content.last_mut() {
                 Some(ContentPart::Text { text: last }) => last.push_str(&text),
@@ -333,29 +408,59 @@ pub fn derive_message(by_seq: &HashMap<u64, &SessionEvent>, seq: u64) -> Option<
     }
 }
 
+/// A streamed delta read in place: whether it is reasoning, and its text. It answers exactly where deserializing the
+/// chunk answers [`Chunk::TextDelta`] or [`Chunk::ReasoningDelta`]: an object tagged `text-delta` or `reasoning-delta`
+/// with a string `text` (the enum ignores other fields), and `None` for every other chunk, which deserializes as before.
+fn stream_delta(value: &Value) -> Option<(bool, &str)> {
+    let object = value.as_object()?;
+    let reasoning = match object.get("type")?.as_str()? {
+        "text-delta" => false,
+        "reasoning-delta" => true,
+        _ => return None,
+    };
+    Some((reasoning, object.get("text")?.as_str()?))
+}
+
 /// The message one node derives to, indexing the log first.
 pub fn derive_node_message<E: Borrow<SessionEvent>>(events: &[E], seq: u64) -> Option<Message> {
     derive_message(&index_by_seq(events), seq)
 }
 
-/// The events a fork inherits: everything up to and including the **last** `turn/completed`.
+/// The events a fork inherits: everything up to and including the **last** `turn/completed`, and the standalone
+/// events after it until the next turn begins (issue #232).
 ///
-/// A log with no `turn/completed` comes back whole; whether that is forkable is the caller's call.
+/// DSH's `latestCompletedPrefixBoundary` is "the latest completed-turn prefix, including standalone events before the
+/// next turn begins": it walks past the last `turn/end` until a turn starts, a user message is appended or the inbox is
+/// spliced (dsh-api-session-controller). So a `/permission`, `/plan` or `/compact` made after the last turn reaches the
+/// branch, and a dangling user message (a turn that never finished) does not. A log with no `turn/completed` comes back
+/// whole; whether that is forkable is the caller's call.
 pub fn completed_prefix<E: Borrow<SessionEvent> + Clone>(events: &[E]) -> Vec<E> {
-    let mut boundary: Option<u64> = None;
-    for event in events {
-        let event = E::borrow(event);
-        if event.kind == "turn/completed" {
-            boundary = Some(event.seq);
+    let Some(boundary) = events
+        .iter()
+        .rposition(|event| E::borrow(event).kind == "turn/completed")
+    else {
+        return events.to_vec();
+    };
+    let end = events[boundary + 1..]
+        .iter()
+        .position(|event| begins_turn(E::borrow(event)))
+        .map_or(events.len(), |offset| boundary + 1 + offset);
+    events[..end].to_vec()
+}
+
+/// Whether an event begins a turn, where the fork cut's walk past the last completed turn stops: DSH's turn start,
+/// appended user message and inbox splice.
+fn begins_turn(event: &SessionEvent) -> bool {
+    match event.kind.as_str() {
+        "message" => {
+            event
+                .get("message")
+                .and_then(|message| message.get("role"))
+                .and_then(Value::as_str)
+                == Some("user")
         }
-    }
-    match boundary {
-        None => events.to_vec(),
-        Some(last) => events
-            .iter()
-            .filter(|event| E::borrow(*event).seq <= last)
-            .cloned()
-            .collect(),
+        "agent/inbox/spliced" | "model/request" | "assistant/chunk" => true,
+        _ => false,
     }
 }
 
@@ -384,17 +489,15 @@ pub fn inherits_answer<E: Borrow<SessionEvent> + Clone>(
 /// Whether a fork inherits an event of this type.
 ///
 /// DSH's seed is the source's exact event prefix (`buildForkSeed`, dsh-session/lib/types/fork.js:18-27), and a
-/// child here inherits the same, except four kinds that belong to the **source** and that no fold here can tell
+/// child here inherits the same, except three kinds that belong to the **source** and that no fold here can tell
 /// apart as inherited (DSH hands every projection `inheritedEventCount`, dsh-session/lib/index.js:1418-1426):
-/// `session/created` (the child writes its own), `transcript/repaired` (bytes cut from the source's file),
-/// `goal/change` (an active goal is armed whenever a process folds it, so an inherited one would run rounds in
-/// the branch, where DSH disarms it) and `team/*` (the journal names the source as its Lead, and the team fold
-/// refuses a foreign one). The TypeScript twin is `inheritedByFork` in `src/session/store.ts`.
+/// `session/created` (the child writes its own), `transcript/repaired` (bytes cut from the source's file) and
+/// `team/*` (the journal names the source as its Lead, and the team fold refuses a foreign one). A `goal/change` is
+/// inherited (issue #166): the branch keeps the goal, as DSH's does, and heddle-goal's fold reads an inherited
+/// active goal as disarmed, from the seed's older times. The TypeScript twin is `inheritedByFork` in
+/// `src/session/store.ts`.
 pub fn inherited_by_fork(kind: &str) -> bool {
-    kind != "session/created"
-        && kind != "transcript/repaired"
-        && kind != "goal/change"
-        && !kind.starts_with("team/")
+    kind != "session/created" && kind != "transcript/repaired" && !kind.starts_with("team/")
 }
 
 /// The fields of a recorded event that name one other event by its seq (a compaction's own bookkeeping).
@@ -901,6 +1004,44 @@ mod tests {
         assert_eq!(completed_prefix(&unfinished).len(), 1);
     }
 
+    /// #232: the cut walks past the last `turn/completed` over standalone events (a mode switch, a compaction) and
+    /// stops where the next turn begins: a user message, an inbox splice or a model request.
+    #[test]
+    fn the_completed_prefix_keeps_standalone_events_until_the_next_turn_begins() {
+        let events = vec![
+            message(0, "user"),
+            message(1, "assistant"),
+            event(2, "turn/completed", &[]),
+            event(3, "command/run", &[]),
+            event(4, "permission/mode", &[("mode", json!("read-only"))]),
+            event(5, "plan/mode", &[("active", json!(true))]),
+            event(6, "command/done", &[]),
+            message(7, "user"),
+            event(8, "plan/mode", &[("active", json!(false))]),
+        ];
+        let seqs =
+            |events: Vec<SessionEvent>| events.iter().map(|event| event.seq).collect::<Vec<_>>();
+        assert_eq!(seqs(completed_prefix(&events)), vec![0, 1, 2, 3, 4, 5, 6]);
+        let spliced = vec![
+            message(0, "user"),
+            event(1, "turn/completed", &[]),
+            event(2, "permission/mode", &[]),
+            event(3, "agent/inbox/spliced", &[]),
+            event(4, "plan/mode", &[]),
+        ];
+        assert_eq!(seqs(completed_prefix(&spliced)), vec![0, 1, 2]);
+        let trailing = vec![
+            message(0, "user"),
+            event(1, "turn/completed", &[]),
+            event(2, "compaction/end", &[]),
+        ];
+        assert_eq!(
+            seqs(completed_prefix(&trailing)),
+            vec![0, 1, 2],
+            "nothing begins a turn: all of it"
+        );
+    }
+
     #[test]
     fn a_fork_inherits_an_answer_from_a_message_or_a_completed_event() {
         let copied = vec![message(0, "user"), message(1, "assistant")];
@@ -921,7 +1062,7 @@ mod tests {
     /// fork's log with the same bytes.
     const SEED_SOURCE: [&str; 12] = [
         r#"{"seq":0,"at":"t0","type":"session/created","cwd":"/w"}"#,
-        r#"{"seq":1,"at":"t1","type":"goal/change","version":1}"#,
+        r#"{"seq":1,"at":"t1","type":"transcript/repaired","droppedBytes":3}"#,
         r#"{"seq":2,"at":"t2","type":"message","message":{"role":"user","content":[{"type":"text","text":"one"}]}}"#,
         r#"{"seq":3,"at":"t3","type":"assistant/chunk","chunk":{"type":"text-delta","text":"a"}}"#,
         r#"{"seq":4,"at":"t4","type":"assistant/chunk","chunk":{"type":"done","finishReason":"stop"}}"#,
@@ -948,7 +1089,7 @@ mod tests {
 
     #[test]
     fn a_fork_seed_renumbers_every_seq_after_an_event_it_leaves_behind() {
-        // #52, #55: the seed is the source's own log. A `goal/change` stays behind, so every later event moves
+        // #52, #55: the seed is the source's own log. A `transcript/repaired` stays behind, so every later event moves
         // down one, and so does every field that names a seq: the surface range, its sources, the records.
         let source: Vec<SessionEvent> = SEED_SOURCE
             .iter()
@@ -984,7 +1125,10 @@ mod tests {
         assert!(!inherited_by_fork("session/created"));
         assert!(!inherited_by_fork("team/member"));
         assert!(!inherited_by_fork("transcript/repaired"));
-        assert!(!inherited_by_fork("goal/change"));
+        assert!(
+            inherited_by_fork("goal/change"),
+            "a goal comes along (#166)"
+        );
         assert!(inherited_by_fork("permission/mode"));
     }
 
@@ -1067,5 +1211,39 @@ mod tests {
         }
         let by_seq = index_by_seq(&finished);
         assert!(derive_message(&by_seq, 2).is_some());
+    }
+
+    /// The in place read of a delta (#159) answers what deserializing the chunk answers, for every shape: a delta with
+    /// fields the enum ignores, a text that is not a string, a missing text, other chunk types, and no object at all.
+    #[test]
+    fn a_delta_read_in_place_is_what_deserializing_the_chunk_reads() {
+        for value in [
+            json!({ "type": "text-delta", "text": "a" }),
+            json!({ "type": "reasoning-delta", "text": "b" }),
+            json!({ "type": "text-delta", "text": "c", "extra": 1 }),
+            json!({ "type": "text-delta", "text": "\u{e9}\n\"quoted\"" }),
+            json!({ "type": "text-delta", "text": "" }),
+            json!({ "type": "text-delta", "text": 7 }),
+            json!({ "type": "reasoning-delta", "text": null }),
+            json!({ "type": "text-delta" }),
+            json!({ "type": "done", "finishReason": "stop" }),
+            json!({ "type": "tool-call", "id": "x", "name": "bash", "arguments": "{}" }),
+            json!({ "type": "tool-call-delta", "index": 0, "argumentsDelta": "{" }),
+            json!({ "type": "Text-Delta", "text": "case" }),
+            json!({ "text": "no tag" }),
+            json!("text-delta"),
+            json!(null),
+        ] {
+            let expected = match serde_json::from_value::<Chunk>(value.clone()).ok() {
+                Some(Chunk::TextDelta { text }) => Some((false, text)),
+                Some(Chunk::ReasoningDelta { text }) => Some((true, text)),
+                _ => None,
+            };
+            assert_eq!(
+                stream_delta(&value).map(|(reasoning, text)| (reasoning, text.to_owned())),
+                expected,
+                "{value}"
+            );
+        }
     }
 }

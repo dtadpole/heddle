@@ -418,20 +418,121 @@ export async function typeText(page, { text, submitKey }) {
   return { typed: text.length, ...(submitKey !== undefined ? { submitted: submitKey } : {}) }
 }
 
-/** Give a file input files by path. */
-export async function uploadFile(page, { uid, filePaths }) {
+/** How long a click is given to open a file chooser: the harness browser's own three seconds. */
+export const CHOOSER_TIMEOUT_MS = 3_000
+
+/** The names of the files an input now holds, read back from the page. */
+const FILE_NAMES = 'function () { return Array.from(this.files ?? []).map((file) => file.name) }'
+
+/**
+ * Give a file input files by path.
+ *
+ * The uid names either the file input itself or the control a person would click to pick files. The
+ * second case exists because a page's input is usually hidden — `<input type="file" hidden>` behind a
+ * styled button that calls `input.click()` — and a hidden element has no node in the accessibility
+ * tree, so it never gets a uid. The control is then clicked with the browser told to hand the chooser
+ * to the tool instead of drawing it (`Page.setInterceptFileChooserDialog`), and the files go to the
+ * input the chooser names. No native picker is shown and nothing is read from the host but the paths.
+ * The harness browser does the same: files on the element, or a click and the chooser within 3 s.
+ */
+export async function uploadFile(page, { uid, filePaths, chooserTimeoutMs = CHOOSER_TIMEOUT_MS }) {
   if (!Array.isArray(filePaths) || filePaths.length === 0) throw new Error('upload_file needs at least one file path')
   const node = page.uidToNode.get(uid)
   if (node === undefined) throw new Error(`the snapshot has no element with uid ${uid}; take a new snapshot`)
   if (node.backendNodeId === undefined) throw new Error(`the element with uid ${uid} is not a DOM node`)
+  if (page.chooserInterceptLeftOn === true) {
+    const stuck = await switchInterceptOff(page)
+    if (stuck !== undefined) throw new Error(`nothing was uploaded: ${interceptLeftOn(stuck)}`)
+  }
   const { objectId } = await resolveObject(page, uid)
   const kind = await callOn(page, objectId, `function () { return { tag: this.tagName, type: this.type } }`)
   if (kind?.tag !== 'INPUT' || kind?.type !== 'file') {
-    throw new Error(`the element with uid ${uid} is not a file input`)
+    return uploadThroughChooser(page, { uid, filePaths, chooserTimeoutMs })
   }
   await page.send('DOM.setFileInputFiles', { files: filePaths, backendNodeId: node.backendNodeId })
-  const names = await callOn(page, objectId, 'function () { return Array.from(this.files ?? []).map((file) => file.name) }')
+  const names = await callOn(page, objectId, FILE_NAMES)
   return { uploaded: names ?? [], uid }
+}
+
+/**
+ * Switch file-chooser interception off, and say whether that worked.
+ *
+ * A failure is recorded on the page (`chooserInterceptLeftOn`), because the setting outlives the call:
+ * until it is switched off, a chooser the page opens on its own is handed to nobody and never drawn.
+ * The next upload_file on the page tries again before doing anything else.
+ */
+async function switchInterceptOff(page) {
+  try {
+    await page.send('Page.setInterceptFileChooserDialog', { enabled: false })
+    page.chooserInterceptLeftOn = false
+    return undefined
+  } catch (error) {
+    page.chooserInterceptLeftOn = true
+    return error
+  }
+}
+
+/** What a reader is told when interception could not be switched off. */
+const interceptLeftOn = (error) =>
+  `file-chooser interception could not be switched off (${error?.message ?? error}), so this page draws no chooser ` +
+  'of its own until it is; the next upload_file tries again, and `cli.mjs stop` ends the browser and the setting with it'
+
+/**
+ * Click the control a uid names and give its file chooser the files.
+ *
+ * Interception is switched on only for the click and off again afterwards, so a chooser the page opens
+ * later, outside any upload, behaves as it would have without the tool. That claim is checked, not
+ * assumed: a switch-off that fails turns the call into an error that says so, naming the files if they
+ * were given, rather than a success that leaves the page changed.
+ */
+async function uploadThroughChooser(page, { uid, filePaths, chooserTimeoutMs }) {
+  let answer
+  const opened = new Promise((resolvePromise) => {
+    answer = resolvePromise
+  })
+  const remove = page.connection.on('Page.fileChooserOpened', (params, message) => {
+    if (message.sessionId === page.sessionId) answer(params)
+  })
+  let timer
+  let outcome
+  let failure
+  try {
+    await page.send('Page.setInterceptFileChooserDialog', { enabled: true })
+    await click(page, { uid })
+    const chooser = await Promise.race([
+      opened,
+      new Promise((resolvePromise) => {
+        timer = setTimeout(() => resolvePromise(undefined), chooserTimeoutMs)
+      }),
+    ])
+    if (chooser === undefined) {
+      throw new Error(
+        `the element with uid ${uid} is not a file input, and clicking it opened no file chooser within ${chooserTimeoutMs} ms; ` +
+          'give upload_file the file input or the control that opens one',
+      )
+    }
+    if (chooser.backendNodeId === undefined) throw new Error('the file chooser named no input element')
+    if (chooser.mode === 'selectSingle' && filePaths.length > 1) {
+      throw new Error(`the file chooser takes one file, and ${filePaths.length} were given`)
+    }
+    await page.send('DOM.setFileInputFiles', { files: filePaths, backendNodeId: chooser.backendNodeId })
+    const resolved = await page.send('DOM.resolveNode', { backendNodeId: chooser.backendNodeId })
+    const inputId = resolved.result?.object?.objectId
+    const names = inputId === undefined ? undefined : await callOn(page, inputId, FILE_NAMES)
+    outcome = { uploaded: names ?? [], uid, via: 'file chooser' }
+  } catch (error) {
+    failure = error
+  } finally {
+    clearTimeout(timer)
+    remove()
+  }
+  const stuck = await switchInterceptOff(page)
+  if (stuck !== undefined) {
+    if (failure !== undefined) throw new Error(`${failure.message}; and ${interceptLeftOn(stuck)}`)
+    throw new Error(`the files were given (${outcome.uploaded.join(', ')}), but ${interceptLeftOn(stuck)}`)
+  }
+  if (failure !== undefined) throw failure
+  return outcome
 }
 
 /** Answer the dialog the page is showing. */

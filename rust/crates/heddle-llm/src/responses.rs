@@ -9,7 +9,9 @@
 use futures::StreamExt;
 use serde_json::Value;
 
-use crate::adapter::{Adapter, ChunkStream, Folded, PreparedCall, StreamFold, fold_sse};
+use crate::adapter::{
+    Adapter, ChunkStream, Folded, PreparedCall, StreamFold, fold_sse, stream_cut,
+};
 use crate::error::ModelError;
 use crate::http::{Method, WireRequest, WireResponse, wire};
 use crate::sse::SseEvent;
@@ -258,7 +260,7 @@ pub fn responses_finish_reason(
 
 /// The streamed fold. Function calls are keyed by the item's `id` (which the argument deltas name), not its
 /// `call_id`; the completed response restates every call and fills what the deltas left empty. A body that ends with
-/// no terminal event finishes `stream_ended`, never `stop`.
+/// no terminal event was cut and fails `STREAM_CLOSED`, never `stop`, with no half-written call emitted (#173).
 #[derive(Debug, Default)]
 pub struct ResponsesFold {
     calls: Vec<(String, ToolCall)>,
@@ -455,18 +457,11 @@ impl StreamFold for ResponsesFold {
         })
     }
 
-    fn end(&mut self) -> Vec<Chunk> {
-        let mut chunks: Vec<Chunk> = self
-            .calls
-            .iter()
-            .map(|(_, call)| Chunk::ToolCall(call.clone()))
-            .collect();
-        // A body that ends on no terminal event was cut; saying `stop` would present it as finished.
-        chunks.push(Chunk::Done {
-            finish_reason: "stream_ended".into(),
-            usage: self.usage,
-        });
-        chunks
+    fn end(&mut self) -> Result<Vec<Chunk>, ModelError> {
+        // A body that ends on no terminal event was cut; saying `stop` would present it as finished. It used to finish
+        // `stream_ended`, which kept the fragment as the answer and still emitted the calls the cut left half-written;
+        // it fails `STREAM_CLOSED` now, as the other routes do (#173).
+        Err(stream_cut(&self.endpoint, "response.completed"))
     }
 }
 
@@ -638,18 +633,17 @@ mod tests {
 
     #[test]
     fn a_body_that_ends_without_a_terminal_event_was_cut() {
-        let mut fold = ResponsesFold::new();
+        let mut fold = ResponsesFold::new().with_endpoint("codex");
         fold.event(&payload(serde_json::json!({
             "type": "response.output_text.delta",
             "delta": "partial"
         })))
         .expect("folds");
+        let cut = fold.end().expect_err("a cut stream fails (#173)");
+        assert_eq!(cut.code, crate::error::code::STREAM_CLOSED);
         assert_eq!(
-            fold.end(),
-            vec![Chunk::Done {
-                finish_reason: "stream_ended".into(),
-                usage: None,
-            }]
+            cut.to_string(),
+            "'codex' ended its stream before the answer finished (no response.completed)"
         );
     }
 

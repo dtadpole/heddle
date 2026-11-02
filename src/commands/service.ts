@@ -7,6 +7,7 @@ import { Service, type Context } from '@deepseek-ai/cordis'
 import { heddleHome } from '../config/schema.ts'
 import { isSandboxMode, type SandboxMode } from '../sandbox/service.ts'
 import type { SessionHandle } from '../session/store.ts'
+import type { ToolSpec } from '../llm/types.ts'
 import {
   compactCommand,
   exportCommand,
@@ -84,8 +85,28 @@ interface ContextLike {
   measure(handle: SessionHandle): { readonly totalTokens: number; readonly nodes: readonly unknown[] }
   prepare(
     handle: SessionHandle,
-    options: { readonly cwd: string; readonly endpoint: string; readonly model?: string; readonly force?: boolean; readonly signal?: AbortSignal },
+    options: {
+      readonly cwd: string
+      readonly endpoint: string
+      readonly model?: string
+      readonly tools?: readonly ToolSpec[]
+      readonly force?: boolean
+      readonly signal?: AbortSignal
+    },
   ): Promise<{ readonly compacted: boolean }>
+}
+
+/**
+ * The tool schemas the session's last model request offered, in its order (#209): DSH's summary call sends the request
+ * header's tools, so the summary is a prefix of what the provider last saw and its cache is reused. The log records the
+ * request's tool names; the registry gives their schemas. A session that has made no request yet sends none.
+ */
+function lastRequestTools(ctx: Context, handle: SessionHandle): readonly ToolSpec[] | undefined {
+  const request = [...ctx.session.store.read(handle)].reverse().find((event) => event.type === 'model/request') as { tools?: unknown } | undefined
+  if (!Array.isArray(request?.tools)) return undefined
+  const registry = ctx.get('tools') as { describe?: () => readonly ToolSpec[] } | undefined
+  const specs = new Map((registry?.describe?.() ?? []).map((spec) => [spec.name, spec]))
+  return request.tools.flatMap((name) => (typeof name === 'string' && specs.has(name) ? [specs.get(name)!] : []))
 }
 
 /** The live-turn registry's surface `/compact` uses (`src/agent/turns.ts`). */
@@ -137,10 +158,12 @@ async function compactIdle(ctx: Context, handle: SessionHandle, signal?: AbortSi
   if (endpoint === undefined) throw new Error('Compaction is unavailable because no model endpoint is configured to summarise with.')
   const before = context.measure(handle)
   const lastSeq = ctx.session.store.read(handle).at(-1)?.seq ?? 0
+  const tools = lastRequestTools(ctx, handle)
   const report = await context.prepare(handle, {
     cwd: meta?.cwd ?? handle.dir,
     endpoint,
     ...(meta?.model !== undefined ? { model: meta.model } : {}),
+    ...(tools !== undefined ? { tools } : {}),
     force: true,
     ...(signal !== undefined ? { signal } : {}),
   })

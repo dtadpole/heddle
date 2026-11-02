@@ -103,6 +103,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       const turns = registry()
       return turns !== undefined ? turns.isRunning(sessionId) : inTurn.has(sessionId)
     },
+    /** The registry settles a hold that writes no turn event too (`/compact`, issue #197). */
+    whenIdle: (sessionId) => registry()?.whenIdle(sessionId),
     cursor: (sessionId) => {
       const handle = store.open(sessionId)
       return handle === null ? 0 : store.count(handle)

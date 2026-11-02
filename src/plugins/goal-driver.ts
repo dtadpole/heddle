@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 
 import { runTurn } from '../agent/loop.ts'
+import type { TurnRegistry } from '../agent/turns.ts'
 import { GoalDriver, isBlockedTurnEnd, turnEndOf, type TurnEndEvidence } from '../goal/driver.ts'
 
 /** Name this plugin is registered and logged under. */
@@ -38,6 +39,33 @@ export function apply(ctx: Context): void {
         source,
         ...(meta?.model !== undefined ? { model: meta.model } : {}),
       })
+    },
+    /**
+     * DSH's `waitForChildren` (dsh-subagent lib/index.js:1296-1330): join every descendant that is working, leave the
+     * idle ones (a parked teammate) alone, and look again until none works. A descendant is a subagent session whose
+     * `parentSession` chain reaches this one: a delegated child, a teammate, or one of theirs (not a fork).
+     */
+    waitForChildren: async (handle) => {
+      const turns = ctx.get('turns') as TurnRegistry | undefined
+      if (turns === undefined) return false
+      let observed = false
+      for (;;) {
+        // Only a subagent's record links to its parent here: a fork also names a `parentSession`, but it is a session
+        // of its own, not work this goal waits for.
+        const parents = new Map(ctx.session.list().filter((meta) => meta.origin === 'subagent').map((meta) => [meta.id, meta.parentSession]))
+        const descends = (id: string): boolean => {
+          let current: string | undefined = id
+          for (let depth = 0; depth < 32 && current !== undefined; depth += 1) {
+            current = parents.get(current)
+            if (current === handle.id) return true
+          }
+          return false
+        }
+        const progressing = turns.running().filter((id) => id !== handle.id && descends(id))
+        if (progressing.length === 0) return observed
+        observed = true
+        await Promise.all(progressing.map((id) => turns.whenIdle(id)))
+      }
     },
   })
 

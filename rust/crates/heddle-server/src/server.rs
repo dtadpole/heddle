@@ -1073,11 +1073,20 @@ async fn search_sessions(
         Ok(query) => query,
         Err(refusal) => return respond::error(StatusCode::BAD_REQUEST, refusal.message),
     };
-    match state.harness().sessions.search(&query) {
-        Ok(page) => respond::json(StatusCode::OK, &page),
-        Err(error) => respond::error(
+    // The first search after a start reads every session log (#257). It runs on the blocking pool, so no runtime
+    // worker waits on it and every other route, `/healthz` among them, keeps answering: run inline, a cold search over
+    // 400 sessions held the server's health probes for its whole 7-18 s.
+    let searched =
+        tokio::task::spawn_blocking(move || state.harness().sessions.search(&query)).await;
+    match searched {
+        Ok(Ok(page)) => respond::json(StatusCode::OK, &page),
+        Ok(Err(error)) => respond::error(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("session search failed: {}", error.message),
+        ),
+        Err(failed) => respond::error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("session search failed: {failed}"),
         ),
     }
 }
@@ -1645,7 +1654,17 @@ async fn steer_session(
         },
         None => Vec::new(),
     };
-    if !state.runs().is_running(id.as_str()) {
+    // A one-shot delegate child takes no steer from here, as it takes no turn (the turn route's rule): DSH answers
+    // `session/agent-busy` for a session subagent routing owns, before any steer gate. A teammate passes.
+    if let Some(refusal) =
+        subagent_turn_refusal(state.harness().sessions.meta(id.as_str()).as_ref())
+    {
+        return respond::json_compact(StatusCode::CONFLICT, &refusal);
+    }
+    // Any running turn takes a steer, not only one this server started (issue #176): a goal round, a teammate's or a
+    // child's turn runs on the agent runtime and reads the session's appended messages at its next step, as DSH's
+    // agent takes a steer into whatever turn is running.
+    if !state.runs().is_running(id.as_str()) && !state.harness().turns.is_live(id.as_str()) {
         return respond::error_with_code(
             StatusCode::CONFLICT,
             "the current turn no longer accepts steering",
@@ -4454,6 +4473,136 @@ mod tests {
         );
     }
 
+    /// The test sessions with a content search as slow as a cold one over a large store (#257); every other call is
+    /// the fake's own.
+    struct SlowSearch(Sessions);
+
+    impl SessionService for SlowSearch {
+        fn list(&self) -> Vec<SessionMeta> {
+            self.0.list()
+        }
+        fn exists(&self, id: &str) -> bool {
+            self.0.exists(id)
+        }
+        fn events(&self, id: &str) -> Option<Vec<Value>> {
+            self.0.events(id)
+        }
+        fn start(&self, options: StartSession) -> Result<String, ServiceError> {
+            self.0.start(options)
+        }
+        fn open_at(&self, folder: &Path, options: OpenAt) -> Result<String, ServiceError> {
+            self.0.open_at(folder, options)
+        }
+        fn create_at(
+            &self,
+            branch: &Path,
+            title: Option<&str>,
+            preset: Option<&str>,
+        ) -> Result<CreatedSession, ServiceError> {
+            self.0.create_at(branch, title, preset)
+        }
+        fn fork(&self, id: &str, at_seq: Option<u64>) -> ForkOutcome {
+            self.0.fork(id, at_seq)
+        }
+        fn set_flags(
+            &self,
+            id: &str,
+            patch: FlagPatch,
+        ) -> Result<Option<SessionMeta>, ServiceError> {
+            self.0.set_flags(id, patch)
+        }
+        fn rename(&self, id: &str, title: &str) -> Option<SessionMeta> {
+            self.0.rename(id, title)
+        }
+        fn definition_id(&self, folder: &Path) -> Option<String> {
+            self.0.definition_id(folder)
+        }
+        fn update_definition_title(&self, folder: &Path, title: &str) -> Result<(), ServiceError> {
+            self.0.update_definition_title(folder, title)
+        }
+        fn set_model(&self, id: &str, selection: &SessionSelection) -> Option<SessionMeta> {
+            self.0.set_model(id, selection)
+        }
+        fn effective_mode(&self, id: &str, fallback: &str) -> String {
+            self.0.effective_mode(id, fallback)
+        }
+        fn set_mode(
+            &self,
+            id: &str,
+            mode: &str,
+            fallback: &str,
+        ) -> Result<ModeWrite, ServiceError> {
+            self.0.set_mode(id, mode, fallback)
+        }
+        fn user_content(&self, id: &str, content: Vec<Value>) -> Result<(), ServiceError> {
+            self.0.user_content(id, content)
+        }
+        fn folder(&self, id: &str) -> Option<PathBuf> {
+            self.0.folder(id)
+        }
+        fn search(&self, query: &str) -> Result<heddle_session::SessionSearchPage, ServiceError> {
+            std::thread::sleep(std::time::Duration::from_millis(1_500));
+            Ok(heddle_session::SessionSearchPage {
+                items: vec![heddle_session::SessionSearchHit {
+                    session_id: "session-00000000-0000-0000-0000-000000000001".into(),
+                    snippet: format!("found {query}"),
+                }],
+                has_more: false,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn health_answers_while_a_slow_content_search_runs() {
+        // #257: the first content search reads every log. Run inline in its handler, it held the runtime thread, and
+        // a cold search over 400 sessions left `/healthz` unanswered for all of its 7-18 s. On this test's one-thread
+        // runtime a search that blocks the thread delays `/healthz` by its whole 1.5 s.
+        let (router, _) = ServerBuilder::new(
+            Harness::new(
+                Arc::new(SlowSearch(Sessions::with_one())),
+                Arc::new(Models),
+                Arc::new(Turns),
+                Arc::new(Sandbox),
+                PathBuf::from("/work"),
+            ),
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("slow-search")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let started = std::time::Instant::now();
+        let search = tokio::spawn({
+            let router = router.clone();
+            async move {
+                call(
+                    &router,
+                    Method::GET,
+                    "/api/sessions/search?q=quokka",
+                    Some(&cookie),
+                )
+                .await
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let (status, _, _) = call(&router, Method::GET, "/healthz", None).await;
+        let waited = started.elapsed();
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            waited < std::time::Duration::from_millis(1_000),
+            "/healthz waited {waited:?} for the search"
+        );
+        let (status, _, bytes) = search.await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{}", body_text(&bytes));
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["items"][0]["snippet"], "found quokka", "{body}");
+        assert_eq!(body["hasMore"], false);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_terminal_whose_mode_changed_while_it_started_is_ended_and_refused() {
         // #85 R1: create reads the mode, spawns (milliseconds of fork/exec), then inserts. A permission change in
@@ -6062,6 +6211,94 @@ mod tests {
         };
         assert_eq!(running(child), Some(Value::Bool(true)), "{body}");
         assert_eq!(running(parent), Some(Value::Bool(false)), "{body}");
+    }
+
+    /// Issue #176: a turn the agent runtime holds (a goal round, a teammate's turn) takes a steer; an idle session is
+    /// still refused with `session/steer-unavailable`; and a running one-shot delegate child is refused with
+    /// `session/agent-busy` first, byte for byte the turn route's refusal, as DSH's ownership check comes before the steer.
+    #[tokio::test]
+    async fn a_turn_the_agent_runtime_holds_takes_a_steer_but_a_delegate_child_and_an_idle_session_do_not()
+     {
+        let live = "session-00000000-0000-0000-0000-000000000001";
+        let child = "session-33333333-3333-3333-3333-333333333333";
+        let mate = "session-44444444-4444-4444-4444-444444444444";
+        let meta = |id: &str, rest: Value| SessionMeta {
+            id: id.into(),
+            cwd: Some("/work".into()),
+            endpoint: Some("double".into()),
+            turns: 1,
+            rest: rest.as_object().cloned().unwrap_or_default(),
+            ..SessionMeta::default()
+        };
+        let sessions = Sessions {
+            metas: vec![
+                meta(live, json!({})),
+                meta(
+                    child,
+                    json!({"parentSession": "session-p", "origin": "subagent", "delegationDepth": 1}),
+                ),
+                meta(
+                    mate,
+                    json!({"parentSession": "session-l", "origin": "subagent", "delegationDepth": 1, "teamId": "session-l"}),
+                ),
+            ],
+            events: HashMap::new(),
+            modes: std::sync::Mutex::new(Vec::new()),
+            recorded: std::sync::Mutex::new(Vec::new()),
+            flags: FlagsAnswer::Written,
+        };
+        let runner = Arc::new(LiveTurns {
+            live: vec![live.to_owned(), child.to_owned(), mate.to_owned()],
+            interrupted: std::sync::Mutex::new(Vec::new()),
+        });
+        let (router, _) = ServerBuilder::new(
+            Harness::new(
+                Arc::new(sessions),
+                Arc::new(Models),
+                runner,
+                Arc::new(Sandbox),
+                PathBuf::from("/work"),
+            ),
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("steer-live-turn")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let steer = |id: &str| format!("/api/sessions/{id}/steer");
+        let body = r#"{"prompt":"look at the tests too"}"#;
+
+        for id in [live, mate] {
+            let (status, bytes) = post_json(&router, &steer(id), &cookie, body).await;
+            assert_eq!(status, StatusCode::OK, "{id}: {}", body_text(&bytes));
+            let answer: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(answer["accepted"], true);
+        }
+
+        let (status, bytes) = post_json(&router, &steer(child), &cookie, body).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{}", body_text(&bytes));
+        assert_eq!(
+            body_text(&bytes),
+            format!(
+                "{{\"error\":\"session \\\"{child}\\\" is owned by subagent routing\",\"code\":\"session/agent-busy\",\"reason\":\"use subagent delivery for this child session\"}}\n"
+            )
+        );
+
+        let idle = "session-00000000-0000-0000-0000-000000000009";
+        let (status, bytes) = post_json(
+            &router,
+            &steer(idle),
+            &cookie,
+            r#"{"prompt":"anyone there"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{}", body_text(&bytes));
+        let answer: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(answer["code"], "session/steer-unavailable");
     }
 
     #[tokio::test]

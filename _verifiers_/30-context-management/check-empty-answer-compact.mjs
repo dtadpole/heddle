@@ -22,6 +22,16 @@ import { fixtureDir, heddleCommand, isTitleRequest, readTranscript, refuseTitleR
  * role-only first delta, and for an Anthropic `message_start`, thinking block and `ping`. The plan fix does not depend
  * on how the done-only run came about, so the cases below pin the shape itself.
  *
+ * **The run is seeded, not produced (#173's wire half).** A provider stream that carries only `finish_reason: "stop"` is
+ * now DSH's `EMPTY_RESPONSE` failure (dsh-llm-pi-ai `mapStopReason`: "returned a completed response with no
+ * content"): it is retried and, if every attempt is empty, the turn fails, so no build writes the done-only run live any
+ * more. A log that already holds one must still compact: one written by an older build, or by a TS Stop during silent
+ * thinking. So after a live first turn the server stops, the TypeScript store (the implementation the log format is,
+ * imported from the source as check-team-view does) appends the five events a pre-#173 build wrote for that run, and
+ * the server starts again over the same home. Measured on main 61570627a: the user message, a
+ * `model/request` two generations and two messages past the first turn's, `assistant/chunk {done, stop}`,
+ * `assistant/completed` with empty text, and `turn/completed`.
+ *
  * DSH: an empty answer is an ordinary turn. It costs nothing in the measurement, and a later compaction can shadow it
  * like any other node.
  */
@@ -42,11 +52,8 @@ const FIRST = `HERON-214 keep this in mind: ${'the quick brown fox jumps over th
 const SECOND = `And now the question: ${'a lazy dog sleeps under the quick brown fox, '.repeat(500)}`
 const MEASUREMENT = 'the measurement is of a different surface'
 
-/**
- * A chat double. The turn named by `empty` is answered with an empty stream (only `finish_reason: "stop"`). Every other
- * turn, and every summary, is answered at once. Turns are counted from 1; request bodies are kept.
- */
-async function emptyingDouble({ empty = 0 } = {}) {
+/** A chat double: every turn and every summary is answered at once. Request bodies are kept. */
+async function answeringDouble() {
   const state = { turns: [], summaries: [] }
   const finish = (response) => {
     response.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`)
@@ -72,8 +79,6 @@ async function emptyingDouble({ empty = 0 } = {}) {
         return finish(response)
       }
       state.turns.push(body)
-      const n = state.turns.length
-      if (n === empty) return finish(response)
       delta(response, 'answered')
       finish(response)
     })
@@ -163,7 +168,10 @@ async function supportsWeb() {
   return /web/.test(help.stdout)
 }
 
-/** A server over a fresh home whose one endpoint is `double`; `body` gets the server and the session folder. */
+/**
+ * A server over a fresh home whose one endpoint is `double`. `body` gets `live` (whose `server` a restart replaces), the
+ * session folder, and `restart(between)`, which stops the server, runs `between` and starts it again over the same home.
+ */
 async function withServer(label, double, body) {
   const home = fixtureDir(label)
   writeJson(join(home, 'heddle.json'), {
@@ -171,35 +179,60 @@ async function withServer(label, double, body) {
     endpoints: [{ name: 'double', kind: 'openai-chat', baseUrl: double.url, model: 'double', stream: true, contextWindow: WINDOW }],
   })
   const sessions = join(home, 'sessions')
-  let server
+  const start = () => startServer(['web', '--host', '127.0.0.1', '--port', '0', '--session-root', sessions], { HEDDLE_HOME: home, HEDDLE_CONFIG: join(home, 'heddle.json') })
+  const live = { server: undefined }
+  const restart = async (between) => {
+    await killServer(live.server)
+    live.server = undefined
+    await between()
+    live.server = await start()
+  }
   try {
-    server = await startServer(['web', '--host', '127.0.0.1', '--port', '0', '--session-root', sessions], { HEDDLE_HOME: home, HEDDLE_CONFIG: join(home, 'heddle.json') })
-    await body(server, sessions)
+    live.server = await start()
+    await body(live, sessions, restart)
   } finally {
-    if (server) await killServer(server)
+    if (live.server) await killServer(live.server)
     await double.close()
     removeDir(home)
   }
 }
 
-/** The first turn (the long prompt) and the empty second; the session. */
-async function emptyAnswerSession(server, double) {
-  const first = await turn(server, { prompt: FIRST })
+/** Append the done-only run a pre-#173 build wrote after `session`'s last turn, with the TypeScript store. */
+async function seedEmptyRun(sessions, session) {
+  const { SessionStore } = await import('../../src/session/store.ts')
+  const store = new SessionStore(sessions)
+  const handle = store.open(session)
+  assert.ok(handle !== null, `the seed opens the session ${session}`)
+  const request = store.read(handle).findLast((event) => event.type === 'model/request')
+  assert.ok(request !== undefined, 'the first turn left its model request')
+  const { seq: _seq, at: _at, type: _type, ...fields } = request
+  store.message(handle, { role: 'user', content: [{ type: 'text', text: 'Say nothing at all.' }] })
+  store.append(handle, { type: 'model/request', ...fields, messages: fields.messages + 2, generation: fields.generation + 2 })
+  store.append(handle, { type: 'assistant/chunk', chunk: { type: 'done', finishReason: 'stop' } })
+  store.append(handle, { type: 'assistant/completed', text: '', reasoning: '', finishReason: 'stop', rounds: 1, denials: 0 })
+  store.append(handle, { type: 'turn/completed', rounds: 1 })
+  store.release(handle)
+}
+
+/** The first turn (the long prompt), live, then the seeded empty second; the session. */
+async function emptyAnswerSession(live, sessions, restart, double) {
+  const first = await turn(live.server, { prompt: FIRST })
   assert.match(first.text, /answered/, `the first turn is answered\n${first.text.slice(-300)}`)
   const session = first.session
   assert.ok(typeof session === 'string', 'the first turn named its session')
-  const empty = await turn(server, { session, prompt: 'Say nothing at all.' })
-  assert.doesNotMatch(empty.text, /event: error/, `the empty answer is an ordinary turn\n${empty.text.slice(-400)}`)
-  assert.equal(double.state.turns.length, 2)
+  assert.equal(double.state.turns.length, 1)
+  await restart(() => seedEmptyRun(sessions, session))
+  const types = readTranscript(join(sessions, session)).map((event) => event.type)
+  assert.deepEqual(types.slice(-5), ['message', 'model/request', 'assistant/chunk', 'assistant/completed', 'turn/completed'], 'the session ends with the done-only run')
   return session
 }
 
 test('after an empty answer, /compact still compacts the session (#214)', async (context) => {
   if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
-  const double = await emptyingDouble({ empty: 2 })
-  await withServer('empty-answer-compact', double, async (server, sessions) => {
-    const session = await emptyAnswerSession(server, double)
-    const said = await compact(server, session)
+  const double = await answeringDouble()
+  await withServer('empty-answer-compact', double, async (live, sessions, restart) => {
+    const session = await emptyAnswerSession(live, sessions, restart, double)
+    const said = await compact(live.server, session)
     assert.equal(said.kind, 'success', `/compact compacts the session (${JSON.stringify(said).slice(0, 300)})`)
     assert.match(String(said.text), /^Compacted /, `in the words a compaction answers with (${JSON.stringify(said).slice(0, 300)})`)
     assert.equal(double.state.summaries.length, 1, 'with one summary call')
@@ -207,7 +240,7 @@ test('after an empty answer, /compact still compacts the session (#214)', async 
     assert.ok(types.includes('compaction/end'), `the log holds the landed compaction\n${types.join(' ')}`)
 
     /** And the session goes on: the next turn reads the summary in place of the span. */
-    const next = await turn(server, { session, prompt: 'NEXT turn' })
+    const next = await turn(live.server, { session, prompt: 'NEXT turn' })
     assert.match(next.text, /answered/, `the next turn is answered\n${next.text.slice(-300)}`)
     assert.ok(!double.state.turns.at(-1).includes('HERON-214 keep this in mind'), 'its request carries the summary, not the folded prompt')
   })
@@ -215,22 +248,22 @@ test('after an empty answer, /compact still compacts the session (#214)', async 
 
 test('after an empty answer, a turn that crosses the trigger compacts and is answered (#214)', async (context) => {
   if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
-  const double = await emptyingDouble({ empty: 2 })
-  await withServer('empty-answer-trigger', double, async (server, sessions) => {
-    const session = await emptyAnswerSession(server, double)
-    const over = await turn(server, { session, prompt: SECOND })
+  const double = await answeringDouble()
+  await withServer('empty-answer-trigger', double, async (live, sessions, restart) => {
+    const session = await emptyAnswerSession(live, sessions, restart, double)
+    const over = await turn(live.server, { session, prompt: SECOND })
     assert.ok(!over.text.includes(MEASUREMENT), `the turn over the trigger does not fail on the measurement\n${over.text.slice(-500)}`)
     assert.doesNotMatch(over.text, /event: error/, `the turn over the trigger is not an error\n${over.text.slice(-500)}`)
     assert.match(over.text, /answered/, `the turn over the trigger is answered\n${over.text.slice(-300)}`)
     assert.equal(double.state.summaries.length, 1, 'after one automatic summary')
-    assert.equal(double.state.turns.length, 3, 'and one model call for the turn')
+    assert.equal(double.state.turns.length, 2, 'and one model call for the turn')
     const events = readTranscript(join(sessions, session))
     const types = events.map((event) => event.type)
     assert.ok(types.includes('compaction/end'), `the log holds the landed compaction\n${types.join(' ')}`)
     assert.ok(!types.includes('turn/failed'), `and no failed turn\n${types.join(' ')}`)
 
     /** A second turn over the line does not fail either. */
-    const again = await turn(server, { session, prompt: SECOND })
+    const again = await turn(live.server, { session, prompt: SECOND })
     assert.ok(!again.text.includes(MEASUREMENT), `the next turn does not fail on the measurement\n${again.text.slice(-500)}`)
     assert.match(again.text, /answered/, `the next turn is answered\n${again.text.slice(-300)}`)
   })

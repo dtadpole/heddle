@@ -57,7 +57,7 @@ function harness(options: { readonly promoteOnTimeout?: boolean; readonly maxCon
   const a = sessions.start({ cwd: workspace })
   const call = (name: string, args: Record<string, unknown>, signal?: AbortSignal) =>
     tools.call(name, args, { cwd: workspace, session: a, log: () => undefined, ...(signal !== undefined ? { signal } : {}) })
-  return { jobs, sessions, a, call, events, pids }
+  return { jobs, sessions, a, call, events, pids, tools }
 }
 
 function groupAlive(pgid: number): boolean {
@@ -174,4 +174,36 @@ test('a registration the row refuses (the session at its cap) runs in the foregr
   const quick = await h.call('bash', { command: 'echo still fine' })
   assert.equal(quick.output, 'still fine\n')
   for (const job of h.jobs.list(h.a.id)) h.jobs.kill(job.id, h.a.id)
+})
+
+/**
+ * DSH's timeout text follows promotion (dsh-tool-bash lib/index.js:506-508): while the jobs row promotes, the model is
+ * told the call moves to the background on expiry; with promotion off, that it is killed.
+ */
+test('bash tells the model what its timeout does: moved to a job while promotion is on, killed when it is off', () => {
+  const timeoutText = (h: ReturnType<typeof harness>) => {
+    const bash = h.tools.describe().find((tool) => tool.name === 'bash')
+    return String((bash?.parameters as { properties?: { timeoutMs?: { description?: string } } } | undefined)?.properties?.timeoutMs?.description ?? '')
+  }
+  const promoting = timeoutText(harness())
+  assert.match(promoting, /^Timeout in milliseconds\. The executor applies its configured default \(\d+\) and cap \(\d+\); on expiry the command moves to the background as a job instead of being killed\.$/)
+  const killing = timeoutText(harness({ promoteOnTimeout: false }))
+  assert.match(killing, /^Wall time before the command is killed/)
+})
+
+/** The text is read per call: a runner attached or detached later changes it, as the run_in_background property does. */
+test('the timeout text follows a runner attached and detached after the tools were built', () => {
+  const root = join(scratch, `attach-${(counter += 1)}`)
+  mkdirSync(join(root, 'workspace'), { recursive: true })
+  const sandbox = new SandboxService(new Context(), { mode: 'danger-full-access', workspaceRoot: join(root, 'workspace'), backend: 'none' })
+  const bash = builtinTools(sandbox).find((tool) => tool.spec.name === 'bash')!
+  const text = () => String((bash.spec.parameters as { properties: { timeoutMs: { description: string } } }).properties.timeoutMs.description)
+  assert.match(text(), /^Wall time before the command is killed/)
+  const plain = attachBashBackground(sandbox, { property: { type: 'boolean', description: 'x' }, start: async () => ({ output: '' }) } as never)
+  assert.match(text(), /^Wall time before the command is killed/, 'a runner that does not promote')
+  plain()
+  const promoting = attachBashBackground(sandbox, { property: { type: 'boolean', description: 'x' }, start: async () => ({ output: '' }), runForeground: async () => ({ output: '' }) } as never)
+  assert.match(text(), /moves to the background as a job instead of being killed\.$/)
+  promoting()
+  assert.match(text(), /^Wall time before the command is killed/, 'detached, the kill text is back')
 })

@@ -278,3 +278,33 @@ test('a goal created without a cap gets the default, and the default is 100', as
   const named = goals.create(second, { objective: 'a cap named', maxGoalRounds: 7 })
   assert.equal(named.maxGoalRounds, 7, 'an explicit cap is kept')
 })
+
+/**
+ * Issue #166: a fork keeps the goal, its phase, revisions and round count, and an inherited active goal is disarmed in
+ * the branch (read from the log, so it stays so after a restart) until a person resumes it there; dsh-goal says the
+ * same of resume and fork.
+ */
+test('a forked session keeps its source’s goal, disarmed, and a resume in the branch re-arms it', async () => {
+  const { goals, sessions, handle } = await service()
+  const created = goals.create(handle, { objective: 'keep the notes tidy', maxGoalRounds: 9 })
+  assert.equal(created.activation, 'armed')
+  sessions.message(handle, { role: 'user', content: [{ type: 'text', text: 'go' }] })
+  sessions.append(handle, { type: 'assistant/completed', text: 'ok' })
+  sessions.append(handle, { type: 'turn/completed', rounds: 1 })
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 5))
+  const child = sessions.fork(handle.id)
+  assert.ok(child !== null)
+  const inherited = goals.get(child)
+  assert.equal(inherited?.id, created.id, 'the branch has the source’s goal')
+  assert.equal(inherited?.phase, 'active')
+  assert.equal(inherited?.revision, created.revision)
+  assert.equal(inherited?.maxGoalRounds, 9)
+  assert.equal(inherited?.activation, 'disarmed', 'and it spends no rounds there on its own')
+  assert.equal(foldGoal(sessions.read(child)).inheritedByFork, true)
+  /** A fresh service, as after a restart: still disarmed, since the log says the goal came with the seed. */
+  assert.equal(new GoalService(new Context(), sessions).get(child)?.activation, 'disarmed')
+  assert.equal(goals.get(handle)?.activation, 'armed', 'the source keeps running its own goal')
+  const resumed = goals.resume(child, { id: inherited!.id, revision: inherited!.revision })
+  assert.equal(resumed.activation, 'armed', 'a person’s resume in the branch re-arms it')
+  assert.equal(new GoalService(new Context(), sessions).get(child)?.activation, 'armed', 'and that survives a restart')
+})

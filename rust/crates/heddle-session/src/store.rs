@@ -12,7 +12,8 @@
 //! - **One process writes a session at a time.** The first append takes a writer lock beside the log
 //!   ([`lock_path`]: `<id>.lock`, or `session.lock` in an old-layout directory, holding the holder's pid, boot
 //!   and start — the TypeScript build's file, byte for byte, [`crate::writer_lock`]) and keeps it until
-//!   [`SessionStore::release`] or the store is dropped. Another process's append is refused with
+//!   [`SessionStore::release`], the store is dropped, or the process ends ([`release_held_writer_locks`], which
+//!   the `heddle` binary calls on every way out, #248). Another process's append is refused with
 //!   [`SessionError::AlreadyOwned`], DSH's `session "<id>" is already owned by an active write handle`; a lock
 //!   whose holder is gone is taken over, also when its pid now names another process (#202).
 //!   Taking the lock drops the fold, so the first write re-reads what a previous holder appended. Without
@@ -28,7 +29,7 @@
 //! internal lock serializes the fold and the file writes, so a seq is assigned and written atomically.
 //! The listener is called **after** the lock is released, so it may read the store.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
@@ -45,8 +46,8 @@ use crate::message::{Chunk, Message, RecordedMessage, Role};
 use crate::meta::{CreateOptions, FlagPatch, ForkAttribution, ModelSelection, SessionMeta};
 use crate::repair::interrupted_turn_closers;
 use crate::surface::{
-    SurfaceState, completed_prefix, derive_message, derive_node_message, fold_surface, fork_seed,
-    index_by_seq, is_surface_eligible,
+    IndexedEvents, SeqLookup, SurfaceState, completed_prefix, derive_message, fold_surface,
+    fork_seed, is_surface_eligible,
 };
 use crate::title::SessionTitles;
 use crate::transcript::{
@@ -140,10 +141,32 @@ pub fn lock_path(handle: &SessionHandle) -> String {
 /// The lock files this process holds, and how many stores in it hold each; the last to let go removes it.
 static HELD_BY_PROCESS: LazyLock<Mutex<HashMap<PathBuf, usize>>> = LazyLock::new(Default::default);
 
+/// Whether this process has begun to end (#248), behind the lock every log write and every lock take holds while it
+/// runs. [`release_held_writer_locks`] takes it for writing, sets it, and only then removes the lock files, so it waits
+/// for a write in progress to finish, and no write starts after it: each one finds the flag and refuses with
+/// [`SessionError::Exiting`]. The order is always this gate, then [`HELD_BY_PROCESS`].
+static WRITE_GATE: std::sync::RwLock<bool> = std::sync::RwLock::new(false);
+
+/// Run one write to a session log, or one lock take, under [`WRITE_GATE`]: refused, with nothing written, once the
+/// process is exiting. The gate is held only for the write itself; nothing called inside takes it again.
+fn gated<T>(write: impl FnOnce() -> Result<T, SessionError>) -> Result<T, SessionError> {
+    let exiting = WRITE_GATE.read().unwrap_or_else(PoisonError::into_inner);
+    if *exiting {
+        return Err(SessionError::Exiting);
+    }
+    write()
+}
+
+/// Whether this process has begun to end and writes no session log any more ([`release_held_writer_locks`]).
+pub fn exiting() -> bool {
+    *WRITE_GATE.read().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// Remove a lock file only if it still names this process, so letting go never removes another's lock.
+/// Its identity is checked as well as its pid ([`crate::writer_lock::names_this_process`]).
 fn remove_own_lock(path: &Path) {
     if let Ok(text) = std::fs::read_to_string(path)
-        && crate::writer_lock::parse_lock(&text).map(|lock| lock.pid) == Some(std::process::id())
+        && crate::writer_lock::names_this_process(&text)
     {
         let _ = std::fs::remove_file(path);
     }
@@ -163,6 +186,12 @@ fn remove_own_lock(path: &Path) {
 /// (`false`): only a fresh take is a write-open after whatever wrote the session before, which is when an
 /// unfinished turn is closed ([`crate::repair`]).
 fn acquire_writer_lock(path: &Path, id: &str) -> Result<bool, SessionError> {
+    // A process that is exiting takes no new lock: nothing would remove it (#248).
+    gated(|| acquire_writer_lock_open(path, id))
+}
+
+/// [`acquire_writer_lock`] under the gate.
+fn acquire_writer_lock_open(path: &Path, id: &str) -> Result<bool, SessionError> {
     use crate::writer_lock::{
         LockVerdict, SystemProbe, epoch_seconds, format_lock, judge_lock, own_lock, parse_lock,
         read_lock_file, stamp_lock,
@@ -245,6 +274,37 @@ fn release_writer_lock(path: &Path) {
     }
     held.remove(path);
     remove_own_lock(path);
+}
+
+/// Let go of every writer lock this process holds, whichever store took it: the process is ending (#248).
+///
+/// The process shell calls it on every way out of a run — a server stopped by SIGTERM or SIGINT, a command line that
+/// returns, a failure, a panic that unwinds out of the run — because [`SessionStore`]'s `Drop` is not one of them: a
+/// store a spawned task or a listener still holds is never dropped, and the process ends without dropping its statics.
+/// So every lock file the Rust build wrote stayed on disk naming a dead pid (the live 3097 store held 782 such), and
+/// one whose pid came round again refused the session. The TypeScript build lets go in its `exit` handler
+/// (`acquireWriterLock` in `src/session/store.ts`). A file is removed only while it still names this process, by pid
+/// and identity, so another holder's lock is never touched.
+///
+/// It first ends every write in this process: a spawned turn can outlive the server's graceful close, and a write it
+/// made after its lock file was gone could interleave with another process that took the lock. So it takes
+/// [`WRITE_GATE`] for writing, which waits for a write in progress, and sets it; from then on every append, record,
+/// seed, truncation and lock take refuses with [`SessionError::Exiting`] (`the session could not be saved: the process
+/// is exiting`) and writes nothing. The files are removed while the gate is still held. It cannot be undone: call it
+/// only when the process is ending.
+pub fn release_held_writer_locks() {
+    let mut exiting = WRITE_GATE.write().unwrap_or_else(PoisonError::into_inner);
+    *exiting = true;
+    let paths: Vec<PathBuf> = HELD_BY_PROCESS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .drain()
+        .map(|(path, _)| path)
+        .collect();
+    for path in paths {
+        remove_own_lock(&path);
+    }
+    drop(exiting);
 }
 
 /// The meter sections of one request.
@@ -360,6 +420,11 @@ struct Loaded {
     events: Arc<Vec<Arc<SessionEvent>>>,
     framed: bool,
     poisoned: Option<String>,
+    /// The log's index by seq, as positions in `events`, through `events[..indexed]` ([`SessionStore::indexed`], #159).
+    /// A log only grows by appending to `events`, and dropping the fold drops this with it, so extending it by what was
+    /// appended answers what [`crate::index_by_seq`] over the whole log answers.
+    by_seq: Arc<HashMap<u64, usize>>,
+    indexed: usize,
 }
 
 /// Append bytes to a session's log whole or not at all, the one way `append`, the turn closers and a fork's seed write
@@ -395,6 +460,8 @@ struct StoreState {
     surface_cache: HashMap<String, (usize, Arc<SurfaceState>)>,
     /// The sessions this store holds the writer lock for, and where each lock is.
     held: HashMap<String, PathBuf>,
+    /// How many times a log was indexed from its first event ([`SessionStore::indexed`]); a step should add none (#159).
+    seq_index_builds: usize,
 }
 
 impl Drop for SessionStore {
@@ -597,6 +664,10 @@ impl SessionStore {
     /// Create a session filed under its workspace folder: write `<id>.json`, create the empty log, and
     /// append `session/created` with the `cwd`.
     pub fn create(&self, options: CreateOptions) -> Result<SessionHandle, SessionError> {
+        // A process that is exiting files no new session: its first append would be refused (#248).
+        if exiting() {
+            return Err(SessionError::Exiting);
+        }
         let id = options
             .id
             .clone()
@@ -918,7 +989,7 @@ impl SessionStore {
                     bytes.extend(line.into_bytes());
                 }
             }
-            append_bytes(loaded, &handle.transcript, &bytes)?;
+            gated(|| append_bytes(loaded, &handle.transcript, &bytes))?;
             Arc::make_mut(&mut loaded.events).extend(records.iter().cloned());
             records
                 .iter()
@@ -1135,8 +1206,9 @@ impl SessionStore {
     }
 
     /// Let go of the session's writer lock, so another process may write it. Nothing has to call this:
-    /// dropping the store lets go of every lock, and a lock whose holder died is taken over by the next
-    /// writer. A later append takes the lock again.
+    /// dropping the store lets go of every lock, the process lets go of every lock it holds when it ends
+    /// ([`release_held_writer_locks`], #248), and a lock whose holder died is taken over by the next writer. A
+    /// later append takes the lock again.
     pub fn release(&self, handle: &SessionHandle) {
         let path = self
             .state
@@ -1237,7 +1309,7 @@ impl SessionStore {
                 bytes.extend(line.into_bytes());
             }
         }
-        append_bytes(loaded, &handle.transcript, &bytes)?;
+        gated(|| append_bytes(loaded, &handle.transcript, &bytes))?;
         Arc::make_mut(&mut loaded.events).extend(records.into_iter().map(Arc::new));
         Ok(())
     }
@@ -1295,7 +1367,7 @@ impl SessionStore {
             .loaded
             .get_mut(&handle.id)
             .expect("the log is loaded before an append");
-        append_bytes(loaded, &handle.transcript, &bytes)?;
+        gated(|| append_bytes(loaded, &handle.transcript, &bytes))?;
         Arc::make_mut(&mut loaded.events).push(record.clone());
         Ok(record)
     }
@@ -1354,7 +1426,12 @@ impl SessionStore {
                         for frame in &recovery.kept {
                             whole.extend_from_slice(&bytes[frame.start..frame.end]);
                         }
-                        if crate::append::replace_whole(&handle.transcript, &whole).is_ok() {
+                        // A process that began to end meanwhile replaces nothing and records nothing (#248).
+                        let replaced = gated(|| {
+                            crate::append::replace_whole(&handle.transcript, &whole)
+                                .map_err(|error| SessionError::io(&handle.transcript, error))
+                        });
+                        if replaced.is_ok() {
                             dropped = recovery
                                 .dropped
                                 .iter()
@@ -1372,16 +1449,26 @@ impl SessionStore {
                         }
                     } else {
                         dropped = bytes.len().saturating_sub(decoded.readable_bytes);
-                        if dropped > 0
-                            && let Ok(file) = std::fs::OpenOptions::new()
-                                .write(true)
-                                .open(&handle.transcript)
-                        {
-                            let _ = file.set_len(decoded.readable_bytes as u64);
+                        if dropped > 0 {
+                            let cut = gated(|| {
+                                if let Ok(file) = std::fs::OpenOptions::new()
+                                    .write(true)
+                                    .open(&handle.transcript)
+                                {
+                                    let _ = file.set_len(decoded.readable_bytes as u64);
+                                }
+                                Ok(())
+                            });
+                            // A process that began to end meanwhile cuts nothing and records nothing; it reads the
+                            // whole frames, as a reader without the lock does.
+                            if cut.is_err() {
+                                dropped = 0;
+                            }
                         }
                     }
                 }
-                Err(SessionError::AlreadyOwned { .. }) => {}
+                // Another holder's, or a process that is exiting: read the whole frames and leave the file alone.
+                Err(SessionError::AlreadyOwned { .. } | SessionError::Exiting) => {}
                 Err(error) => return Err(error),
             }
         }
@@ -1411,6 +1498,8 @@ impl SessionStore {
                 events: Arc::new(events),
                 framed,
                 poisoned: None,
+                by_seq: Arc::default(),
+                indexed: 0,
             },
         );
         if dropped > 0 {
@@ -1480,18 +1569,14 @@ impl SessionStore {
             });
         }
         let shadowed_seqs = surface.nodes[start_idx..=end_idx].to_vec();
-        let events = state
-            .loaded
-            .get(&handle.id)
-            .expect("the surface was folded")
-            .events
-            .clone();
+        // One index for every node the span shadows (#159): a compaction's span is most of the surface.
+        let by_seq = self.indexed_locked(state, handle)?;
         let replacement = event
             .get("message")
             .and_then(|value| serde_json::from_value::<Message>(value.clone()).ok());
 
         let head = shadowed_seqs.first().copied();
-        let head_message = head.and_then(|seq| derive_node_message(events.as_slice(), seq));
+        let head_message = head.and_then(|seq| derive_message(&by_seq, seq));
         if start_idx == 0 && head_message.as_ref().map(|message| message.role) == Some(Role::System)
         {
             let head_rewritten = replacement
@@ -1505,7 +1590,7 @@ impl SessionStore {
             }
         }
         for seq in &shadowed_seqs {
-            let original = derive_node_message(events.as_slice(), *seq);
+            let original = derive_message(&by_seq, *seq);
             if original.as_ref().map(|message| message.role) != Some(Role::Tool) {
                 continue;
             }
@@ -1601,22 +1686,98 @@ impl SessionStore {
         Ok(folded)
     }
 
+    /// The log with its index by seq: what [`crate::index_by_seq`] over [`SessionStore::read`] answers, without indexing
+    /// the whole log on every call (#159).
+    ///
+    /// The index is kept beside the fold and extended by the events appended since the last call, so a caller that
+    /// derives node after node pays for it once per load rather than once per node. The snapshot is the caller's: an
+    /// append after it is not in it, as with [`SessionStore::read`].
+    pub fn indexed(&self, handle: &SessionHandle) -> Result<IndexedEvents, SessionError> {
+        let mut state = self.state.lock().expect("the store lock is never poisoned");
+        self.indexed_locked(&mut state, handle)
+    }
+
+    fn indexed_locked(
+        &self,
+        state: &mut StoreState,
+        handle: &SessionHandle,
+    ) -> Result<IndexedEvents, SessionError> {
+        self.load_locked(state, handle)?;
+        let loaded = state
+            .loaded
+            .get_mut(&handle.id)
+            .expect("the log was just loaded");
+        if loaded.indexed < loaded.events.len() {
+            if loaded.indexed == 0 {
+                state.seq_index_builds += 1;
+            }
+            // A snapshot still out shares the map, and `make_mut` copies it then; a step's snapshots are gone by its
+            // next call, so the map is extended in place. Later events win a seq, as in `index_by_seq`.
+            let positions = Arc::make_mut(&mut loaded.by_seq);
+            for (at, event) in loaded.events.iter().enumerate().skip(loaded.indexed) {
+                positions.insert(event.seq, at);
+            }
+            loaded.indexed = loaded.events.len();
+        }
+        Ok(IndexedEvents::kept(
+            loaded.events.clone(),
+            loaded.by_seq.clone(),
+        ))
+    }
+
+    /// How many times this store has indexed a log from its first event ([`SessionStore::indexed`]); a step should add
+    /// none (#159).
+    pub fn seq_index_builds(&self) -> usize {
+        self.state
+            .lock()
+            .expect("the store lock is never poisoned")
+            .seq_index_builds
+    }
+
     /// One node's derived message, or `None` when the node produces none.
     pub fn derive_node(
         &self,
         handle: &SessionHandle,
         seq: u64,
     ) -> Result<Option<Message>, SessionError> {
-        let events = self.read(handle)?;
-        Ok(derive_node_message(events.as_slice(), seq))
+        let by_seq = self.indexed(handle)?;
+        Ok(derive_message(&by_seq, seq))
+    }
+
+    /// The surface positions that hold a user message: what "new input" means to a running turn (the steering check,
+    /// heddle-agent `user_input_seqs`), and the positions whose [`SessionStore::derive_node`] is a user's.
+    ///
+    /// Read from each position's own event (#159): a user message is a `message` or `context/note` event, while a chunk
+    /// run derives to an assistant message or to nothing, so no run is assembled to answer it, and the index is the one
+    /// [`SessionStore::indexed`] keeps. The check used to derive every node, indexing the whole log for each.
+    pub fn user_input_seqs(&self, handle: &SessionHandle) -> Result<BTreeSet<u64>, SessionError> {
+        let (surface, by_seq) = {
+            let mut state = self.state.lock().expect("the store lock is never poisoned");
+            let surface = self.surface_locked(&mut state, handle)?;
+            (surface, self.indexed_locked(&mut state, handle)?)
+        };
+        Ok(surface
+            .nodes
+            .iter()
+            .copied()
+            .filter(|seq| {
+                by_seq
+                    .event(*seq)
+                    .is_some_and(|event| event.kind == "message" || event.kind == "context/note")
+                    && derive_message(&by_seq, *seq).map(|message| message.role) == Some(Role::User)
+            })
+            .collect())
     }
 
     /// The messages a request carries: every surface node, derived, in surface order.
     pub fn derive_messages(&self, handle: &SessionHandle) -> Result<Vec<Message>, SessionError> {
-        let events = self.read(handle)?;
-        let by_seq = index_by_seq(events.as_slice());
+        let (surface, by_seq) = {
+            let mut state = self.state.lock().expect("the store lock is never poisoned");
+            let surface = self.surface_locked(&mut state, handle)?;
+            (surface, self.indexed_locked(&mut state, handle)?)
+        };
         let mut messages = Vec::new();
-        for seq in self.surface(handle)?.nodes.iter().copied() {
+        for seq in surface.nodes.iter().copied() {
             if let Some(message) = derive_message(&by_seq, seq) {
                 messages.push(message);
             }
@@ -3658,11 +3819,6 @@ mod tests {
         put(
             &store,
             &source,
-            json!({"type": "goal/change", "version": 1, "operation": "create"}),
-        );
-        put(
-            &store,
-            &source,
             json!({"type": "team/member", "version": 1, "teamId": source.id}),
         );
         put(
@@ -3686,9 +3842,9 @@ mod tests {
             "the seqs run on without a hole"
         );
         assert!(
-            !child.iter().any(|event| event.kind == "goal/change"
-                || event.kind.starts_with("team/")
-                || event.kind == "transcript/repaired"),
+            !child
+                .iter()
+                .any(|event| event.kind.starts_with("team/") || event.kind == "transcript/repaired"),
             "none of the source's own records came along"
         );
         let by_seq: HashMap<u64, &Arc<SessionEvent>> =
@@ -3718,6 +3874,302 @@ mod tests {
         assert_eq!(
             store.messages(&fork).unwrap(),
             store.messages(&source).unwrap()
+        );
+    }
+
+    /// A session of `turns` short turns, written as frames in one append the way a long session's log holds them
+    /// (#159): a prompt, a request, `deltas` text deltas and a `done`, and the turn's two closers.
+    fn long_session(root: &str, turns: usize, deltas: usize) -> SessionHandle {
+        let writer = SessionStore::new(root, &Env::default());
+        let handle = writer
+            .create(CreateOptions {
+                cwd: Some("/home/me/work".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        let mut seq = writer.count(&handle).unwrap();
+        writer.release(&handle);
+        let mut bytes = Vec::new();
+        let mut put = |kind: &str, fields: Value| {
+            let event = SessionEvent {
+                seq,
+                at: "2026-11-01T00:00:00.000Z".to_string(),
+                kind: kind.to_string(),
+                fields: fields.as_object().cloned().unwrap(),
+            };
+            bytes.extend(encode_frame(&format!("{}\n", event.to_line())));
+            seq += 1;
+        };
+        for turn in 0..turns {
+            put(
+                "message",
+                json!({ "message": { "role": "user", "content": [{ "type": "text", "text": format!("question {turn}") }] } }),
+            );
+            put(
+                "model/request",
+                json!({ "endpoint": "scripted", "messages": turn * 2 + 1, "tools": [] }),
+            );
+            for index in 0..deltas {
+                put(
+                    "assistant/chunk",
+                    json!({ "chunk": { "type": "text-delta", "text": format!(" word{index}") } }),
+                );
+            }
+            put(
+                "assistant/chunk",
+                json!({ "chunk": { "type": "done", "finishReason": "stop" } }),
+            );
+            put(
+                "assistant/completed",
+                json!({ "text": "answer", "finishReason": "stop", "rounds": 1 }),
+            );
+            put("turn/completed", json!({ "rounds": 1 }));
+        }
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&handle.transcript)
+            .unwrap()
+            .write_all(&bytes)
+            .unwrap();
+        handle
+    }
+
+    /// The steering check's positions, asked node by node as the agent loop used to ask them.
+    fn users_node_by_node(store: &SessionStore, handle: &SessionHandle) -> BTreeSet<u64> {
+        store
+            .surface(handle)
+            .unwrap()
+            .nodes
+            .iter()
+            .copied()
+            .filter(|seq| {
+                store
+                    .derive_node(handle, *seq)
+                    .unwrap()
+                    .map(|message| message.role)
+                    == Some(Role::User)
+            })
+            .collect()
+    }
+
+    /// Issue #159: each step of a long session asked the steering check, which derived every surface node, and each
+    /// derivation indexed the whole log again: (surface nodes) × (log events), up to three times a step. The store now
+    /// keeps one index per loaded log and extends it as the log grows, so the check, every node's derivation and the
+    /// appends between them index the log once, and the check costs the same at 300 turns as at three.
+    #[test]
+    fn a_long_session_is_indexed_once_and_its_steering_check_does_not_grow_with_it() {
+        let (dir, _) = store();
+        let root = dir.path().to_str().unwrap().to_string();
+        let seeded = long_session(&root, 300, 166);
+        let store = SessionStore::new(&root, &Env::default());
+        let handle = store.open(&seeded.id).expect("the session is on disk");
+        // Writing takes the lock and reads the log again, once: everything after this is one step's work.
+        store.claim(&handle).unwrap();
+        let events = store.count(&handle).unwrap();
+        assert!(events > 50_000, "a 300-turn log: {events} events");
+
+        let started = std::time::Instant::now();
+        let users = store.user_input_seqs(&handle).unwrap();
+        let first = started.elapsed();
+        assert_eq!(users.len(), 300, "every prompt is a user position");
+        assert_eq!(store.seq_index_builds(), 1, "the log was indexed once");
+
+        // Asked again, as each step asks it two or three times: it reads the kept index.
+        let started = std::time::Instant::now();
+        for _ in 0..3 {
+            assert_eq!(store.user_input_seqs(&handle).unwrap(), users);
+        }
+        let again = started.elapsed() / 3;
+        assert!(
+            again < std::time::Duration::from_millis(50),
+            "the check at 300 turns took {again:?} (the first call, which indexed the log, {first:?})"
+        );
+
+        // Node by node, the old way of asking, answers the same and builds nothing more.
+        assert_eq!(users_node_by_node(&store, &handle), users);
+        assert_eq!(
+            store.seq_index_builds(),
+            1,
+            "a node's derivation reads the kept index"
+        );
+
+        // A step's appends extend the index; a steered message is seen at once.
+        store
+            .model_request(
+                &handle,
+                &ModelRequestRecord {
+                    endpoint: "scripted".to_string(),
+                    messages: 601,
+                    ..ModelRequestRecord::default()
+                },
+            )
+            .unwrap();
+        let steered = store.message(&handle, user("and one more thing")).unwrap();
+        let after = store.user_input_seqs(&handle).unwrap();
+        assert!(
+            after.contains(&steered.seq),
+            "the steered prompt is new input"
+        );
+        assert_eq!(after.len(), 301);
+        assert_eq!(users_node_by_node(&store, &handle), after);
+        assert_eq!(
+            store.seq_index_builds(),
+            1,
+            "appending extended the index rather than rebuilding it"
+        );
+    }
+
+    /// The kept index answers what a fresh `index_by_seq` answers, for every node kind, and the user positions are
+    /// exactly those whose derived message is a user's: a system note and a summary note, a tool result, an answer, a
+    /// run its turn closed as failed, and a message with no content.
+    #[test]
+    fn the_kept_index_and_the_user_positions_answer_what_a_fresh_derivation_answers() {
+        let (_dir, store) = store();
+        let handle = store
+            .create(CreateOptions {
+                cwd: Some("/home/me/work".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        let note = |role: &str, text: &str| {
+            NewEvent::new("context/note").field(
+                "message",
+                json!({ "role": role, "content": [{ "type": "text", "text": text }] }),
+            )
+        };
+        let chunk = |value: Value| NewEvent::new("assistant/chunk").field("chunk", value);
+        let append = |event: NewEvent| {
+            store
+                .append(&handle, event, AppendOptions::default())
+                .unwrap()
+        };
+        append(note("system", "the system prompt"));
+        store.message(&handle, user("first question")).unwrap();
+        append(chunk(
+            json!({ "type": "text-delta", "text": "let me look" }),
+        ));
+        append(chunk(
+            json!({ "type": "tool-call", "id": "c1", "name": "bash", "arguments": "{}" }),
+        ));
+        append(chunk(
+            json!({ "type": "done", "finishReason": "tool_calls" }),
+        ));
+        store
+            .message(
+                &handle,
+                Message {
+                    role: Role::Tool,
+                    tool_call_id: Some("c1".to_string()),
+                    content: vec![crate::message::ContentPart::Text {
+                        text: "ok".to_string(),
+                    }],
+                    source: None,
+                },
+            )
+            .unwrap();
+        append(chunk(
+            json!({ "type": "text-delta", "text": "half an answ" }),
+        ));
+        append(
+            NewEvent::new("assistant/completed")
+                .field("text", "")
+                .field("finishReason", "error"),
+        );
+        append(NewEvent::new("turn/completed"));
+        append(note("user", "a summary of the earlier turns"));
+        append(NewEvent::new("message").field("message", json!({ "role": "user", "content": [] })));
+        store.message(&handle, user("second question")).unwrap();
+        append(chunk(json!({ "type": "text-delta", "text": "the answer" })));
+        append(chunk(json!({ "type": "done", "finishReason": "stop" })));
+
+        let events = store.read(&handle).unwrap();
+        let fresh = crate::surface::index_by_seq(events.as_slice());
+        let kept = store.indexed(&handle).unwrap();
+        for event in events.iter() {
+            assert_eq!(
+                kept.event(event.seq).map(|found| found.to_line()),
+                fresh.event(event.seq).map(|found| found.to_line())
+            );
+            assert_eq!(
+                derive_message(&kept, event.seq),
+                derive_message(&fresh, event.seq)
+            );
+        }
+        assert!(kept.event(events.len() as u64).is_none());
+        let users = store.user_input_seqs(&handle).unwrap();
+        assert_eq!(users, users_node_by_node(&store, &handle));
+        let texts: Vec<String> = users
+            .iter()
+            .map(|seq| derive_message(&kept, *seq).unwrap().content[0].clone())
+            .map(|part| match part {
+                crate::message::ContentPart::Text { text } => text,
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                "first question",
+                "a summary of the earlier turns",
+                "second question"
+            ],
+            "the user positions: two prompts and the summary note, not the empty message"
+        );
+    }
+
+    /// A log that holds a seq twice (no writer here writes one) is read as `index_by_seq` reads it: the later event
+    /// wins the seq.
+    #[test]
+    fn the_kept_index_lets_the_later_of_two_events_with_one_seq_win_as_a_fresh_index_does() {
+        let (dir, _) = store();
+        let root = dir.path().to_str().unwrap().to_string();
+        let writer = SessionStore::new(&root, &Env::default());
+        let handle = writer
+            .create(CreateOptions {
+                cwd: Some("/home/me/work".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        writer.release(&handle);
+        let mut bytes = Vec::new();
+        for (seq, text) in [
+            (1, "the first one"),
+            (1, "the later one"),
+            (2, "the next one"),
+        ] {
+            let event = SessionEvent {
+                seq,
+                at: "2026-11-01T00:00:00.000Z".to_string(),
+                kind: "message".to_string(),
+                fields: json!({ "message": { "role": "user", "content": [{ "type": "text", "text": text }] } })
+                    .as_object()
+                    .cloned()
+                    .unwrap(),
+            };
+            bytes.extend(encode_frame(&format!("{}\n", event.to_line())));
+        }
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&handle.transcript)
+            .unwrap()
+            .write_all(&bytes)
+            .unwrap();
+        let store = SessionStore::new(&root, &Env::default());
+        let handle = store.open(&handle.id).unwrap();
+        let events = store.read(&handle).unwrap();
+        let fresh = crate::surface::index_by_seq(events.as_slice());
+        let kept = store.indexed(&handle).unwrap();
+        assert_eq!(
+            kept.event(1).map(|event| event.to_line()),
+            fresh.event(1).map(|event| event.to_line())
+        );
+        assert_eq!(
+            store.derive_node(&handle, 1).unwrap(),
+            crate::surface::derive_node_message(events.as_slice(), 1)
+        );
+        assert_eq!(
+            store.user_input_seqs(&handle).unwrap(),
+            users_node_by_node(&store, &handle)
         );
     }
 }

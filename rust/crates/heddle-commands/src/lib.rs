@@ -59,8 +59,8 @@ pub use registry::{
 };
 pub use routes::{MAX_COMMAND_LINE, MENU_PATH, MENU_SOURCE};
 pub use service::{
-    CommandServices, Commands, NO_CONTEXT_SERVICE, NO_GOAL_SERVICE, NO_SUMMARY_ENDPOINT, TurnHold,
-    TurnRunning, anonymous_user,
+    CommandServices, Commands, NO_CONTEXT_SERVICE, NO_GOAL_SERVICE, NO_SUMMARY_ENDPOINT, ToolSpecs,
+    TurnHold, TurnRunning, anonymous_user,
 };
 
 /// Every `(method, path)` [`router`] mounts, in axum 0.8 path syntax. The session segment is named `{id}`, as
@@ -106,6 +106,7 @@ mod tests {
         let commands = Commands::new(CommandServices {
             turn_running: None,
             turn_hold: None,
+            tool_specs: None,
             sessions: Arc::new(SessionService::from_store(fixture.store.clone())),
             goals: None,
             context: None,
