@@ -258,6 +258,16 @@ pub fn index_by_seq<E: Borrow<SessionEvent>>(events: &[E]) -> HashMap<u64, &Sess
 /// (live-testing draft developer-five-2). The log still holds one event per chunk; only the derivation
 /// coalesces, exactly as `deriveMessage` in `src/session/store.ts` does.
 ///
+/// **A run its turn closed as failed derives to `None`** (#173). A stream that broke mid-answer leaves a run
+/// with no `done`, and the turn that failed closes it with an `assistant/completed` whose `finishReason` is
+/// `"error"` (heddle-agent `turn.rs`). Derived as it stood, that fragment reached the next request as the
+/// model's own earlier answer, cut mid-word, and a fork or a summary carried it on. DSH settles a failed
+/// stream as `assistant/attempt`, which takes no place on the surface, and only a stream a Stop cut with
+/// content as an `assistant/message` marked `interrupted` (dsh-agent-loop), so a stopped turn (`"aborted"`)
+/// keeps what streamed here too. Only the model's view changes: the log keeps the chunks and the page's
+/// transcript draws the fragment with its failure line. The same rule as `deriveMessage` in the TypeScript
+/// build.
+///
 /// A `message` field that does not parse as a [`Message`] derives to `None` (the TypeScript build passed
 /// such an object through unchecked; no writer produces one).
 pub fn derive_message(by_seq: &HashMap<u64, &SessionEvent>, seq: u64) -> Option<Message> {
@@ -280,6 +290,12 @@ pub fn derive_message(by_seq: &HashMap<u64, &SessionEvent>, seq: u64) -> Option<
             // streamed is not part of its step (#30): the step runs to its `done`, a new request or the turn's end.
             if ends_step(&next.kind) {
                 break;
+            }
+            // A run with no `done` whose turn closed as failed: a broken stream's fragment.
+            if next.kind == "assistant/completed"
+                && next.get("finishReason").and_then(Value::as_str) == Some("error")
+            {
+                return None;
             }
             index += 1;
             continue;
@@ -983,5 +999,73 @@ mod tests {
         assert!(inherits_answer(&events).unwrap());
         // The dangling prompt at seq 3 is cut, so a fork continues from the finished turn.
         assert_eq!(completed_prefix(&events).len(), 3);
+    }
+
+    /// #173: a run its turn closed as failed derives to nothing, so the next request, a fork and a summary
+    /// leave its fragment out; a run a Stop cut keeps what streamed. `deriveMessage` in the TypeScript build
+    /// is held to the same rule (`test/session-failed-fragment.test.ts`, `tests/typescript_projection.rs`).
+    #[test]
+    fn a_run_its_turn_closed_as_failed_derives_to_nothing_and_a_stopped_one_keeps_what_streamed() {
+        let closed = |how: &str| -> Vec<SessionEvent> {
+            vec![
+                message(0, "user"),
+                event(1, "model/request", &[]),
+                chunk(2, json!({"type": "reasoning-delta", "text": "thinking"})),
+                chunk(
+                    3,
+                    json!({"type": "text-delta", "text": "PARTIAL-99 alpha "}),
+                ),
+                event(
+                    4,
+                    "assistant/completed",
+                    &[
+                        ("text", json!("PARTIAL-99 alpha ")),
+                        ("finishReason", json!(how)),
+                    ],
+                ),
+                event(5, "turn/completed", &[]),
+                message(6, "user"),
+            ]
+        };
+        let failed = closed("error");
+        let surface = fold_surface(&failed).unwrap();
+        assert_eq!(
+            surface.nodes,
+            vec![0, 2, 6],
+            "the run keeps its place on the surface"
+        );
+        let by_seq = index_by_seq(&failed);
+        assert_eq!(
+            derive_message(&by_seq, 2),
+            None,
+            "but derives to nothing, its reasoning included"
+        );
+
+        let stopped = closed("aborted");
+        let by_seq = index_by_seq(&stopped);
+        let kept = derive_message(&by_seq, 2).expect("a stopped run derives");
+        assert_eq!(
+            kept.content,
+            vec![
+                ContentPart::Reasoning {
+                    text: "thinking".to_string()
+                },
+                ContentPart::Text {
+                    text: "PARTIAL-99 alpha ".to_string()
+                },
+            ]
+        );
+
+        // A run that reached its `done` is whole, whatever the turn did after it: the record is not read.
+        let mut finished = closed("error");
+        finished.insert(
+            4,
+            chunk(4, json!({"type": "done", "finishReason": "tool_calls"})),
+        );
+        for (index, event) in finished.iter_mut().enumerate() {
+            event.seq = index as u64;
+        }
+        let by_seq = index_by_seq(&finished);
+        assert!(derive_message(&by_seq, 2).is_some());
     }
 }

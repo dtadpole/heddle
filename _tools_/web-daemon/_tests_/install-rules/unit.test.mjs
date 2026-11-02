@@ -159,7 +159,7 @@ test('macOS renders the supervisor in front of the server, and asks not to only 
   assert.equal(status, 0, stderr)
   const args = [...stdout.split('<key>ProgramArguments</key>')[1].split('</array>')[0].matchAll(/<string>([^<]*)<\/string>/g)].map((m) => m[1])
   const supervisor = join(f.repo, '_tools_', 'web-daemon', 'supervisor.mjs')
-  assert.deepEqual(args, [process.execPath, supervisor, '--health-url', 'http://127.0.0.1:3082/healthz', '--health-every', '5', '--reclaim-port', '3082', '--lock', `${f.home}/.heddle/web-supervisor.3082.lock`, '--', process.execPath, `${f.repo}/dist/cli.js`, 'web', '--host', '127.0.0.1', '--port', '3082', '--config', `${f.repo}/cordis.yml`], 'launchd runs the supervisor, which watches, reclaims and runs the server')
+  assert.deepEqual(args, [process.execPath, supervisor, '--health-url', 'http://127.0.0.1:3082/healthz', '--health-every', '5', '--reclaim-port', '3082', '--lock', `${f.home}/.heddle/web-supervisor.3082.lock`, '--capture-dir', `${f.home}/.heddle/hang-captures`, '--', process.execPath, `${f.repo}/dist/cli.js`, 'web', '--host', '127.0.0.1', '--port', '3082', '--config', `${f.repo}/cordis.yml`], 'launchd runs the supervisor, which watches, reclaims and runs the server')
   assert.match(stdout, /<key>AbandonProcessGroup<\/key>\s*<true\/>/, 'the server outlives a killed supervisor')
 
   const bare = install(f, ['--print'], { HEDDLE_WEB_PLATFORM: 'darwin', HEDDLE_WEB_SUPERVISOR: '0' })
@@ -179,7 +179,7 @@ test('the Rust branch of part 11 is the same service with the binary in front of
   assert.equal(status, 0, stderr)
   const args = [...stdout.split('<key>ProgramArguments</key>')[1].split('</array>')[0].matchAll(/<string>([^<]*)<\/string>/g)].map((m) => m[1])
   const supervisor = join(f.repo, '_tools_', 'web-daemon', 'supervisor.mjs')
-  assert.deepEqual(args, [process.execPath, supervisor, '--health-url', 'http://127.0.0.1:3082/healthz', '--health-every', '5', '--reclaim-port', '3082', '--lock', `${f.home}/.heddle/web-supervisor.3082.lock`, '--', f.heddleBin, 'web', '--host', '127.0.0.1', '--port', '3082', '--config', `${f.repo}/cordis.yml`], 'the binary is the server the supervisor holds')
+  assert.deepEqual(args, [process.execPath, supervisor, '--health-url', 'http://127.0.0.1:3082/healthz', '--health-every', '5', '--reclaim-port', '3082', '--lock', `${f.home}/.heddle/web-supervisor.3082.lock`, '--capture-dir', `${f.home}/.heddle/hang-captures`, '--', f.heddleBin, 'web', '--host', '127.0.0.1', '--port', '3082', '--config', `${f.repo}/cordis.yml`], 'the binary is the server the supervisor holds')
   assert.doesNotMatch(stdout, /dist\/cli\.js/, 'nothing node-runs-a-CLI remains in the definition')
 
   const described = describeCommand(args, f.repo)

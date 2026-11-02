@@ -84,7 +84,7 @@ export class PlanService extends Service {
       exitPlanModeTool({
         active: (handle) => this.active(handle),
         leave: (handle) => {
-          setPlanMode(this.log, handle, false)
+          setPlanMode(this.log, handle, false, { narrate: false })
         },
         channel: () => reviewChannel(ctx),
       }),
@@ -108,12 +108,12 @@ function reviewChannel(ctx: Context): PlanReviewChannel | undefined {
   return questions !== undefined && typeof questions.ask === 'function' ? questionsReviewChannel(questions) : undefined
 }
 
-/** The part of the question service the review uses: `ask(handle, questions, {timeout, signal})`. */
+/** The part of the question service the review uses: `ask(handle, questions, {timeout, signal, continuable})`. */
 export interface QuestionAsker {
   ask(
     handle: SessionHandle,
     questions: unknown,
-    options: { readonly timeout?: unknown; readonly signal?: AbortSignal },
+    options: { readonly timeout?: unknown; readonly signal?: AbortSignal; readonly continuable?: boolean },
   ): Promise<
     | { readonly kind: 'answered'; readonly answers: readonly { readonly id: string; readonly selected: readonly string[]; readonly custom?: string }[] }
     | { readonly kind: 'pending'; readonly callId: string }
@@ -127,6 +127,11 @@ export interface QuestionAsker {
  * dismissal (plan mode stays on). The wait never runs out (`timeout: -1`), so a `pending` answer cannot happen; if it
  * did, it is read as a dismissal — the safe outcome, because it leaves plan mode on. A stop rejects, and the rejection
  * reaches the turn as the stop it is.
+ *
+ * The review is asked `continuable: false` (#228): only the turn that asked it can take the answer. A review left open by
+ * a crash reads as cancelled after the restart, and an Approve is refused, so no approval reaches the model as a late
+ * message while plan mode stays on. That is DSH's "after a service reload while the review is pending, the call fails
+ * closed"; `/plan off` remains the manual escape, and the model may present the plan again.
  */
 export function questionsReviewChannel(questions: QuestionAsker): PlanReviewChannel {
   return {
@@ -144,7 +149,7 @@ export function questionsReviewChannel(questions: QuestionAsker): PlanReviewChan
             ],
           },
         ],
-        { timeout: -1, ...(signal !== undefined ? { signal } : {}) },
+        { timeout: -1, continuable: false, ...(signal !== undefined ? { signal } : {}) },
       )
       if (outcome.kind !== 'answered') return { kind: 'dismissed' }
       const answer = outcome.answers.find((entry) => entry.id === PLAN_REVIEW.id) ?? outcome.answers[0]
