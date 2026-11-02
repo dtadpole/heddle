@@ -360,9 +360,24 @@ pub fn derive_message<L: SeqLookup + ?Sized>(by_seq: &L, seq: u64) -> Option<Mes
             index += 1;
             continue;
         }
-        let chunk = next
-            .get("chunk")
-            .and_then(|value| serde_json::from_value::<Chunk>(value.clone()).ok());
+        let value = next.get("chunk");
+        // A text or reasoning delta is read in place (#159): deltas are most of a long log, and cloning each into a
+        // `Chunk` was most of the time a step spent deriving its request. Every other chunk deserializes below.
+        if let Some((reasoning, text)) = value.and_then(stream_delta) {
+            match (reasoning, content.last_mut()) {
+                (false, Some(ContentPart::Text { text: last })) => last.push_str(text),
+                (false, _) => content.push(ContentPart::Text {
+                    text: text.to_owned(),
+                }),
+                (true, Some(ContentPart::Reasoning { text: last })) => last.push_str(text),
+                (true, _) => content.push(ContentPart::Reasoning {
+                    text: text.to_owned(),
+                }),
+            }
+            index += 1;
+            continue;
+        }
+        let chunk = value.and_then(|value| serde_json::from_value::<Chunk>(value.clone()).ok());
         match chunk {
             Some(Chunk::TextDelta { text }) => match content.last_mut() {
                 Some(ContentPart::Text { text: last }) => last.push_str(&text),
@@ -391,6 +406,19 @@ pub fn derive_message<L: SeqLookup + ?Sized>(by_seq: &L, seq: u64) -> Option<Mes
             source: None,
         })
     }
+}
+
+/// A streamed delta read in place: whether it is reasoning, and its text. It answers exactly where deserializing the
+/// chunk answers [`Chunk::TextDelta`] or [`Chunk::ReasoningDelta`]: an object tagged `text-delta` or `reasoning-delta`
+/// with a string `text` (the enum ignores other fields), and `None` for every other chunk, which deserializes as before.
+fn stream_delta(value: &Value) -> Option<(bool, &str)> {
+    let object = value.as_object()?;
+    let reasoning = match object.get("type")?.as_str()? {
+        "text-delta" => false,
+        "reasoning-delta" => true,
+        _ => return None,
+    };
+    Some((reasoning, object.get("text")?.as_str()?))
 }
 
 /// The message one node derives to, indexing the log first.
@@ -1127,5 +1155,39 @@ mod tests {
         }
         let by_seq = index_by_seq(&finished);
         assert!(derive_message(&by_seq, 2).is_some());
+    }
+
+    /// The in place read of a delta (#159) answers what deserializing the chunk answers, for every shape: a delta with
+    /// fields the enum ignores, a text that is not a string, a missing text, other chunk types, and no object at all.
+    #[test]
+    fn a_delta_read_in_place_is_what_deserializing_the_chunk_reads() {
+        for value in [
+            json!({ "type": "text-delta", "text": "a" }),
+            json!({ "type": "reasoning-delta", "text": "b" }),
+            json!({ "type": "text-delta", "text": "c", "extra": 1 }),
+            json!({ "type": "text-delta", "text": "\u{e9}\n\"quoted\"" }),
+            json!({ "type": "text-delta", "text": "" }),
+            json!({ "type": "text-delta", "text": 7 }),
+            json!({ "type": "reasoning-delta", "text": null }),
+            json!({ "type": "text-delta" }),
+            json!({ "type": "done", "finishReason": "stop" }),
+            json!({ "type": "tool-call", "id": "x", "name": "bash", "arguments": "{}" }),
+            json!({ "type": "tool-call-delta", "index": 0, "argumentsDelta": "{" }),
+            json!({ "type": "Text-Delta", "text": "case" }),
+            json!({ "text": "no tag" }),
+            json!("text-delta"),
+            json!(null),
+        ] {
+            let expected = match serde_json::from_value::<Chunk>(value.clone()).ok() {
+                Some(Chunk::TextDelta { text }) => Some((false, text)),
+                Some(Chunk::ReasoningDelta { text }) => Some((true, text)),
+                _ => None,
+            };
+            assert_eq!(
+                stream_delta(&value).map(|(reasoning, text)| (reasoning, text.to_owned())),
+                expected,
+                "{value}"
+            );
+        }
     }
 }
