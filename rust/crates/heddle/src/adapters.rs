@@ -1686,12 +1686,24 @@ impl heddle_goal::RoundRunner for GoalRounds {
         })
     }
 
-    /// A person's prompt queued in the session's next-turn inbox goes before the next round (#162, #177).
+    /// A queued next-turn prompt goes before the next round (#162, #177).
+    ///
+    /// An inbox that cannot be read (an invalid persisted splice) **yields**: no round starts over input that may be
+    /// waiting, as the TypeScript build's `pendingInbox` throws there and the pass starts no round (developer-two's
+    /// review). A session that does not open has nothing queued; its round fails on its own.
     fn competing(&self, session: &str) -> bool {
-        self.sessions.open(session).is_some_and(|handle| {
-            heddle_session::inbox::pending_inbox(self.sessions.store(), &handle)
-                .is_ok_and(|inbox| !inbox.next_turn.is_empty())
-        })
+        let Some(handle) = self.sessions.open(session) else {
+            return false;
+        };
+        match heddle_session::inbox::pending_inbox(self.sessions.store(), &handle) {
+            Ok(inbox) => !inbox.next_turn.is_empty(),
+            Err(error) => {
+                eprintln!(
+                    "heddle: goal round for {session} waits: its inbox cannot be read ({error})"
+                );
+                true
+            }
+        }
     }
 }
 
