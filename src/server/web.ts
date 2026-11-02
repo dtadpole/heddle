@@ -15,7 +15,7 @@ import { handlePlanRequest } from '../plan/http.ts'
 import type { PlanService } from '../plan/service.ts'
 import { describeContent, reasoningLevelFor } from '../llm/types.ts'
 import { mergeTokenUsage, type TokenUsage } from '../llm/usage.ts'
-import { AttachmentInputError, readAttachments } from './attachments.ts'
+import { AttachmentInputError, readAttachments, validateUploadContent } from './attachments.ts'
 import { logFileName } from './log-download.ts'
 import { MAX_UPLOAD_BYTES, saveUpload, UPLOAD_NOT_REFERENCED, uploadDirectory, uploadReferencedBy } from './uploads.ts'
 import { rendererFor, renderSourceOffThread } from './code.ts'
@@ -1137,7 +1137,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    * bytes into the harness's own store and name that copy.
    *
    * Three rules the route keeps rather than trusting the page: the body is capped at the same ceiling
-   * as a turn; an empty body is refused instead of creating an empty file; and the name is sanitised by
+   * as a turn; ordinary empty files are accepted but empty images are refused; and the name is sanitised by
    * `saveUpload` before any path is built, so a hand-made request cannot choose where the file lands.
    */
   if (url.pathname === '/api/uploads' && request.method === 'POST') {
@@ -1156,11 +1156,15 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       }
       chunks.push(Buffer.from(chunk))
     }
-    if (bytes === 0) {
-      respond(response, 400, 'text/plain', 'an empty file has nothing to add\n')
+    const name = url.searchParams.get('name') ?? 'file'
+    try {
+      validateUploadContent(name, bytes, request.headers['content-type'])
+    } catch (error) {
+      if (!(error instanceof AttachmentInputError)) throw error
+      respond(response, 400, 'text/plain', `${error.message}\n`)
       return
     }
-    const saved = saveUpload(url.searchParams.get('name') ?? 'file', Buffer.concat(chunks))
+    const saved = saveUpload(name, Buffer.concat(chunks))
     respond(response, 200, 'application/json', `${JSON.stringify(saved)}\n`)
     return
   }
