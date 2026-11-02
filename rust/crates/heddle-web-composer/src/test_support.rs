@@ -47,6 +47,8 @@ pub struct Host {
     pub switched: SwitchLog,
     /// Every assembly the route asked for, so a test can check what the query named.
     pub assembled: Arc<Mutex<Vec<AssembleRequest>>>,
+    /// The sessions [`ModelHost::subagent_owned`] names (#175).
+    pub subagents: Vec<String>,
 }
 
 impl Default for Host {
@@ -69,6 +71,7 @@ impl Default for Host {
             recorded: Arc::new(Mutex::new(Vec::new())),
             switched: Arc::new(Mutex::new(Vec::new())),
             assembled: Arc::new(Mutex::new(Vec::new())),
+            subagents: Vec::new(),
         }
     }
 }
@@ -141,6 +144,10 @@ impl ModelHost for Host {
         _reasoning_effort: Option<&str>,
     ) -> Option<String> {
         self.selection_problem.clone()
+    }
+
+    fn subagent_owned(&self, id: &str) -> bool {
+        self.subagents.iter().any(|one| one == id)
     }
 
     fn set_session_model(&self, id: &str, choice: &ModelChoice) -> Option<Value> {

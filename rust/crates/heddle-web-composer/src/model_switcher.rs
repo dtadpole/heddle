@@ -320,6 +320,50 @@ mod tests {
         );
     }
 
+    /// #175: a subagent's session is refused before its body is read, valid or not, and nothing is switched; a plain
+    /// session's malformed body is still a 400, and a bad id is a 400 before ownership is asked.
+    #[tokio::test]
+    async fn a_subagents_session_is_refused_before_its_body_is_read() {
+        let mut host = Host::with_session(SESSION, Vec::new());
+        host.names = vec!["scripted".to_owned()];
+        host.subagents = vec![SESSION.to_owned()];
+        let switched = Arc::clone(&host.switched);
+        let router = routes(Arc::new(host));
+        let path = format!("/api/sessions/{SESSION}/model");
+        for body in [r#"{"endpoint":"scripted"}"#, "{not json"] {
+            let response = call(router.clone(), Method::POST, &path, Some(body)).await;
+            assert_eq!(response.status(), StatusCode::CONFLICT, "{body}");
+            let answer: Value = serde_json::from_str(&body_text(response).await).unwrap();
+            assert_eq!(answer["code"], "session/agent-busy");
+            assert_eq!(
+                answer["reason"],
+                "model selection is unavailable for addressed subagent sessions"
+            );
+        }
+        assert!(switched.lock().unwrap().is_empty(), "nothing was switched");
+
+        let plain = routes(Arc::new(Host::with_session(SESSION, Vec::new())));
+        let response = call(plain, Method::POST, &path, Some("{not json")).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "a plain session's malformed body"
+        );
+
+        let response = call(
+            router,
+            Method::POST,
+            "/api/sessions/not-an-id/model",
+            Some("{}"),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "a bad id, before ownership"
+        );
+    }
+
     #[tokio::test]
     async fn a_switch_refuses_what_the_route_table_says_it_refuses() {
         let host = Host::with_session(SESSION, Vec::new());
