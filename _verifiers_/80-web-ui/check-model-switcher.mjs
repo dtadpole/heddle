@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
 
@@ -110,6 +111,7 @@ async function startServer(label, options = {}) {
     two,
     url: child.url,
     work,
+    config,
     close: async () => {
       child.kill()
       await one.close()
@@ -975,12 +977,13 @@ test('a recorded model the catalogue no longer lists shows DSH’s placeholder a
    * ("a saved selection can still submit requests after its catalog entry disappears", dsh-llm-deepseek). What differs
    * is the seat: DSH "shows 'Select model' in regular weight and hides the reasoning effort caption" for a saved
    * selection absent from the catalogue (dsh-client-ui-model-selection), while the page showed the stale raw id as if
-   * it were a choice. A turn that names an unlisted model is the shortest way to such a session: the turn route
-   * passes the id through and records it, as DSH does, and the page opens that session by name.
+   * it were a choice. The session is made as one is in life: a turn on a model the catalogue then lists, after which
+   * the machine file drops it (read live, A109). A turn naming an unlisted model is refused now (#239), as DSH's
+   * `requireModel` refuses a selection it cannot find; the page opens that session by name.
    */
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), CAPABILITY)) return
-  const server = await startServer('removed')
+  const server = await startServer('removed', { extraModels: [{ id: 'model-gone', name: 'Model Gone' }] })
   const browser = await openBrowser({ width: 1280, height: 1000 })
   try {
     const cookie = await cookieFor(server.url)
@@ -989,8 +992,19 @@ test('a recorded model the catalogue no longer lists shows DSH’s placeholder a
       headers: { 'content-type': 'application/json', cookie },
       body: JSON.stringify({ prompt: 'a session on a model since removed', endpoint: 'double-two', model: 'model-gone' }),
     })
-    assert.equal(turn.status, 200, 'the turn runs')
+    assert.equal(turn.status, 200, 'the turn runs on a model the catalogue lists')
     await turn.text()
+    // The machine file drops the model; the server reads it again at the next request.
+    const machine = JSON.parse(readFileSync(server.config, 'utf8'))
+    for (const endpoint of machine.endpoints) endpoint.models = endpoint.models.filter((model) => model.id !== 'model-gone')
+    writeFileSync(server.config, JSON.stringify(machine, null, 2))
+    const listed = async () => JSON.stringify(await (await fetch(new URL('/api/endpoints', server.url), { headers: { cookie } })).json())
+    let gone = false
+    for (let tries = 0; tries < 100 && !gone; tries += 1) {
+      gone = !(await listed()).includes('model-gone')
+      if (!gone) await new Promise((done) => setTimeout(done, 100))
+    }
+    assert.ok(gone, 'the catalogue no longer lists the model')
     const recorded = (await sessionsOf(server))[0]
     assert.equal(recorded?.model, 'model-gone', 'the session records the model the catalogue does not list')
 
