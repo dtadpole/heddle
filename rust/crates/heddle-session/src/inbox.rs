@@ -344,30 +344,28 @@ pub fn steer_queued(
         return Ok(false);
     };
     let message = inbox.next_turn[start].clone();
-    store.append(
-        handle,
-        NewEvent::new(INBOX_SPLICED)
-            .field("target", NEXT_TURN)
-            .field("start", start as u64)
-            .field("removedCount", 1u64)
-            .field("inserted", Value::Array(Vec::new())),
-        AppendOptions::default(),
-    )?;
     let inserted =
         serde_json::to_value(std::slice::from_ref(&message)).expect("a message is serializable");
-    store.append(
+    // One write: a crash between the two splices would drop the row from both lists (developer-eight's review).
+    store.append_all(
         handle,
-        NewEvent::new(INBOX_SPLICED)
-            .field("target", NEXT_STEP)
-            .field("start", inbox.next_step.len() as u64)
-            .field("inserted", inserted),
-        AppendOptions::default(),
+        vec![
+            NewEvent::new(INBOX_SPLICED)
+                .field("target", NEXT_TURN)
+                .field("start", start as u64)
+                .field("removedCount", 1u64)
+                .field("inserted", Value::Array(Vec::new())),
+            NewEvent::new(INBOX_SPLICED)
+                .field("target", NEXT_STEP)
+                .field("start", inbox.next_step.len() as u64)
+                .field("inserted", inserted),
+        ],
     )?;
     Ok(true)
 }
 
 /// Claim the first queued prompt for the turn about to answer it (DSH's next-turn claim at a turn's first step): one
-/// splice with no `outcome`; the caller writes it as the turn's user message right after (#162). `claimNextTurn` in
+/// splice with no `outcome` and the user message it becomes, written together as one write (#162). `claimNextTurn` in
 /// the TypeScript build.
 pub fn claim_next_turn(
     store: &SessionStore,
@@ -376,14 +374,22 @@ pub fn claim_next_turn(
     let Some(queued) = pending_inbox(store, handle)?.next_turn.into_iter().next() else {
         return Ok(None);
     };
-    store.append(
+    // The claim and the user message it becomes, as one write (developer-eight's review): never a claimed row with no
+    // message. The turn then answers the message already in the log.
+    let mut message = serde_json::json!({"role": "user", "content": queued.content});
+    if let Some(source) = &queued.source {
+        message["source"] = source.clone();
+    }
+    store.append_all(
         handle,
-        NewEvent::new(INBOX_SPLICED)
-            .field("target", NEXT_TURN)
-            .field("start", 0u64)
-            .field("removedCount", 1u64)
-            .field("inserted", Value::Array(Vec::new())),
-        AppendOptions::default(),
+        vec![
+            NewEvent::new(INBOX_SPLICED)
+                .field("target", NEXT_TURN)
+                .field("start", 0u64)
+                .field("removedCount", 1u64)
+                .field("inserted", Value::Array(Vec::new())),
+            NewEvent::new("message").field("message", message),
+        ],
     )?;
     Ok(Some(queued))
 }
@@ -805,12 +811,19 @@ mod tests {
             claim_next_turn(&store, &handle).unwrap().map(|row| row.id),
             Some(a.id)
         );
-        let last = store.read(&handle).unwrap().last().cloned().unwrap();
+        let events = store.read(&handle).unwrap();
+        let (splice, message) = (&events[events.len() - 2], &events[events.len() - 1]);
+        assert_eq!(splice.kind, INBOX_SPLICED);
         assert_eq!(
-            last.get("outcome"),
+            splice.get("outcome"),
             None,
             "a claim delivers, it does not cancel"
         );
+        assert_eq!(
+            message.kind, "message",
+            "the claim and its user message are written together"
+        );
+        assert_eq!(splice.at, message.at, "in one write");
         claim_next_turn(&store, &handle).unwrap();
         assert!(claim_next_turn(&store, &handle).unwrap().is_none());
     }

@@ -1120,6 +1120,84 @@ impl SessionStore {
     /// else. Taking the lock drops this store's fold of the session: the previous holder may have appended
     /// and let go since it was read, and a write counted from a stale fold is the duplicate seq this lock
     /// exists to prevent. Holding it again is free.
+    /// Append several events as **one write**, whole or not at all (#162, developer-eight's review): the next-turn claim
+    /// and the user message it delivers, or a row moved from the queue into the next step, must never land half. Each
+    /// event gets its own seq and is published after the write; a user message dates the row as [`Self::message`] does.
+    /// `appendAll` in the TypeScript build.
+    pub fn append_all(
+        &self,
+        handle: &SessionHandle,
+        events: Vec<NewEvent>,
+    ) -> Result<Vec<Arc<SessionEvent>>, SessionError> {
+        if events.is_empty() {
+            return Ok(Vec::new());
+        }
+        let written = {
+            let mut state = self.state.lock().expect("the store lock is never poisoned");
+            self.claim_locked(&mut state, handle)?;
+            self.load_locked(&mut state, handle)?;
+            let (first, framed) = {
+                let loaded = state
+                    .loaded
+                    .get(&handle.id)
+                    .expect("the log is loaded before an append");
+                (loaded.events.len() as u64, loaded.framed)
+            };
+            let at = iso_now();
+            let records: Vec<Arc<SessionEvent>> = events
+                .into_iter()
+                .enumerate()
+                .map(|(index, event)| {
+                    Arc::new(SessionEvent {
+                        seq: first + index as u64,
+                        at: at.clone(),
+                        kind: event.kind,
+                        fields: event.fields,
+                    })
+                })
+                .collect();
+            let mut bytes = Vec::new();
+            for record in &records {
+                let line = format!("{}\n", record.to_line());
+                if framed {
+                    bytes.extend(encode_frame(&line));
+                } else {
+                    bytes.extend(line.into_bytes());
+                }
+            }
+            let loaded = state
+                .loaded
+                .get_mut(&handle.id)
+                .expect("the log is loaded before an append");
+            append_bytes(loaded, &handle.transcript, &bytes)?;
+            Arc::make_mut(&mut loaded.events).extend(records.iter().cloned());
+            records
+        };
+        for record in &written {
+            if let Some(listener) = &self.listener {
+                listener(handle, record);
+            }
+            self.titles.observe(self, handle, record);
+            let user = record.kind == "message"
+                && record
+                    .get("message")
+                    .and_then(|message| message.get("role"))
+                    .and_then(Value::as_str)
+                    == Some("user");
+            if user {
+                let person = record
+                    .get("message")
+                    .and_then(|message| message.get("source"))
+                    .is_none();
+                let prompted_at = person.then_some(record.at.as_str());
+                if let Some(named) = self.write_meta_touch(handle, 1, prompted_at, None) {
+                    self.announce_title(&named);
+                }
+            }
+        }
+        Ok(written)
+    }
+
     pub fn claim(&self, handle: &SessionHandle) -> Result<(), SessionError> {
         let mut state = self.state.lock().expect("the store lock is never poisoned");
         self.claim_locked(&mut state, handle)
