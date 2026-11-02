@@ -41,8 +41,15 @@ pub const ALLOWED_ATTRS: &[&str] = &[
 /// The resources a document may pull in, as the case-insensitive pattern DOMPurify tests each URL against.
 pub const ALLOWED_URI_PATTERN: &str = r"^(?:https?:|\/|\.{1,2}\/|[^a-z]|[a-z+.-]+(?:[^a-z+.:-]|$))";
 
-/// The policy a previewed document runs under, as a `meta` element inside it.
+/// The resource policy a previewed document runs under in the fixed shell's response header.
 pub const PREVIEW_CSP: &str = "default-src 'none'; img-src 'self' https: data:; style-src 'self' 'unsafe-inline' https:; font-src 'self' https: data:; media-src 'self' https:; frame-src 'none'; script-src 'none'; form-action 'none'; base-uri 'none'";
+
+/// A fixed empty document, never populated with request paths or workspace bytes by the server.
+pub const PREVIEW_SHELL: &str = "<!doctype html><html><head></head><body></body></html>\n";
+
+pub fn frame_policy() -> String {
+    format!("{PREVIEW_CSP}; frame-ancestors 'self'; sandbox allow-same-origin")
+}
 
 /// The largest document `/api/html` prepares: 4 MiB, answered `413` above it.
 pub const MAX_PREVIEW_BYTES: u64 = 4 * 1024 * 1024;
@@ -766,7 +773,18 @@ mod tests {
             !show_html.contains("<base"),
             "the application must not contradict base-none"
         );
-        assert!(show_html.contains("htmlView.setAttribute('sandbox', 'allow-same-origin')"));
+        assert!(show_html.contains("frame.setAttribute('sandbox', 'allow-same-origin')"));
+        assert!(show_html.contains("frame.setAttribute('referrerpolicy', 'no-referrer')"));
+        assert!(show_html.contains("frame.src = '/api/html/frame'"));
+        assert!(show_html.contains("parseFromString(clean, 'text/html')"));
+        assert!(show_html.contains("inner.documentElement.replaceWith(inner.importNode"));
+        assert!(show_html.contains("ticket !== fileFetches || htmlView !== frame"));
+        assert!(!show_html.contains(".srcdoc ="));
+        assert!(!show_html.contains("body.csp"));
+        assert_eq!(
+            frame_policy(),
+            format!("{PREVIEW_CSP}; frame-ancestors 'self'; sandbox allow-same-origin")
+        );
     }
 
     #[test]

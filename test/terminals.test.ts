@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
+import { execFileSync, spawn } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { seatbeltProfileArgs } from '../src/sandbox/seatbelt.ts'
-import { processTable, TerminalRegistry, type TerminalEvent, type TerminalLimits } from '../src/server/terminals.ts'
+import { processTable, shellArgv, SIGNAL_RESET, SIGNAL_RESET_PERL, signalResetArgv, terminalArgv, TerminalRegistry, type TerminalEvent, type TerminalLimits } from '../src/server/terminals.ts'
 
 /**
  * The page's interactive terminals, the server half (live-testing issue #85): one shell per terminal in a PTY,
@@ -104,6 +105,122 @@ test('the shell exit status is reported, and an exited terminal takes no input',
     assert.equal(terminals.input('s1', info.id, 'echo late\n'), 'exited')
   } finally {
     await terminals.closeAll()
+    s.done()
+  }
+})
+
+/**
+ * Spawn a terminal's argv as the registry does (detached, all three pipes), behind `launcher`, close the server's
+ * end of its stdin without a close, and assert that the shell, `script` and the wrapper end within 5 s.
+ */
+async function serverEndCloses(launcher: readonly string[]): Promise<void> {
+  const s = scratch()
+  const argv = [...launcher, ...terminalArgv('darwin', shellArgv('/bin/sh', 80, 24))]
+  const child = spawn(argv[0] as string, argv.slice(1), { cwd: s.workspace, env: { ...process.env, TERM: 'xterm-256color', SHELL: '/bin/sh' }, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
+  const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()))
+  const how = launcher.length === 0 ? 'spawned plainly' : `spawned through ${launcher.join(' ')}`
+  let text = ''
+  child.stdout.on('data', (chunk: Buffer) => (text += chunk.toString()))
+  child.stderr.resume()
+  let shell = 0
+  let pty = 0
+  try {
+    child.stdin.write('echo "SH=$$ PTY=$PPID"\n')
+    const deadline = Date.now() + 8000
+    let match: RegExpExecArray | null = null
+    while (match === null && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25))
+      match = /SH=(\d+) PTY=(\d+)/.exec(text)
+    }
+    assert.ok(match !== null, `${how}: the shell answered; saw ${JSON.stringify(text.slice(-400))}`)
+    shell = Number(match[1])
+    pty = Number(match[2])
+    assert.ok(alive(shell) && alive(pty), `${how}: the shell and its script run`)
+    child.stdin.end()
+    const until = Date.now() + 5000
+    while ((alive(shell) || alive(pty)) && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.equal(alive(shell), false, `${how}: the shell ended with the server’s end of its input`)
+    assert.equal(alive(pty), false, `${how}: and so did script`)
+    await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5000))])
+    assert.notEqual(child.exitCode ?? child.signalCode, null, `${how}: and the wrapper`)
+  } finally {
+    for (const pid of [shell, pty]) if (pid > 0 && alive(pid)) process.kill(pid, 'SIGKILL')
+    if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
+      try {
+        process.kill(-child.pid, 'SIGKILL')
+      } catch {
+        // Already gone.
+      }
+    }
+    s.done()
+  }
+}
+
+test('when the server’s end of stdin closes without a close, the wrapper’s group ends and so does the shell (#204)', { skip }, async () => {
+  // A server that is killed, crashes or runs out of memory closes no terminal: its end of each wrapper's stdin just
+  // closes. The shell waits at its prompt with the tty raw, so BSD `script` passes no VEOF on, and before #204
+  // `script` and the shell stayed under init. A server started under `nohup` hands SIGHUP down ignored, so the
+  // wrapper's own signal must not be SIGHUP.
+  await serverEndCloses([])
+  await serverEndCloses(['/usr/bin/nohup'])
+})
+
+test('the wrapper leads its own process group, so its `kill 0` never reaches the server (#204)', { skip }, async () => {
+  const s = scratch()
+  const terminals = registry()
+  try {
+    const info = terminals.create({ session: 's1', cwd: s.workspace, mode: 'danger-full-access', cols: 80, rows: 24, confine: unconfined, env: { ...process.env, SHELL: '/bin/sh' } })
+    if (typeof info === 'string') return assert.fail(info)
+    const out = watch(terminals, 's1', info.id)
+    // The shell's parent is `script`, which runs in the wrapper's group.
+    terminals.input('s1', info.id, 'echo PG=$(ps -o pgid= -p $PPID)\n')
+    const group = Number((await out.until(/PG= ?(\d+)\r?\n/))[1])
+    const own = Number(execFileSync('ps', ['-o', 'pgid=', '-p', String(process.pid)], { encoding: 'utf8' }).trim())
+    assert.notEqual(group, own, 'script is not in the server’s process group')
+    assert.match(execFileSync('ps', ['-o', 'command=', '-p', String(group)], { encoding: 'utf8' }), /heddle-terminal/, 'its group is led by the wrapper')
+  } finally {
+    await terminals.closeAll()
+    s.done()
+  }
+})
+
+test('the PTY starts through a signal reset when perl is there, and as before when it is not (#210)', () => {
+  const shell = shellArgv('/bin/sh', 80, 24)
+  assert.deepEqual(signalResetArgv(SIGNAL_RESET_PERL), [SIGNAL_RESET_PERL, '-e', SIGNAL_RESET, '--'])
+  assert.ok(SIGNAL_RESET.startsWith("$SIG{$_} = 'DEFAULT' for keys %SIG; exec { $ARGV[0] } @ARGV"))
+  assert.deepEqual(signalResetArgv(null), [], 'without perl there is no step')
+  const argv = terminalArgv('darwin', shell, SIGNAL_RESET_PERL)
+  assert.deepEqual(argv.slice(4, 8), signalResetArgv(SIGNAL_RESET_PERL), 'between the relay and the PTY')
+  assert.equal(argv[8], '/usr/bin/script')
+  assert.equal(terminalArgv('darwin', shell, null)[4], '/usr/bin/script')
+})
+
+test('the shell’s programs start with every signal at its default, even behind a launcher that ignores some (#210)', { skip: skip || (existsSync(SIGNAL_RESET_PERL) ? false : 'no perl on this host') }, async () => {
+  // A process started with signals ignored hands them to what it execs, and `/bin/sh` here is bash, which keeps a
+  // signal ignored on entry for every program it runs. libuv resets every signal in a child this server spawns, so
+  // the launcher stands in for a server that does not (the Rust build's `Command` resets SIGPIPE only).
+  const s = scratch()
+  const launcher = ['/usr/bin/perl', '-e', `$SIG{QUIT} = $SIG{HUP} = 'IGNORE'; exec { $ARGV[0] } @ARGV or die`, '--']
+  const argv = [...launcher, ...terminalArgv('darwin', shellArgv('/bin/sh', 80, 24))]
+  const child = spawn(argv[0] as string, argv.slice(1), { cwd: s.workspace, env: { ...process.env, TERM: 'xterm-256color', SHELL: '/bin/sh' }, detached: true, stdio: ['pipe', 'pipe', 'ignore'] })
+  let text = ''
+  child.stdout.on('data', (chunk: Buffer) => (text += chunk.toString()))
+  const signals = ['QUIT', 'HUP', 'INT', 'TERM']
+  try {
+    // Each program signals itself and says so if it lives; the quotes keep the echoed command line from matching.
+    for (const name of signals) child.stdin.write(`sh -c 'kill -${name} $$; echo SURVIVED-${name.slice(0, 1)}""${name.slice(1)}'\n`)
+    child.stdin.write('echo PROBE-$((1+1))\n')
+    const deadline = Date.now() + 8000
+    while (!text.includes('PROBE-2') && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25))
+    assert.ok(text.includes('PROBE-2'), `the shell answered; saw ${JSON.stringify(text.slice(-400))}`)
+    assert.deepEqual(signals.filter((name) => text.includes(`SURVIVED-${name}`)), [], 'no program in the terminal kept a signal ignored')
+  } finally {
+    child.stdin.end()
+    try {
+      if (child.pid !== undefined) process.kill(-child.pid, 'SIGKILL')
+    } catch {
+      // Already gone.
+    }
     s.done()
   }
 })

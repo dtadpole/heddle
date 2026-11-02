@@ -114,6 +114,28 @@ test('Stop cancels a waiting question, and the log says so', async () => {
   assert.deepEqual(questions.list(handle, { open: true }), [])
 })
 
+test('a fork cut inside a waiting question answers only itself: the source keeps its waiter and its log (#245)', async () => {
+  const { store, handle, questions } = setup()
+  const asked = questions.ask(handle, [{ id: 'q', question: 'Ready?', options: [{ label: 'Go' }] }])
+  const [waiting] = questions.list(handle)
+  assert.equal(waiting?.state, 'waiting')
+  const fork = store.fork(handle.id, { atSeq: Math.max(...store.read(handle).map((event) => event.seq)) })
+  assert.ok(fork !== null)
+  const [copy] = questions.list(fork, { open: true })
+  assert.equal(copy?.id, waiting!.id, 'the fork copies the request with its id')
+  assert.equal(copy?.state, 'continued', 'but no turn of the fork waits on it')
+
+  const outcome = questions.answer(fork, copy!.id, [{ id: 'q', selected: ['Go'] }])
+  assert.equal(outcome.late, true, "so the fork's answer is late, a message for the fork's next turn")
+  assert.match(outcome.message ?? '', /"kind":"answer_to_pending_question"/)
+  assert.equal(questions.get(handle, waiting!.id)?.state, 'waiting', "the source's turn still waits")
+  assert.equal(foldQuestions(store.read(handle)).get(waiting!.id)?.settled, undefined, "and the source's log records no answer")
+  assert.equal(await Promise.race([asked.then(() => 'answered'), tick(20).then(() => 'waiting')]), 'waiting', "the fork's answer never reached the source's turn")
+
+  questions.answer(handle, waiting!.id, [{ id: 'q', selected: ['Go'] }])
+  assert.deepEqual(await asked, { kind: 'answered', answers: [{ id: 'q', selected: ['Go'] }] }, 'an answer in the source still does')
+})
+
 test('a question asked before a restart is still answerable after it, and the answer resumes the session', async () => {
   const { store, handle, questions } = setup()
   void questions.ask(handle, [{ id: 'q', question: 'Ready?' }]).catch(() => {})
@@ -124,6 +146,33 @@ test('a question asked before a restart is still answerable after it, and the an
   assert.equal(outcome.late, true)
   assert.match(outcome.message ?? '', /"kind":"answer_to_pending_question"/)
   assert.equal(foldQuestions(store.read(handle)).get(open!.id)?.settled?.kind, 'answered')
+})
+
+test('a question only its own turn can take reads as cancelled after a restart, and an answer is refused (#228)', async () => {
+  const { store, handle, questions } = setup()
+  const asked = questions.ask(handle, [{ id: 'q', question: 'Approve?', options: [{ label: 'Yes' }] }], { continuable: false })
+  asked.catch(() => {})
+  void questions.ask(handle, [{ id: 'other', question: 'Ready?' }]).catch(() => {})
+  const [only, ordinary] = questions.list(handle)
+  assert.equal(only?.state, 'waiting', 'while its turn waits it is answerable as usual')
+  assert.equal(store.read(handle).find((event) => event.requestId === only?.id && event.type === 'question/asked')?.continuable, false)
+  assert.equal('continuable' in (store.read(handle).find((event) => event.requestId === ordinary?.id && event.type === 'question/asked') ?? {}), false, 'an ordinary request is written as before')
+
+  const reopened = new QuestionService(new Context(), store)
+  const [closed, still] = reopened.list(handle)
+  assert.equal(closed?.state, 'cancelled', 'a new process sees the request closed, not continued')
+  assert.equal(closed?.reason, 'interrupted')
+  assert.equal(still?.state, 'continued', 'an ordinary request is still continued')
+  assert.deepEqual(reopened.list(handle, { open: true }).map((view) => view.id), [still?.id], 'only the ordinary one is open')
+  assert.throws(
+    () => reopened.answer(handle, closed!.id, [{ id: 'q', selected: ['Yes'] }]),
+    (error: unknown) => error instanceof QuestionError && error.code === 'SETTLED' && /already cancelled/.test(error.message),
+  )
+  assert.equal(foldQuestions(store.read(handle)).get(closed!.id)?.settled, undefined, 'the refusal wrote nothing')
+
+  /** In the process that asked it, an answer still reaches the waiting turn. */
+  questions.answer(handle, only!.id, [{ id: 'q', selected: ['Yes'] }])
+  assert.deepEqual(await asked, { kind: 'answered', answers: [{ id: 'q', selected: ['Yes'] }] })
 })
 
 test('the tool answers compact JSON, shows timeout only in timed mode, and refuses a delegated agent', async () => {

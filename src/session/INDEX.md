@@ -54,7 +54,9 @@ derivation from DSH's code is in the file's header and in [`../../SESSION_ACTION
 
 Everything built on top of it — the meter, the pruner, the compaction, `heddle context` — reads
 `deriveMessages()` rather than filtering the log, and [`../context/INDEX.md`](../context/INDEX.md) is
-where that happens.
+where that happens. The derivation leaves out a run with no `done` whose turn closed with
+`finishReason: 'error'`, a broken stream's fragment, so neither the next request nor a fork nor a summary reads
+it as the model's answer; a stopped run keeps what streamed, and the page still draws both (#173).
 
 Two things about how it is stored are worth knowing before reading the code.
 
@@ -70,6 +72,18 @@ and the session records `transcript/repaired` with how many bytes went. This is 
 frame walk stops at the first incomplete frame, so appending past one writes events nothing can ever
 read. Measured before the repair existed: a torn file plus one appended frame read back as one event
 instead of two, with the new event silently gone.
+
+**An append goes on whole or not at all** ([`append.ts`](append.ts), issue #221). A full disk takes part of a frame
+and refuses the rest; the partial frame used to stay, the turns answered after the disk had room again were appended
+behind it, and the next open's cut dropped them (J183). Every append now notes the log's length first and, when a write
+fails, truncates back to it before it throws `the session could not be saved: <reason>` in words (`no space left on
+device` for ENOSPC), the sentence the turn's error frame and its verdict carry; DSH's `appendLines` and
+`rollbackAppend` do the same (dsh-session-persistence-jsonl lib/index.js:3299-3335). A truncate that fails too poisons
+the session's writer: every later append is refused with that error until the session is opened again, and that open
+cuts the torn tail. A log an older build already tore **in the middle** keeps the frames after the tear
+(`recoverTranscript` in [`transcript.ts`](transcript.ts)): the walk resumes at the next frame that walks whole, decodes
+with its checksum and holds session events whose seqs join the ones before the tear, the log is written again without
+the torn bytes in one step, and `transcript/repaired` names the ranges it took out (`droppedRanges`).
 
 **A log that is not a log is left out, and named** (issue #130). DSH lists a session by its header and omits one
 whose header is unreadable, a corrupt Zstandard header frame included (dsh-session-persistence-jsonl README, "Reading
@@ -97,7 +111,9 @@ attach for writing, the first process to take the session's writer lock appends 
 else: an `error (INTERRUPTED)` result for each open call, then `assistant/completed` and `turn/completed`
 with `reason: { kind: 'interrupted' }`. A session no live writer holds reads with the same closers added and
 nothing written (`SessionService.events`, DSH's cold read), so the view is right from the first read after a
-restart. A turn running in this process holds the lock already and is never closed.
+restart. A turn running in this process holds the lock already and is never closed. A command left running
+is closed the same way (#206): a `command/done` of kind `error`, and for a `/compact` cut mid-summary a stopped
+`compaction/failed` first and the words "Compaction cancelled.", so its row no longer reads Running… for good.
 
 **A lock whose holder is gone never blocks the session** ([`writer-lock.ts`](writer-lock.ts), issue #202). The
 writer lock (`<id>.lock`) used to name only its holder's pid, and a later writer took it only when that pid was gone.

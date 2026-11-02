@@ -20,14 +20,15 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 | [`clock.rs`](clock.rs) | timestamps as `toISOString` prints them | `new Date().toISOString()` |
 | [`command.rs`](command.rs) | `heddle sessions` and `heddle transcript`, answered here (D-043): `run(Command, &Args, &Context, out, err) -> i32`, plus the shared `refuse` and `write_pretty` | `src/cli.ts`, the `sessions` and `transcript` branches |
 | [`layout.rs`](layout.rs) | `workspace_key`: the folder a log is filed under | `layout.ts` |
-| [`transcript.rs`](transcript.rs) | one zstd frame per event: the frame walk, encode, decode | `transcript.ts` |
+| [`transcript.rs`](transcript.rs) | one zstd frame per event: the frame walk, encode, decode; `recover_transcript` reads past a frame torn in the middle when whole frames whose seqs join follow it (#221) | `transcript.ts` |
+| [`append.rs`](append.rs) | an append whole or not at all (#221): the log's length first, a truncate back to it when a write fails, `unsaved_reason` in words, a poisoned failure when the truncate fails too; `replace_whole` for the repair of a mid-file tear | `append.ts` |
 | [`message.rs`](message.rs) | `heddle-llm`'s `Message`, `ContentPart`, `Chunk` and friends, re-exported, plus `text_of` and the `RecordedMessage` alias | `src/llm/types.ts` via `heddle-llm` |
 | [`event.rs`](event.rs) | `SessionEvent`, `NewEvent`, `SessionHandle`, `SurfaceOp`, `AppendOptions` | `store.ts` types |
 | [`meta.rs`](meta.rs) | `SessionMeta` as ordered JSON, and the options that create or edit it | `store.ts` `SessionMeta` |
 | [`surface.rs`](surface.rs) | the surface fold and message derivation | `store.ts` free functions |
 | [`store.rs`](store.rs) | `SessionStore` | `store.ts` `SessionStore` |
 | [`mode.rs`](mode.rs) | the `permission/mode` fold | `mode.ts` |
-| [`repair.rs`](repair.rs) | the closers of a turn its writer never finished (DSH's `openTurnClosers`): appended at the first write-open after a restart, shown by a read while no writer holds the session (issue #5) | `repair.ts` |
+| [`repair.rs`](repair.rs) | the closers of a turn, and of a command, its writer never finished (DSH's `openTurnClosers`; #206 for a command): appended at the first write-open after a restart, shown by a read while no writer holds the session (issue #5) | `repair.ts` |
 | [`inbox.rs`](inbox.rs) | the pending-input inbox: DSH's `agent/inbox/spliced` fold, `queue_steer`, `claim_next_step` (R-developer-two-5) | `inbox.ts` |
 | [`definition.rs`](definition.rs) | `_sessions_/<name>/{session.json, INDEX.md}` | `definition.ts` |
 | [`title_text.rs`](title_text.rs) | DSH's title cleaning: `clean_session_title`, applied to every title the store and a definition write | `title-text.ts` |

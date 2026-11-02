@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { existsSync, mkdirSync } from 'node:fs'
 import { request as httpRequest } from 'node:http'
 import { join } from 'node:path'
@@ -19,18 +19,27 @@ import { fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, scriptedC
  * - the shell is confined as bash is: under workspace-write it writes inside the session folder and is refused
  *   outside it;
  * - it is bounded (`maxTerminals`, then `409`), and closing, archiving and server shutdown each end the whole
- *   process tree.
+ *   process tree;
+ * - a server that dies without a shutdown (SIGKILL) leaves no wrapper, `script`, shell, program or job under init
+ *   (#204);
+ * - a server started with signals ignored does not hand them to the terminal's programs (#210).
  */
 
 const darwin = process.platform === 'darwin'
 
-/** Boot `heddle web` on an ephemeral port with the project's profile and an isolated home. */
-function startServer(home, config) {
+/**
+ * Boot `heddle web` on an ephemeral port with the project's profile and an isolated home, behind `launcher` when
+ * one is given (it must end in an `exec`, so the child is the server itself).
+ */
+function startServer(home, config, launcher = []) {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(
-      ...heddleCommand(['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(home, 'sessions')]),
-      { cwd: repoRoot, env: { ...process.env, NO_COLOR: '1', SHELL: '/bin/sh', HEDDLE_HOME: home, HEDDLE_CONFIG: config }, stdio: ['ignore', 'pipe', 'pipe'] },
-    )
+    const [command, args] = heddleCommand(['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(home, 'sessions')])
+    const argv = [...launcher, command, ...args]
+    const child = spawn(argv[0], argv.slice(1), {
+      cwd: repoRoot,
+      env: { ...process.env, NO_COLOR: '1', SHELL: '/bin/sh', HEDDLE_HOME: home, HEDDLE_CONFIG: config },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
     let output = ''
     let settled = false
     const onData = (chunk) => {
@@ -156,8 +165,8 @@ async function settle(ms = 400) {
   await new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-/** A workspace root with two session folders, the outside folder, and a running server. */
-async function fixture(label) {
+/** A workspace root with two session folders, the outside folder, and a running server (behind `launcher`). */
+async function fixture(label, { launcher = [] } = {}) {
   const home = isolatedHome(`terminal-${label}`)
   const { config } = scriptedConfig({ home, steps: [{ text: 'unused' }] })
   const top = fixtureDir(`terminal-root-${label}`)
@@ -166,7 +175,7 @@ async function fixture(label) {
   const two = join(top, 'two')
   mkdirSync(one)
   mkdirSync(two)
-  const server = await startServer(home, config)
+  const server = await startServer(home, config, launcher)
   const api = await client(server)
   const added = await api.post('/api/workspaces', { path: top })
   assert.equal(added.status, 200, `the workspace root is added (${JSON.stringify(added.body)})`)
@@ -394,6 +403,120 @@ test('closing a terminal also ends a job that left its process tree for init (re
     await settle()
     assert.equal(alive(job), false, 'and ends with the terminal')
   } finally {
+    f.done()
+  }
+})
+
+test('a server started with SIGQUIT and SIGHUP ignored does not hand them to a terminal\'s programs (#210)', async (context) => {
+  if (!skipUnless(context, darwin, 'the PTY runs through BSD script(1); the util-linux form is not measured on this host')) return
+  // `trap '' QUIT HUP; exec` stands for a server started under `nohup`, or with `&` from a script: an ignored signal
+  // survives exec, and `/bin/sh` (bash) keeps a signal ignored on entry for every program it runs, so before #210
+  // Ctrl-\ quit nothing in a Rust-build terminal. Node's libuv resets every signal in a child, so the TypeScript
+  // build passes either way.
+  const f = await fixture('signals', { launcher: ['/bin/sh', '-c', `trap '' QUIT HUP; exec "$@"`, 'heddle-launcher'] })
+  try {
+    const created = await f.api.post(`/api/sessions/${f.a}/terminals`, {})
+    assert.equal(created.status, 201, `a terminal is created (${JSON.stringify(created.body)})`)
+    const base = `/api/sessions/${f.a}/terminals/${created.body.terminal.id}`
+    // Each program signals itself and says so if it lives; the quotes keep the echoed command line from matching,
+    // and one line each lets the shell read every probe on its own.
+    const signals = ['QUIT', 'HUP', 'INT', 'TERM']
+    const line = [...signals.map((name) => `sh -c 'kill -${name} $$; echo SURVIVED-${name.slice(0, 1)}""${name.slice(1)}'`), 'echo PROBE-$((1+1))'].join('\n')
+    const output = await run(f.api, base, line, /PROBE-2/)
+    assert.deepEqual(signals.filter((name) => output.includes(`SURVIVED-${name}`)), [], 'no program in the terminal kept a signal the server was started with ignored')
+  } finally {
+    f.done()
+  }
+})
+
+/** How long one `ps -A` may run: the products' own process-table helper gives `ps` the same 5 s (#150). */
+const PS_TIMEOUT_MS = 5_000
+
+/**
+ * Every live process as `{ pid, ppid, tty }`, from one `ps -A`. The read is bounded, because under heavy load `ps`
+ * has outlasted the products' 5 s (#150) and an unbounded read would hold the whole lane. A read that runs past
+ * `PS_TIMEOUT_MS` is killed and taken once more; a second one fails the check, naming the stall.
+ */
+function processTable() {
+  const read = () => execFileSync('ps', ['-A', '-o', 'pid=,ppid=,tty='], { encoding: 'utf8', timeout: PS_TIMEOUT_MS, killSignal: 'SIGKILL' })
+  let text
+  try {
+    text = read()
+  } catch (first) {
+    if (first.code !== 'ETIMEDOUT') throw first
+    try {
+      text = read()
+    } catch (second) {
+      if (second.code !== 'ETIMEDOUT') throw second
+      throw new Error(`ps -A ran past ${PS_TIMEOUT_MS} ms twice; no process table to judge`, { cause: second })
+    }
+  }
+  return text
+    .split('\n')
+    .map((line) => line.trim().split(/\s+/))
+    .filter((fields) => fields.length >= 2 && fields.slice(0, 2).every((field) => /^\d+$/.test(field)))
+    .map(([pid, ppid, tty]) => ({ pid: Number(pid), ppid: Number(ppid), tty: tty ?? '' }))
+}
+
+/** Every descendant of `root` in `table`. */
+function descendantsOf(root, table) {
+  const found = []
+  let frontier = [root]
+  while (frontier.length > 0) {
+    const next = table.filter((row) => frontier.includes(row.ppid) && !found.includes(row.pid)).map((row) => row.pid)
+    found.push(...next)
+    frontier = next
+  }
+  return found
+}
+
+test('a server that dies without closing its terminals leaves no shell, script, program or job behind (#204)', async (context) => {
+  if (!skipUnless(context, darwin, 'the PTY runs through BSD script(1); the util-linux form is not measured on this host')) return
+  const f = await fixture('death')
+  let held = []
+  try {
+    // One terminal waits at its prompt, where readline keeps the tty raw; the other runs `cat` in the foreground.
+    // Each has a background job. Before #204 the first left its shell and `script` under init.
+    const ttys = []
+    const named = []
+    for (const foreground of [false, true]) {
+      const created = await f.api.post(`/api/sessions/${f.a}/terminals`, {})
+      assert.equal(created.status, 201, `a terminal is created (${JSON.stringify(created.body)})`)
+      const base = `/api/sessions/${f.a}/terminals/${created.body.terminal.id}`
+      const pattern = /BG=(\d+) TTY=\/dev\/(\S+) SH=(\d+)\r?\n/
+      const [, job, tty, shell] = pattern.exec(await run(f.api, base, 'sleep 300 & echo "BG=$! TTY=$(tty) SH=$$"', pattern))
+      named.push(Number(job), Number(shell))
+      ttys.push(tty)
+      if (foreground) assert.equal((await f.api.post(`${base}/input`, { data: 'cat\n' })).status, 200)
+    }
+    const onTty = (table, tty) => table.filter((row) => row.tty === tty).map((row) => row.pid)
+    let table = processTable()
+    for (let tries = 0; onTty(table, ttys[1]).length < 3 && tries < 30; tries += 1) {
+      await settle(100)
+      table = processTable()
+    }
+    assert.ok(onTty(table, ttys[1]).length >= 3, `the foreground cat runs beside the shell and its job on ${ttys[1]}`)
+    const tree = descendantsOf(f.server.child.pid, table)
+    for (const pid of named) assert.ok(tree.includes(pid), `${pid} runs under the server (${tree.join(' ')})`)
+    // Watched by pid, found both in the server's tree and on the two ttys. A tty name is not read again after the kill:
+    // once the PTY is gone, another terminal on this host may take the same name at once.
+    held = [...new Set([...tree, ...onTty(table, ttys[0]), ...onTty(table, ttys[1])])]
+    // SIGKILL, as a crash or the out-of-memory killer ends a server: no close runs, only its pipe ends close.
+    const exited = new Promise((resolve) => f.server.child.once('exit', resolve))
+    f.server.child.kill('SIGKILL')
+    await Promise.race([exited, settle(5_000)])
+    const deadline = Date.now() + 5_000
+    while (held.some(alive) && Date.now() < deadline) await settle(100)
+    assert.deepEqual(held.filter(alive), [], 'the wrappers, script, the shells, cat and both jobs ended with the server')
+  } finally {
+    // A survivor is this check's own leak: end it, so a failing run leaves nothing either.
+    for (const pid of held.filter(alive)) {
+      try {
+        process.kill(pid, 'SIGKILL')
+      } catch {
+        // Already gone.
+      }
+    }
     f.done()
   }
 })

@@ -52,6 +52,7 @@ use crate::surface::{
 use crate::title::SessionTitles;
 use crate::transcript::{
     LogHeader, TranscriptFormat, decode_transcript, encode_frame, judge_log_header,
+    recover_transcript,
 };
 
 /// The transcript file name inside an **old-layout** session directory, current format.
@@ -412,9 +413,36 @@ pub fn read_log_header(path: &str) -> LogHeader {
 }
 
 /// One session's fold: its events, and whether its transcript is stored as frames.
+///
+/// `poisoned` holds the reason of an append whose partial bytes could not be cut away ([`crate::append`], #221): every
+/// later append of the session is refused with that sentence until the fold is dropped and the file read again.
 struct Loaded {
     events: Arc<Vec<Arc<SessionEvent>>>,
     framed: bool,
+    poisoned: Option<String>,
+}
+
+/// Append bytes to a session's log whole or not at all, the one way `append`, the turn closers and a fork's seed write
+/// (#221). A write that fails is cut back to the length the log had, and [`SessionError::Unsaved`] says why in words.
+/// When the cut fails too, the fold is poisoned and every later append of the session answers that same sentence,
+/// because an append after a torn tail would be lost on the next open; opening the session again re-reads the file and
+/// cuts the tail ([`SessionStore::load_locked`]).
+fn append_bytes(loaded: &mut Loaded, path: &str, bytes: &[u8]) -> Result<(), SessionError> {
+    if let Some(reason) = &loaded.poisoned {
+        return Err(SessionError::Unsaved {
+            reason: reason.clone(),
+            source: None,
+        });
+    }
+    crate::append::append_whole(path, bytes).map_err(|failure| {
+        if failure.poisoned {
+            loaded.poisoned = Some(failure.reason.clone());
+        }
+        SessionError::Unsaved {
+            reason: failure.reason,
+            source: Some(failure.source),
+        }
+    })
 }
 
 /// The fold and the surface cache, behind the store's one lock.
@@ -954,14 +982,7 @@ impl SessionStore {
                     bytes.extend(line.into_bytes());
                 }
             }
-            gated(|| {
-                std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&handle.transcript)
-                    .and_then(|mut file| file.write_all(&bytes))
-                    .map_err(|error| SessionError::io(&handle.transcript, error))
-            })?;
+            gated(|| append_bytes(loaded, &handle.transcript, &bytes))?;
             Arc::make_mut(&mut loaded.events).extend(records.iter().cloned());
             records
                 .iter()
@@ -1281,14 +1302,7 @@ impl SessionStore {
                 bytes.extend(line.into_bytes());
             }
         }
-        gated(|| {
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&handle.transcript)
-                .and_then(|mut file| file.write_all(&bytes))
-                .map_err(|error| SessionError::io(&handle.transcript, error))
-        })?;
+        gated(|| append_bytes(loaded, &handle.transcript, &bytes))?;
         Arc::make_mut(&mut loaded.events).extend(records.into_iter().map(Arc::new));
         Ok(())
     }
@@ -1333,26 +1347,21 @@ impl SessionStore {
 
         // One event, one frame, appended. The frame is the unit of appendability: a compressed file
         // cannot be added to in the middle, and a frame is the smallest thing that can be added at the
-        // end, so every earlier byte is untouched.
+        // end, so every earlier byte is untouched. It goes on whole or not at all ([`append_bytes`], #221):
+        // a write that fails is cut back before the error is answered, so the event is neither in the file
+        // nor in the fold and the next append takes its seq.
         let line = format!("{}\n", record.to_line());
         let bytes = if framed {
             encode_frame(&line)
         } else {
             line.into_bytes()
         };
-        gated(|| {
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&handle.transcript)
-                .map_err(|error| SessionError::io(&handle.transcript, error))?;
-            file.write_all(&bytes)
-                .map_err(|error| SessionError::io(&handle.transcript, error))
-        })?;
-
-        if let Some(loaded) = state.loaded.get_mut(&handle.id) {
-            Arc::make_mut(&mut loaded.events).push(record.clone());
-        }
+        let loaded = state
+            .loaded
+            .get_mut(&handle.id)
+            .expect("the log is loaded before an append");
+        gated(|| append_bytes(loaded, &handle.transcript, &bytes))?;
+        Arc::make_mut(&mut loaded.events).push(record.clone());
         Ok(record)
     }
 
@@ -1369,6 +1378,18 @@ impl SessionStore {
         let mut decoded = decode_transcript(&bytes);
         let torn = bytes.len() > decoded.readable_bytes;
 
+        // A tear in the **middle** is stepped over when whole frames follow it (#221). An append that failed
+        // part-way, before the rollback in [`crate::append`] existed, left its partial frame in the file, and the
+        // turns written after the disk had room again sit behind it; cutting at the tear threw them away (J183: t6,
+        // answered after the space came back, was gone after the restart). [`recover_transcript`] finds where whole
+        // frames start again and keeps them, when their seqs join the ones before the tear; it answers `None` for a
+        // tear at the tail, which is cut below as it always was.
+        let mut recovered = if torn {
+            recover_transcript(&bytes)
+        } else {
+            None
+        };
+
         // A torn tail is cut off before anything is appended. What is dropped is a frame that was never
         // written whole, so no event that existed as an event is lost.
         //
@@ -1376,27 +1397,66 @@ impl SessionStore {
         // that process's append in progress, so a reader that cannot take the lock reads the whole frames and
         // leaves the file alone; one that can re-reads under the lock before it cuts, because the frame may
         // have been finished by the holder it just replaced.
+        //
+        // A log torn in the middle is written again without its torn bytes, in one step
+        // ([`crate::append::replace_whole`]): a truncate cannot take bytes out of the middle. Every frame kept is
+        // copied as it was. A log that cannot be written again (a full disk) is read past its tear and left as it
+        // is; the next open tries again.
         let mut dropped = 0;
+        let mut dropped_ranges: Option<Vec<Value>> = None;
         if torn {
             match self.claim_locked(state, handle) {
                 Ok(()) => {
                     bytes = std::fs::read(&handle.transcript).unwrap_or_default();
                     decoded = decode_transcript(&bytes);
-                    dropped = bytes.len().saturating_sub(decoded.readable_bytes);
-                    if dropped > 0 {
-                        let cut = gated(|| {
-                            if let Ok(file) = std::fs::OpenOptions::new()
-                                .write(true)
-                                .open(&handle.transcript)
-                            {
-                                let _ = file.set_len(decoded.readable_bytes as u64);
-                            }
-                            Ok(())
+                    recovered = if bytes.len() > decoded.readable_bytes {
+                        recover_transcript(&bytes)
+                    } else {
+                        None
+                    };
+                    if let Some(recovery) = &recovered {
+                        let mut whole = Vec::with_capacity(bytes.len());
+                        for frame in &recovery.kept {
+                            whole.extend_from_slice(&bytes[frame.start..frame.end]);
+                        }
+                        // A process that began to end meanwhile replaces nothing and records nothing (#248).
+                        let replaced = gated(|| {
+                            crate::append::replace_whole(&handle.transcript, &whole)
+                                .map_err(|error| SessionError::io(&handle.transcript, error))
                         });
-                        // A process that began to end meanwhile cuts nothing and records nothing; it reads the
-                        // whole frames, as a reader without the lock does.
-                        if cut.is_err() {
-                            dropped = 0;
+                        if replaced.is_ok() {
+                            dropped = recovery
+                                .dropped
+                                .iter()
+                                .map(|range| range.end - range.start)
+                                .sum();
+                            dropped_ranges = Some(
+                                recovery
+                                    .dropped
+                                    .iter()
+                                    .map(|range| {
+                                        serde_json::json!({"offset": range.start, "length": range.end - range.start})
+                                    })
+                                    .collect(),
+                            );
+                        }
+                    } else {
+                        dropped = bytes.len().saturating_sub(decoded.readable_bytes);
+                        if dropped > 0 {
+                            let cut = gated(|| {
+                                if let Ok(file) = std::fs::OpenOptions::new()
+                                    .write(true)
+                                    .open(&handle.transcript)
+                                {
+                                    let _ = file.set_len(decoded.readable_bytes as u64);
+                                }
+                                Ok(())
+                            });
+                            // A process that began to end meanwhile cuts nothing and records nothing; it reads the
+                            // whole frames, as a reader without the lock does.
+                            if cut.is_err() {
+                                dropped = 0;
+                            }
                         }
                     }
                 }
@@ -1405,9 +1465,13 @@ impl SessionStore {
                 Err(error) => return Err(error),
             }
         }
+        let lines = match &recovered {
+            Some(recovery) => &recovery.lines,
+            None => &decoded.lines,
+        };
 
-        let mut events = Vec::with_capacity(decoded.lines.len());
-        for (index, line) in decoded.lines.iter().enumerate() {
+        let mut events = Vec::with_capacity(lines.len());
+        for (index, line) in lines.iter().enumerate() {
             match SessionEvent::from_line(line) {
                 Ok(event) => events.push(Arc::new(event)),
                 Err(error) => {
@@ -1420,22 +1484,43 @@ impl SessionStore {
             }
         }
         let framed = decoded.format == TranscriptFormat::ZstdFrames
-            || ((torn || decoded.lines.is_empty()) && is_framed(&handle.transcript));
+            || ((torn || lines.is_empty()) && is_framed(&handle.transcript));
         state.loaded.insert(
             handle.id.clone(),
             Loaded {
                 events: Arc::new(events),
                 framed,
+                poisoned: None,
             },
         );
         if dropped > 0 {
-            // The repair is recorded on the session rather than done silently.
-            self.append_locked(
-                state,
-                handle,
-                NewEvent::new("transcript/repaired").field("droppedBytes", dropped as u64),
-                AppendOptions::default(),
-            )?;
+            // The repair is recorded on the session rather than done silently, and a tear stepped over names the
+            // ranges it took out (offsets in the file as it was). A note the disk will not take does not fail the
+            // read: the repair is already on disk, and the next append says why it cannot be saved.
+            let mut note =
+                NewEvent::new("transcript/repaired").field("droppedBytes", dropped as u64);
+            if let Some(ranges) = dropped_ranges {
+                note = note.field("droppedRanges", Value::Array(ranges));
+            }
+            match self.append_locked(state, handle, note, AppendOptions::default()) {
+                Ok(_) => {}
+                Err(error @ SessionError::Unsaved { .. }) => {
+                    let line = format!(
+                        "heddle session: the repair of {} could not be recorded: {error}",
+                        handle.transcript
+                    );
+                    let warn = self
+                        .warn
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .clone();
+                    match warn {
+                        Some(warn) => warn(&line),
+                        None => eprintln!("{line}"),
+                    }
+                }
+                Err(error) => return Err(error),
+            }
         }
         Ok(())
     }

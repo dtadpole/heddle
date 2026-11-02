@@ -117,6 +117,13 @@ pub struct BudgetInput<'a> {
 /// or above the threshold is [`BudgetErrorCode::RetainNotBelowThreshold`].
 pub fn resolve_budget(input: &BudgetInput<'_>) -> Result<Budget, BudgetError> {
     let window = input.endpoint_window.or(input.config_window);
+    // A configured window that is no window is said as the window it is, before any ratio is taken of it (#212).
+    if input.endpoint_window.is_none() && window == Some(0) {
+        return Err(BudgetError {
+            code: BudgetErrorCode::NoCapacity,
+            message: "contextWindow (0) must be a positive integer".to_owned(),
+        });
+    }
     let Some(window) = window else {
         return Err(BudgetError {
             code: BudgetErrorCode::NoCapacity,
@@ -132,11 +139,11 @@ pub fn resolve_budget(input: &BudgetInput<'_>) -> Result<Budget, BudgetError> {
 
     // The first matching entry wins, and it names only what it changes: a field it leaves alone
     // keeps the configured value, even when the entry carries nothing for it.
-    let overridden = input
+    let override_at = input
         .policies
         .iter()
-        .find(|entry| input.endpoint == Some(entry.endpoint.as_str()))
-        .map(|entry| &entry.policy);
+        .position(|entry| input.endpoint == Some(entry.endpoint.as_str()));
+    let overridden = override_at.map(|at| &input.policies[at].policy);
     let configured = input.config_policy;
     let policy = BudgetPolicy {
         threshold_ratio: overridden
@@ -160,10 +167,48 @@ pub fn resolve_budget(input: &BudgetInput<'_>) -> Result<Budget, BudgetError> {
         .retain_tokens
         .unwrap_or_else(|| floor_ratio(window, policy.retain_ratio.unwrap_or(RETAIN_RATIO)));
     if retain_tokens >= threshold_tokens {
+        // Named by what was written (#212): the setting each side came from and the window it was taken of, in
+        // the words a Save of the same values is refused with (heddle-config `retain_not_below`); a field the
+        // matched policy wrote is named under its index, a field from the row or the default without one.
+        let at = override_at.map(|at| format!("policies[{at}]."));
+        let from = |set_by_policy: bool| match (&at, set_by_policy) {
+            (Some(at), true) => at.clone(),
+            _ => String::new(),
+        };
+        let threshold_from = from(overridden.is_some_and(|own| {
+            if policy.threshold_tokens.is_some() {
+                own.threshold_tokens.is_some()
+            } else {
+                own.threshold_ratio.is_some()
+            }
+        }));
+        let retain_from = from(overridden.is_some_and(|own| {
+            if policy.retain_tokens.is_some() {
+                own.retain_tokens.is_some()
+            } else {
+                own.retain_ratio.is_some()
+            }
+        }));
+        let window_name = match (input.endpoint_window, input.endpoint) {
+            (Some(_), Some(endpoint)) => format!("endpoint '{endpoint}' window"),
+            _ => "contextWindow".to_owned(),
+        };
+        let sentence = heddle_config::retain_not_below(&heddle_config::RetainNotBelow {
+            threshold_from: &threshold_from,
+            retain_from: &retain_from,
+            window_name: &window_name,
+            window: window as f64,
+            threshold_tokens: policy.threshold_tokens.map(|tokens| tokens as f64),
+            retain_tokens: policy.retain_tokens.map(|tokens| tokens as f64),
+            threshold_ratio: policy.threshold_ratio.unwrap_or(THRESHOLD_RATIO),
+            retain_ratio: policy.retain_ratio.unwrap_or(RETAIN_RATIO),
+            threshold: threshold_tokens as f64,
+            retain: retain_tokens as f64,
+        });
         return Err(BudgetError {
             code: BudgetErrorCode::RetainNotBelowThreshold,
             message: format!(
-                "retainTokens ({retain_tokens}) is not below thresholdTokens ({threshold_tokens}): the retained tail is at least the trigger, so compaction could never make progress"
+                "{sentence}: the retained tail would be at least the trigger, so compaction could never make progress"
             ),
         });
     }
@@ -354,8 +399,11 @@ mod tests {
         })
         .expect_err("a retained tail above the trigger cannot make progress");
         assert_eq!(error.code, BudgetErrorCode::RetainNotBelowThreshold);
-        assert!(error.message.contains("20"), "{}", error.message);
-        assert!(error.message.contains("10"), "{}", error.message);
+        // Named by what was written (#212): the two ratios, not token counts the reader never set.
+        assert_eq!(
+            error.message,
+            "retainRatio (0.2) must be less than the resolved thresholdRatio (0.1): the retained tail would be at least the trigger, so compaction could never make progress"
+        );
 
         let equal = resolve_budget(&BudgetInput {
             endpoint_window: Some(100),
@@ -368,5 +416,60 @@ mod tests {
         })
         .expect_err("a retained tail at the trigger cannot make progress");
         assert_eq!(equal.code, BudgetErrorCode::RetainNotBelowThreshold);
+
+        // A side in tokens against a ratio of the endpoint's own window, and a field the policy wrote under its index.
+        let tokens = resolve_budget(&BudgetInput {
+            endpoint: Some("small"),
+            endpoint_window: Some(1000),
+            config_policy: BudgetPolicy {
+                retain_tokens: Some(900),
+                ..BudgetPolicy::default()
+            },
+            ..BudgetInput::default()
+        })
+        .expect_err("a tail above the endpoint's trigger cannot make progress");
+        assert!(
+            tokens.message.starts_with(
+                "retainTokens (900) must be less than the threshold tokens (800 = thresholdRatio 0.8 of endpoint 'small' window 1000):"
+            ),
+            "{}",
+            tokens.message
+        );
+        let policies = [
+            EndpointPolicy {
+                endpoint: "other".into(),
+                policy: BudgetPolicy::default(),
+            },
+            EndpointPolicy {
+                endpoint: "small".into(),
+                policy: BudgetPolicy {
+                    threshold_tokens: Some(100),
+                    ..BudgetPolicy::default()
+                },
+            },
+        ];
+        let policy = resolve_budget(&BudgetInput {
+            endpoint: Some("small"),
+            config_window: Some(1000),
+            policies: &policies,
+            ..BudgetInput::default()
+        })
+        .expect_err("a policy's trigger below the tail cannot make progress");
+        assert!(
+            policy.message.starts_with(
+                "retainRatio (0.16) of contextWindow 1000 is 160 tokens, which must be less than policies[1].thresholdTokens (100):"
+            ),
+            "{}",
+            policy.message
+        );
+
+        // A configured window that is no window is said first, in the words a Save of it is refused with.
+        let zero = resolve_budget(&BudgetInput {
+            config_window: Some(0),
+            ..BudgetInput::default()
+        })
+        .expect_err("a zero window is refused");
+        assert_eq!(zero.code, BudgetErrorCode::NoCapacity);
+        assert_eq!(zero.message, "contextWindow (0) must be a positive integer");
     }
 }
