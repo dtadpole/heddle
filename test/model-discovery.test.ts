@@ -92,3 +92,31 @@ test('a failed discovery is retried on the next image turn rather than cached as
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('a model that declares its own input is believed without a list read: one endpoint, an image model beside a text one (#178)', async () => {
+  resetModelInfoCache()
+  const dir = mkdtempSync(join(tmpdir(), 'heddle-discovery-'))
+  const path = join(dir, 'shot.png')
+  writeFileSync(path, Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+  /** A provider whose list never answers: before #178 every image on this endpoint became the text-only placeholder. */
+  const provider = await flakyProvider({ data: [] }, Number.POSITIVE_INFINITY)
+  const ctx = new Context()
+  try {
+    const service = new ModelService(ctx, [{
+      name: 'mixed',
+      kind: 'openai-chat',
+      baseUrl: provider.baseUrl,
+      model: 'vis',
+      models: [{ id: 'vis', inputModalities: ['text', 'image'] }, { id: 'txt', inputModalities: ['text'] }],
+    }])
+    await service.generate({ endpoint: 'mixed', model: 'vis', messages: imageMessage(path) })
+    assert.match(provider.completions[0] ?? '', /"type":"image_url"/, 'the image model gets the image')
+    await service.generate({ endpoint: 'mixed', model: 'txt', messages: imageMessage(path) })
+    assert.match(provider.completions[1] ?? '', /accepts text only/, 'the text model gets the placeholder, as declared')
+    assert.equal(provider.modelHits(), 0, 'and neither asked the provider')
+  } finally {
+    await ctx.fiber.dispose()
+    await provider.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

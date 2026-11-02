@@ -146,6 +146,11 @@ pub struct ModelOption {
     /// This model's context window in tokens, when it differs from the endpoint's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
+    /// What this model accepts as input (#178), on the model because one route can serve an image-capable model
+    /// beside a text-only one, as DSH's catalogue declares image input per model. The model's own list wins over
+    /// the endpoint's; either wins over the provider's model list. The TypeScript `ModelOption.inputModalities`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_modalities: Option<Vec<String>>,
 }
 
 /// One entry of an endpoint's `models`: a bare id, or a full option. `["a"]` and `[{ id: a }]` mean the
@@ -323,6 +328,14 @@ impl EndpointConfig {
         self.model_option(model_id.or(self.model.as_deref()))
             .and_then(|model| model.context_window)
             .or(self.context_window)
+    }
+
+    /// What a model accepts as input (`inputModalitiesFor`, #178): its own declaration, else the endpoint's, else
+    /// `None` (the provider's model list is then asked). `None` for the id means the default model.
+    pub fn input_modalities_for(&self, model_id: Option<&str>) -> Option<Vec<String>> {
+        self.model_option(model_id.or(self.model.as_deref()))
+            .and_then(|model| model.input_modalities)
+            .or_else(|| self.input_modalities.clone())
     }
 
     /// The levels a model offers (`reasoningLevelsFor`): its own block, else the endpoint's, else none.
@@ -961,6 +974,42 @@ mod tests {
         )
         .unwrap();
         assert_eq!(blank.offered_models().len(), 1);
+    }
+
+    /// #178: one route serving an image model beside a text one declares each; the model's own list wins over
+    /// the endpoint's, and a model that declares nothing falls back to the endpoint's, else `None`.
+    #[test]
+    fn input_modalities_prefer_the_model_then_the_endpoint() {
+        let mixed: EndpointConfig = serde_json::from_value(json!({
+            "name": "e", "kind": "openai-chat", "baseUrl": "x", "model": "vis",
+            "models": [
+                { "id": "vis", "inputModalities": ["text", "image"] },
+                { "id": "txt", "inputModalities": ["text"] },
+                "plain"
+            ]
+        }))
+        .unwrap();
+        assert_eq!(
+            mixed.input_modalities_for(None),
+            Some(vec!["text".to_string(), "image".to_string()])
+        );
+        assert_eq!(
+            mixed.input_modalities_for(Some("txt")),
+            Some(vec!["text".to_string()])
+        );
+        assert_eq!(mixed.input_modalities_for(Some("plain")), None);
+        let declared = EndpointConfig {
+            input_modalities: Some(vec!["text".to_string()]),
+            ..mixed.clone()
+        };
+        assert_eq!(
+            declared.input_modalities_for(Some("plain")),
+            Some(vec!["text".to_string()])
+        );
+        assert_eq!(
+            declared.input_modalities_for(Some("vis")),
+            Some(vec!["text".to_string(), "image".to_string()])
+        );
     }
 
     #[test]

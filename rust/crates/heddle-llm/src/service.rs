@@ -447,7 +447,22 @@ impl ModelService {
                     .any(|part| matches!(part, ContentPart::Image(_)))
             });
             let endpoint = if carries_image {
-                let configured = resolved.endpoint();
+                // A declaration wins and asks nothing (#178): the model's own `inputModalities`, else the
+                // endpoint's, so an image never waits on, or is lost to, a slow provider list.
+                let declared = resolved
+                    .endpoint()
+                    .input_modalities_for(base.model.as_deref());
+                let pinned;
+                let configured = match declared {
+                    Some(list) if resolved.endpoint().input_modalities.as_ref() != Some(&list) => {
+                        pinned = EndpointConfig {
+                            input_modalities: Some(list),
+                            ..resolved.endpoint().clone()
+                        };
+                        &pinned
+                    }
+                    _ => resolved.endpoint(),
+                };
                 let discovered = if configured.input_modalities.is_some()
                     || matches!(configured.kind, heddle_config::EndpointKind::Scripted)
                 {

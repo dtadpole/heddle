@@ -274,6 +274,13 @@ export interface ModelOption {
    * moment, and too small for the large one, which compacts early for no reason.
    */
   readonly contextWindow?: number
+  /**
+   * What this model accepts as input (#178). On the model rather than only on the endpoint because one route can
+   * serve an image-capable model beside a text-only one (deepseek-flash and deepseek-v4-pro), as DSH's catalogue
+   * declares image input per model. The model's own list wins over the endpoint's, and either wins over the
+   * provider's model list, which is read only when neither declares.
+   */
+  readonly inputModalities?: readonly ('text' | 'image')[]
 }
 
 /**
@@ -429,6 +436,14 @@ export function modelOptionOf(endpoint: EndpointConfig, modelId: string | undefi
  */
 export function contextWindowFor(endpoint: EndpointConfig, modelId?: string): number | undefined {
   return modelOptionOf(endpoint, modelId ?? endpoint.model)?.contextWindow ?? endpoint.contextWindow
+}
+
+/**
+ * What a model accepts as input (#178): its own declaration, else the endpoint's, else undefined (the provider's model
+ * list is then asked). `modelId` absent means the endpoint's default model, as `contextWindowFor` reads it.
+ */
+export function inputModalitiesFor(endpoint: EndpointConfig, modelId?: string): readonly ('text' | 'image')[] | undefined {
+  return modelOptionOf(endpoint, modelId ?? endpoint.model)?.inputModalities ?? endpoint.inputModalities
 }
 
 /**

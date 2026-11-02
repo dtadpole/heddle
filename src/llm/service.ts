@@ -5,7 +5,7 @@ import { selectionProblem } from '../endpoints.ts'
 import { adapterFor } from './adapters.ts'
 import { projectAttachments } from './attachments.ts'
 import { inputModalitiesFromModelList, type InputModality } from './model-info.ts'
-import { ModelError, reasoningLevelsFor, requestMessages, textOf, type Adapter, type Chunk, type EndpointConfig, type GenerateRequest, type Message } from './types.ts'
+import { inputModalitiesFor, ModelError, reasoningLevelsFor, requestMessages, textOf, type Adapter, type Chunk, type EndpointConfig, type GenerateRequest, type Message } from './types.ts'
 
 export * from './types.ts'
 
@@ -113,7 +113,14 @@ export class ModelService extends Service {
    * provider outage degrades an image to the text placeholder rather than failing the turn.
    */
   private endpointWithModalities(endpoint: EndpointConfig, model?: string): Promise<EndpointConfig> {
-    if (endpoint.inputModalities !== undefined || endpoint.kind === 'scripted') return Promise.resolve(endpoint)
+    /**
+     * A declaration wins and asks nothing (#178): the model's own `inputModalities`, else the endpoint's. An image then
+     * never waits on, or is lost to, a slow provider list; a route serving an image-capable model beside a text-only one
+     * declares each.
+     */
+    const declared = inputModalitiesFor(endpoint, model)
+    if (declared !== undefined) return Promise.resolve(declared === endpoint.inputModalities ? endpoint : { ...endpoint, inputModalities: declared })
+    if (endpoint.kind === 'scripted') return Promise.resolve(endpoint)
     /**
      * Cached per endpoint **and model**, because the answer is a fact about one model: a gateway can serve an
      * image-capable deployment beside a text-only one, and one cache entry for the endpoint would answer the
