@@ -45,7 +45,7 @@ import { handleScheduleRoute } from '../schedule/http.ts'
 import type { ScheduleService } from '../schedule/service.ts'
 import { handleJobsRoute } from '../jobs/http.ts'
 import { handleQueueRoute, holdQueue, installQueue, queueRequest, releaseQueue } from './queue.ts'
-import { pendingInbox } from '../session/inbox.ts'
+import { pendingInbox, queuedByRequest } from '../session/inbox.ts'
 import type { JobRegistry } from '../jobs/registry.ts'
 import {
   COOKIE_MAX_AGE,
@@ -3140,7 +3140,11 @@ export function unknownTurnSession(
    * A queued send to an archived session is refused as any turn into it is, before anything reaches its log (developer-
    * three's review); the archived gate inside the turn would otherwise splice the row into a log that runs nothing.
    */
-  if (body.queue === true && record?.archived === true) {
+  const queueRequestId = typeof body.requestId === 'string' && body.requestId.length > 0 ? body.requestId : undefined
+  // A request the host already took is answered with its row whatever happened since (developer-twelve's review): a
+  // retry after an archive must not read as a refusal of a message that is queued, or already ran.
+  const alreadyQueued = body.queue === true && queueRequestId !== undefined && queuedByRequest(ctx.session.store, handle, queueRequestId) !== undefined
+  if (body.queue === true && record?.archived === true && !alreadyQueued) {
     respond(response, 409, 'application/json', `${JSON.stringify({ error: `session ${handle.id} is archived`, code: 'session/archived' })}\n`)
     return
   }
@@ -3154,16 +3158,16 @@ export function unknownTurnSession(
    * A prompt the page queued (`queue: true`) for a session that is busy, or already has prompts waiting, goes into the
    * session's durable next-turn queue and is answered at once (#162): DSH queues it on the host, so a reload, another tab
    * and another device see it, and the host runs it when the running turn ends. A retry with the same `requestId`
-   * answers the row it queued. On a free session it runs now, as any turn does.
+   * answers the row it queued, saying whether it still waits (`pending`) or its turn already took it. On a free session
+   * the row is queued too, and the drain runs it at once.
    */
   if (body.queue === true || (body.detach === true && pendingInbox(ctx.session.store, handle)['next-turn'].length > 0)) {
-    const requestId = typeof body.requestId === 'string' && body.requestId.length > 0 ? body.requestId : undefined
-    const queued = queueRequest(ctx, handle, [{ type: 'text', text: body.prompt }, ...attachments], requestId)
+    const queued = queueRequest(ctx, handle, [{ type: 'text', text: body.prompt }, ...attachments], queueRequestId)
     respond(
       response,
       202,
       'application/json',
-      `${JSON.stringify({ session: handle.id, queued: true, id: queued.item.id, ...(queued.item.requestId !== undefined ? { requestId: queued.item.requestId } : {}), duplicate: queued.duplicate })}\n`,
+      `${JSON.stringify({ session: handle.id, queued: true, id: queued.item.id, ...(queued.item.requestId !== undefined ? { requestId: queued.item.requestId } : {}), duplicate: queued.duplicate, pending: queued.pending })}\n`,
     )
     return
   }

@@ -76,18 +76,24 @@ export function queueRequest(
   handle: SessionHandle,
   content: readonly ContentPart[],
   requestId: string | undefined,
-): { readonly item: QueueItem; readonly duplicate: boolean } {
+): { readonly item: QueueItem; readonly duplicate: boolean; readonly pending: boolean } {
   const store = ctx.session.store
   if (requestId !== undefined) {
-    // Claimed or not: a retry of a request the host already took is answered with that row, never a second one.
+    /**
+     * Claimed or not: a retry of a request the host already took is answered with that row, never a second one, and
+     * says whether the row still waits or its turn has taken it, so a page that lost the first answer can settle it.
+     */
     const already = queuedByRequest(store, handle, requestId)
-    if (already !== undefined) return { item: itemOf(already), duplicate: true }
+    if (already !== undefined) {
+      const pending = pendingInbox(store, handle)['next-turn'].some((message) => message.id === already.id)
+      return { item: itemOf(already), duplicate: true, pending }
+    }
   }
   const message = queueTurn(store, handle, content, undefined, requestId !== undefined ? { requestId } : {})
   // A new send is the person acting again: a queue held by their Stop may drain once the session is free.
   held.get(ctx)?.delete(handle.id)
   kick(ctx, handle.id)
-  return { item: itemOf(message), duplicate: false }
+  return { item: itemOf(message), duplicate: false, pending: true }
 }
 
 /** Read a JSON body; answers `undefined` (and the 400) when it is not an object. */
