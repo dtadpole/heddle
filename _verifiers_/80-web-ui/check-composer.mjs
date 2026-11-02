@@ -1719,6 +1719,14 @@ test('a queued message keeps its image through an edit and reaches the provider'
       assert.fail(`the queued row shows the image thumbnail (${dump})`)
     }
     assert.ok(queuedShown, 'the queued row shows the image thumbnail')
+    /**
+     * The row is the host's (#162): it shows `Sending…`, with its actions disabled as DSH's pending submission row has
+     * them, until the host accepts it. The edit is made once it has.
+     */
+    assert.ok(
+      await browser.waitFor(`[...document.querySelectorAll('#queue .row')].some((row) => row.dataset.status === 'pending')`, 10_000),
+      'the host accepted the queued row',
+    )
 
     const rows = await browser.evaluate(`JSON.stringify([...document.querySelectorAll('.row')].map((row) => ({
       status: row.dataset.status,
