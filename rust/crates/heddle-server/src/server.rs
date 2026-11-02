@@ -2473,11 +2473,7 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
     let recorded = session_request_selection(meta.as_ref());
     // A subagent's session (a teammate's) runs on its delegation's selection, never on one a page sends with a turn
     // (issue #175): recording it would re-route the child (web.ts does the same).
-    let delegated = meta
-        .as_ref()
-        .and_then(|meta| meta.rest.get("origin"))
-        .and_then(Value::as_str)
-        == Some("subagent");
+    let delegated = is_subagent_session(meta.as_ref());
     let Some(selection) = turn_selection(
         requested_endpoint.filter(|_| !delegated),
         requested_model.filter(|_| !delegated),
