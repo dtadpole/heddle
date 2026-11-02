@@ -1,6 +1,6 @@
 ---
 title: Verifier 4 — Pluggable Tools
-version: 1.8.0
+version: 1.9.0
 description: tools are configurable and pluggable.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-11, listing the ten verifiers
@@ -43,7 +43,12 @@ line alike (live-testing issue #246: both builds glued the streams, `printf out;
 build shares: case and accents sort with their letters, punctuation and digits before letters in ICU's order, and
 names that collate equal in byte order (live-testing issue #247: the Rust build sorted by bytes). Its expected orders
 are English collation; under a Node that resolves another locale it reports itself unjudged.
-Those six share `fs-tool-turn.mjs`, which is not a check: it writes a self-contained profile that allows the one tool
+`check-read-window.mjs` holds `read_file`'s line window to DSH's read (`dsh-tool-fs`): a 1-based `offset` and a
+`limit` answered with DSH's numbered envelope and a footer naming the offset to continue from or the end of the file,
+FS_NOT_FOUND for an offset past the end, DSH's sentence for a limit over 2000, and a file over one default window
+(2000 lines or 50 KB) no longer returned whole; a small file read without a window still reads as its exact text, the
+stated difference (live-testing issue #263: the tool took only a path).
+Those seven share `fs-tool-turn.mjs`, which is not a check: it writes a self-contained profile that allows the one tool
 under test and runs one scripted turn that calls it once, returning the tool results and what the disk holds afterwards.
 `check-utf8-chunks.mjs` holds bash output to whole characters when a UTF-8 sequence arrives split across chunks
 (live-testing issue #96: the TypeScript build decoded each chunk alone).

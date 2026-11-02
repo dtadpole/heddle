@@ -1,8 +1,8 @@
 ---
 title: The heddle-tools crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-11-02T00:10:00Z
-version: 0.6.6
+modified: 2026-11-02T05:30:00Z
+version: 0.6.7
 description: The Rust port crate for the tool registry, the built-in tools, and outside tools as processes — its public API, what it asks of other crates, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -54,6 +54,11 @@ classifies a missing target as `FS_NOT_FOUND`, a file as `FS_NOT_DIRECTORY`, a f
 A listing is in DSH's order, `localeCompare`: ICU root collation through `icu_collator` (Unicode-3.0, compiled data,
 built once) with Node's English options, ties in byte order (issue #247). Stated difference: the Rust build always uses
 root collation, where Node follows the process locale (`LANG`); under an English locale they agree.
+`read_file` takes DSH's line window, `offset` (1-based) and `limit` (at most 2000), and answers with DSH's numbered
+envelope and the offset to continue from (`read_window`, `format_read_window`; issue #263); an offset past the end is
+`FS_NOT_FOUND`. A file over one default window (over 2000 lines or 50 KB) read without a window gets
+the envelope too. Stated difference: a small file read without a window comes back as its exact text, where DSH
+numbers every read.
 `bash` answers with stdout, then stderr under a `[stderr]` line, with a newline before it when stdout does not end in
 one (`marked_streams`, as DSH's renderResult; issue #246); the marked text is what the output limit cuts.
 

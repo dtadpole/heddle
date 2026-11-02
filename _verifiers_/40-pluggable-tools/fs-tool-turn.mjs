@@ -1,5 +1,5 @@
 // Shared by this part's one-call tool checks (check-list-errors, check-list-links, check-list-order, check-read-errors,
-// check-write-errors and check-bash-streams): a self-contained profile that allows one built-in tool with the sandbox open and approvals on
+// check-read-window, check-write-errors and check-bash-streams): a self-contained profile that allows one built-in tool with the sandbox open and approvals on
 // allow, and one scripted turn whose model calls that tool once. It is not a check itself; verify.sh runs check*.mjs.
 import assert from 'node:assert/strict'
 import { mkdirSync, writeFileSync } from 'node:fs'
