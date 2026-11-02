@@ -57,6 +57,10 @@ fn configured_tree(args: &Args, invocation: &Invocation, out: &mut Output<'_>) -
 }
 
 fn print_configured_tree(boot: &Boot, out: &mut Output<'_>) -> Exit {
+    // A failed row's own reason first, before a pending refusal that names only the rows waiting on it (#213).
+    for line in crate::boot::failure_lines(boot) {
+        out.err(&format!("{line}\n"));
+    }
     let pending = crate::boot::settle(boot);
     if !pending.is_empty() {
         out.out(&format!(
@@ -68,9 +72,6 @@ fn print_configured_tree(boot: &Boot, out: &mut Output<'_>) -> Exit {
     }
     if let Some(tools) = boot.services.tools() {
         tools.filter_to(&tools.allow_list());
-    }
-    for line in crate::boot::failure_lines(boot) {
-        out.err(&format!("{line}\n"));
     }
     let mut problems: Vec<String> = crate::boot::failed_entries(boot)
         .into_iter()
@@ -320,6 +321,10 @@ pub fn turn(args: &Args, invocation: &Invocation, out: &mut Output<'_>) -> Exit 
 }
 
 fn turn_on(args: &Args, invocation: &Invocation, boot: &Boot, out: &mut Output<'_>) -> Exit {
+    // A failed row's own reason first, before a pending refusal that names only the rows waiting on it (#213).
+    for line in crate::boot::failure_lines(boot) {
+        out.err(&format!("{line}\n"));
+    }
     let pending = crate::boot::settle(boot);
     if !pending.is_empty() {
         out.out(&format!(
@@ -360,9 +365,6 @@ fn turn_on(args: &Args, invocation: &Invocation, boot: &Boot, out: &mut Output<'
             let _ = workspace.ensure_owner(folder);
         }
     };
-    for line in crate::boot::failure_lines(boot) {
-        out.err(&format!("{line}\n"));
-    }
     let failed_rows = crate::boot::failed_entries(boot)
         .into_iter()
         .map(|(id, name)| format!("row '{id}' ({name}) failed to load"))

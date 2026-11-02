@@ -188,6 +188,12 @@ pub fn asset_roots(anchor: &std::path::Path, cwd: &std::path::Path) -> Vec<PathB
 
 /// `heddle web`.
 pub fn web(args: &Args, invocation: &Invocation, boot: Boot, out: &mut Output<'_>) -> Exit {
+    // What each failed row said comes first, pending or not (#213): a row that failed at start (a key file that is
+    // missing, a value its schema refuses) leaves the rows that wait on it pending, and the refusal below names only
+    // those. The TypeScript loader logs the failed row's own error before its pending line the same way.
+    for line in crate::boot::failure_lines(&boot) {
+        out.err(&format!("{line}\n"));
+    }
     let pending = crate::boot::settle(&boot);
     if !pending.is_empty() {
         boot.dispose();
@@ -2084,6 +2090,49 @@ mod tests {
         assert_eq!(
             captured.stderr_text(),
             "heddle: 1 entr(y/ies) are still pending: announce\n"
+        );
+    }
+
+    /// #213: a row that failed at start is named with its own reason before the refusal that names the rows waiting
+    /// on it. Before, the server exited printing only the pending line (a missing key file, J225).
+    #[test]
+    fn a_failed_row_says_why_before_the_pending_refusal() {
+        let mut boot = empty_boot();
+        boot.entries.push(crate::boot::Entry {
+            id: "model".to_owned(),
+            name: "./src/plugins/model.ts".to_owned(),
+            component: crate::builtins::ComponentRef::Unresolved("model".to_owned()),
+            requires: Vec::new(),
+            state: crate::boot::FiberState::Failed,
+            error: Some("could not read the key file '/k/missing.key': not found".to_owned()),
+        });
+        boot.entries.push(crate::boot::Entry {
+            id: "context".to_owned(),
+            name: "./src/context/service.ts".to_owned(),
+            component: crate::builtins::ComponentRef::Unresolved("context".to_owned()),
+            requires: vec!["model".to_owned()],
+            state: crate::boot::FiberState::Pending,
+            error: None,
+        });
+        let mut captured = crate::output::Captured::default();
+        let invocation = Invocation {
+            argv: Vec::new(),
+            env: heddle_config::Env::default(),
+            cwd: PathBuf::from("/repo"),
+        };
+        let argv: Vec<String> = ["web", "--dry-run"]
+            .iter()
+            .map(|w| (*w).to_owned())
+            .collect();
+        let args = crate::cli::parse_args(&argv).expect("parses");
+        let exit = {
+            let mut out = captured.output();
+            web(&args, &invocation, boot, &mut out)
+        };
+        assert_eq!(exit, Exit::Failure);
+        assert_eq!(
+            captured.stderr_text(),
+            "model: could not read the key file '/k/missing.key': not found\nheddle: 1 entr(y/ies) are still pending: context\n"
         );
     }
 
