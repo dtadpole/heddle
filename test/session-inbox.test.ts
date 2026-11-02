@@ -11,7 +11,7 @@ import { ApprovalService } from '../src/approvals/service.ts'
 import { ContextService } from '../src/context/service.ts'
 import { ModelService } from '../src/llm/service.ts'
 import { SandboxService } from '../src/sandbox/service.ts'
-import { claimNextStep, foldInbox, INBOX_SPLICED, pendingInbox, queueSteer } from '../src/session/inbox.ts'
+import { claimNextStep, claimNextTurn, foldInbox, INBOX_SPLICED, pendingInbox, queuedByRequest, queueSteer, queueTurn, removeQueued, replaceQueued } from '../src/session/inbox.ts'
 import { SessionService } from '../src/session/service.ts'
 import type { SessionEvent, SessionHandle } from '../src/session/store.ts'
 import { ToolRegistry } from '../src/tools/service.ts'
@@ -184,4 +184,34 @@ test('a claim records the removal first and writes each message in order, and cl
   assert.equal(events[0]?.outcome, undefined, 'a claim delivers, it does not cancel')
   assert.deepEqual(events.slice(1).map((event) => event.type), ['message', 'message'])
   assert.deepEqual(pendingInbox(sessions.store, session)['next-step'], [])
+})
+
+/** Issue #162: the next-turn queue a page keeps on the host - a row by request, removed (canceled), rewritten, claimed. */
+test('the next-turn queue finds a row by request, removes it as canceled, rewrites it in place and claims the first', () => {
+  const ctx = new Context()
+  const sessions = new SessionService(ctx, { root: join(scratch, 'queue-sessions') })
+  const session = sessions.start({ cwd: scratch })
+  const store = sessions.store
+  const a = queueTurn(store, session, [{ type: 'text', text: 'a' }], undefined, { requestId: 'request-a' })
+  const b = queueTurn(store, session, [{ type: 'text', text: 'b' }], undefined, { requestId: 'request-b' })
+  const c = queueTurn(store, session, [{ type: 'text', text: 'c' }])
+  assert.equal(queuedByRequest(store, session, 'request-b')?.id, b.id)
+  assert.equal(queuedByRequest(store, session, 'request-z'), undefined)
+  assert.equal(removeQueued(store, session, b.id), true)
+  assert.equal(store.read(session).at(-1)?.outcome, 'canceled', 'a removal is recorded as input dropped unrun')
+  assert.equal(removeQueued(store, session, b.id), false, 'a row no longer queued is not removed twice')
+  assert.equal(replaceQueued(store, session, c.id, [{ type: 'text', text: 'c2' }]), true)
+  assert.deepEqual(
+    pendingInbox(store, session)['next-turn'].map((row) => [row.id, (row.content[0] as { text?: string }).text, row.requestId]),
+    [
+      [a.id, 'a', 'request-a'],
+      [c.id, 'c2', undefined],
+    ],
+  )
+  const claimed = claimNextTurn(store, session)
+  assert.equal(claimed?.id, a.id)
+  assert.equal(store.read(session).at(-1)?.outcome, undefined, 'a claim delivers, it does not cancel')
+  assert.deepEqual(pendingInbox(store, session)['next-turn'].map((row) => row.id), [c.id])
+  claimNextTurn(store, session)
+  assert.equal(claimNextTurn(store, session), undefined, 'nothing left to claim')
 })
