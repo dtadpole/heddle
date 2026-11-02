@@ -68,6 +68,16 @@ pub mod events {
     pub const TURN_FAILED: &str = "turn/failed";
 }
 
+/// The notice of a turn a step's output limit ended (#208): DSH's `turn-max-tokens` title and hint (dsh-client-ui-chat),
+/// as one `ended` reason, which the page draws capitalised. The TypeScript `MAX_TOKENS_NOTICE`, the same bytes.
+pub const MAX_TOKENS_NOTICE: &str = "output token limit reached. The reply was cut off; earlier output is preserved in the conversation. Send \"continue\" to let the model resume.";
+
+/// The code of a call of a step cut at its output limit, answered as not run (#208).
+pub const MAX_TOKENS_CODE: &str = "MAX_TOKENS";
+
+/// What such a call is answered with (#208); the TypeScript `MAX_TOKENS_NOT_RUN`.
+pub const MAX_TOKENS_NOT_RUN: &str = "the step was cut at the output token limit before the model finished it, so this call was not run";
+
 /// Why a turn the archived-session gate rejected ended, in the loop's words (`ended`); the TypeScript
 /// `ARCHIVED_BLOCKED`.
 pub const ARCHIVED_BLOCKED: &str =
@@ -662,6 +672,8 @@ async fn run_turn_body(
     let mut text = String::new();
     let mut reasoning = String::new();
     let mut finish_reason = "unknown".to_owned();
+    // Whether a step of this turn was cut at the output limit (#208): the turn keeps that end, as DSH's does.
+    let mut cut_at_limit = false;
     let mut usage: Option<TokenUsage> = None;
     let mut rounds = 0u32;
     let mut last_context: Option<ContextSummary> = None;
@@ -855,7 +867,13 @@ async fn run_turn_body(
                                 usage = merge_usage(usage, *reported);
                                 // Only an abnormal finish is a stop reason worth a notice: `stop` ends the
                                 // answer normally and `tool_calls` asks for the next round by design.
-                                if is_abnormal_finish(finished) {
+                                if finished == "max_output_tokens" {
+                                    // DSH's own notice for a cut turn, once per turn (#208).
+                                    cut_at_limit = true;
+                                    if !ended.iter().any(|reason| reason == MAX_TOKENS_NOTICE) {
+                                        ended.push(MAX_TOKENS_NOTICE.to_owned());
+                                    }
+                                } else if is_abnormal_finish(finished) {
                                     ended.push(format!("round {}: {finished}", round + 1));
                                 }
                             }
@@ -1032,6 +1050,40 @@ async fn run_turn_body(
         //
         // Every call the model asked for is answered in the log, even one that cannot run: a call without an
         // answer breaks every later request. A call a stop overtook before it started is answered as interrupted.
+        // A step the provider cut at its output limit runs none of its calls, and the turn ends there (#208): DSH's
+        // `dsh-agent-loop` `step()` returns `max-tokens` before `executeToolCalls`. A call in a cut step may be only
+        // what the model finished writing, so running it acts on a plan it never completed. Each call is still
+        // answered in the log, as not run. A step taken while next-step input waits goes on to answer it.
+        if finish_reason == "max_output_tokens" {
+            for (id, name, arguments) in calls {
+                let result = ToolResult::refused(MAX_TOKENS_CODE, MAX_TOKENS_NOT_RUN);
+                denials.push(Denial {
+                    tool: name.clone(),
+                    code: MAX_TOKENS_CODE.to_owned(),
+                    message: MAX_TOKENS_NOT_RUN.to_owned(),
+                });
+                progress.denials = denials.len();
+                let mut answer = Message::new(
+                    Role::Tool,
+                    vec![ContentPart::text(tool_message_text(&result))],
+                );
+                answer.tool_call_id = Some(id);
+                tool_calls.push(ToolCallRecord {
+                    name,
+                    arguments,
+                    result,
+                });
+                runtime.session.message(session, answer)?;
+            }
+            if !has_new_input(
+                &input_before,
+                &user_input_seqs(runtime.session.as_ref(), session),
+            ) && !runtime.session.has_pending_input(session)
+            {
+                break;
+            }
+            continue;
+        }
         let limit = runtime.tools.max_parallel_tool_calls().max(1);
         let safe = |name: &str| limit > 1 && runtime.tools.is_concurrency_safe(name);
         let run_call = |name: String, arguments: String| {
@@ -1125,6 +1177,13 @@ async fn run_turn_body(
     }
     if rounds >= max_rounds {
         ended.push(format!("stopped after the round limit of {max_rounds}"));
+    }
+    // A cut step's end outlasts a later normal step taken for pending input, as DSH's `max-tokens` turn end does
+    // (#208). The precedence is DSH's (dsh-agent-loop `run`): a later step the archived gate rejected ends the turn
+    // blocked whatever came before (its preStep reject sets turnEnds before the sticky max-tokens rule), and a stop
+    // keeps its own end. So: blocked, then stopped, then a cut, then the last step's finish.
+    if cut_at_limit && !stopped() && !blocked {
+        "max_output_tokens".clone_into(&mut finish_reason);
     }
 
     let mut completed = serde_json::Map::from_iter([
@@ -2592,6 +2651,105 @@ pub(crate) mod tests {
         assert!(requests[1].messages.iter().any(|message| {
             message.content.iter().any(|part| matches!(part, ContentPart::Text { text } if text == "error (TOOL_FAILED): boom"))
         }));
+    }
+
+    /// #208: a step the provider cut at its output limit runs none of its calls, and the turn ends there as max-tokens,
+    /// as DSH's `step()` returns `max-tokens` before `executeToolCalls`. Each call is still answered, as not run.
+    #[tokio::test]
+    async fn a_call_in_a_step_cut_at_the_output_limit_is_not_run_and_the_turn_ends_as_max_tokens() {
+        let session = RecordingSession::new();
+        let ran = Arc::new(Mutex::new(0usize));
+        let counting = {
+            let ran = Arc::clone(&ran);
+            tool_fn(
+                ToolSpec {
+                    name: "note_tool".into(),
+                    description: "the note tool".into(),
+                    parameters: serde_json::json!({}),
+                },
+                move |_args, _ctx| {
+                    *ran.lock().unwrap() += 1;
+                    Box::pin(async move { Ok(ToolResult::ok("TOOLRAN-208")) })
+                },
+            )
+        };
+        let model = ScriptedModel::new(vec![
+            Step::Chunks(vec![
+                Chunk::TextDelta {
+                    text: "Writing it now.".into(),
+                },
+                call_chunk("c1", "note_tool", serde_json::json!({})),
+                done("max_output_tokens"),
+            ]),
+            Step::Chunks(vec![
+                Chunk::TextDelta {
+                    text: "a second round that must not happen".into(),
+                },
+                done("stop"),
+            ]),
+        ]);
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            registry_with(vec![counting]),
+            Arc::new(crate::ports::NoTurnHooks),
+        );
+        let result = run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "write the file"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(*ran.lock().unwrap(), 0, "the call never runs");
+        assert_eq!(model.requests().len(), 1, "and there is no second round");
+        assert_eq!(result.finish_reason, "max_output_tokens");
+        assert_eq!(result.denials.len(), 1);
+        assert_eq!(result.denials[0].code, MAX_TOKENS_CODE);
+        let answers: Vec<Message> = session
+            .messages()
+            .into_iter()
+            .filter(|message| message.role == Role::Tool)
+            .collect();
+        assert_eq!(answers.len(), 1, "the call is still answered in the log");
+        assert_eq!(answers[0].tool_call_id.as_deref(), Some("c1"));
+        assert!(answers[0].content.iter().any(|part| matches!(part, ContentPart::Text { text } if text == &format!("error (MAX_TOKENS): {MAX_TOKENS_NOT_RUN}"))));
+        let completed = session.event("assistant/completed").unwrap();
+        assert_eq!(completed.fields["finishReason"], "max_output_tokens");
+        assert_eq!(
+            completed.fields["ended"],
+            serde_json::json!([MAX_TOKENS_NOTICE])
+        );
+    }
+
+    /// #208: a cut answer with no calls keeps its text and ends with the same single notice.
+    #[tokio::test]
+    async fn a_cut_answer_with_no_calls_keeps_its_text_and_says_the_limit_was_reached() {
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![Step::Chunks(vec![
+            Chunk::TextDelta {
+                text: "Here is part one, and the".into(),
+            },
+            done("max_output_tokens"),
+        ])]);
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            registry_with(vec![]),
+            Arc::new(crate::ports::NoTurnHooks),
+        );
+        let result = run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "go"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.text, "Here is part one, and the");
+        assert_eq!(result.finish_reason, "max_output_tokens");
+        let completed = session.event("assistant/completed").unwrap();
+        assert_eq!(
+            completed.fields["ended"],
+            serde_json::json!([MAX_TOKENS_NOTICE])
+        );
     }
 
     #[tokio::test]
@@ -4367,6 +4525,88 @@ pub(crate) mod tests {
             forked.text, "ran",
             "a fork of an archived session is an independent conversation"
         );
+    }
+
+    /// #208, developer-five's precedence: a step cut at its output limit, a steer sent during it, and the session
+    /// archived before the next step. The archived gate's reject wins over the cut's max-tokens end, as DSH's preStep
+    /// reject sets the turn's end before the sticky max-tokens rule; the cut call is still answered as not run.
+    #[tokio::test]
+    async fn a_cut_step_then_an_archived_next_step_ends_the_turn_blocked_not_max_tokens() {
+        struct SteerAndArchive {
+            sessions: Arc<heddle_session::SessionService>,
+            handle: SessionHandle,
+            done: std::sync::atomic::AtomicBool,
+        }
+        impl heddle_llm::ModelHooks for SteerAndArchive {
+            fn request(
+                &self,
+                _service: &heddle_llm::ModelService,
+                _request: &heddle_llm::GenerateRequest,
+                next: &mut dyn FnMut()
+                    -> Result<heddle_llm::GenerateRequest, heddle_llm::ModelError>,
+            ) -> Result<heddle_llm::GenerateRequest, heddle_llm::ModelError> {
+                if !self.done.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    heddle_session::inbox::queue_steer(
+                        self.sessions.store(),
+                        &self.handle,
+                        vec![ContentPart::text("and one more thing")],
+                        None,
+                    )
+                    .unwrap();
+                    set_archived(&self.sessions, &self.handle.id, true);
+                }
+                next()
+            }
+        }
+        let (sessions, _sessions_dir) = crate::adapters::tests::sessions_at("cut-then-archive");
+        let handle = sessions
+            .store()
+            .create(heddle_session::CreateOptions::default())
+            .unwrap();
+        let (models, _scripted) = crate::adapters::tests::scripted_service(
+            "cut",
+            serde_json::json!([
+                { "toolCall": { "name": "note_tool", "arguments": {} }, "finishReason": "max_output_tokens" },
+                { "text": "never asked" }
+            ]),
+        );
+        models.add_hooks(Arc::new(SteerAndArchive {
+            sessions: Arc::clone(&sessions),
+            handle: handle.clone(),
+            done: std::sync::atomic::AtomicBool::new(false),
+        }));
+        let runtime = AgentRuntime {
+            model: Arc::new(crate::adapters::LlmModel::new(models)),
+            session: Arc::new(crate::adapters::Sessions::new(Arc::clone(&sessions))),
+            context: Arc::new(crate::adapters::tests::SessionMessages {
+                sessions: Arc::clone(&sessions),
+            }),
+            tools: registry_with(vec![answering_tool("note_tool", "TOOLRAN-208")]),
+            hooks: Arc::new(crate::ports::NoTurnHooks),
+            turns: Some(TurnRegistry::new()),
+            presets: None,
+        };
+        let mut options = RunTurnOptions::new(handle.clone(), "scripted", "write the file");
+        options.max_rounds = RoundLimit::Rounds(4);
+        let result = run_turn(&runtime, options).await.unwrap();
+        assert_eq!(count_of(&sessions, &handle, "model/request"), 1);
+        assert_eq!(result.finish_reason, "blocked", "{:?}", result.ended);
+        assert!(
+            result.ended.contains(&BLOCKED.to_owned()),
+            "{:?}",
+            result.ended
+        );
+        assert!(
+            result.ended.contains(&MAX_TOKENS_NOTICE.to_owned()),
+            "{:?}",
+            result.ended
+        );
+        assert_eq!(
+            result.denials.len(),
+            1,
+            "the cut call is answered as not run"
+        );
+        assert_eq!(result.denials[0].code, MAX_TOKENS_CODE);
     }
 
     #[tokio::test]
