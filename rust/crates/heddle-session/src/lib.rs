@@ -55,6 +55,10 @@ pub mod unicode61;
 /// DSH's title cleaning, reached by its path (`heddle_session::title_text`), not re-exported at the root.
 pub mod title_text;
 
+/// The session writer lock's protocol, shared with the TypeScript build (#202), reached by its path
+/// (`heddle_session::writer_lock`), not re-exported at the root.
+pub mod writer_lock;
+
 pub use activity::{
     ActivityEntry, ActivityItem, LineageMeta, RowActivity, activity_sessions, refusal_sentence,
     session_activity,
@@ -79,7 +83,10 @@ pub use meta::{
     under_archived_session,
 };
 pub use mode::{MODE_EVENT, effective_mode, inherit_recorded_mode, recorded_mode};
-pub use repair::{CloserCause, INTERRUPTED_RESULT, interrupted_turn_closers, open_turn_closers};
+pub use repair::{
+    COMPACTION_CANCELLED, CloserCause, INTERRUPTED_RESULT, interrupted_turn_closers,
+    open_turn_closers,
+};
 pub use search::{
     SESSION_SEARCH_QUERY_MAX_CHARS, SESSION_SEARCH_RESULT_LIMIT,
     SESSION_SEARCH_SNIPPET_MAX_CODE_POINTS, SessionSearchHit, SessionSearchIndex,

@@ -10,10 +10,11 @@
 //! - **A process that has opened a session reads it from memory.** The file is decoded once; every
 //!   later read, count and derivation is served from that fold, and the surface is cached by event count.
 //! - **One process writes a session at a time.** The first append takes a writer lock beside the log
-//!   ([`lock_path`]: `<id>.lock`, or `session.lock` in an old-layout directory, holding the holder's pid and
-//!   a newline — the TypeScript build's file, byte for byte) and keeps it until [`SessionStore::release`] or
-//!   the store is dropped. Another process's append is refused with [`SessionError::AlreadyOwned`], DSH's
-//!   `session "<id>" is already owned by an active write handle`; a lock whose holder is dead is taken over.
+//!   ([`lock_path`]: `<id>.lock`, or `session.lock` in an old-layout directory, holding the holder's pid, boot
+//!   and start — the TypeScript build's file, byte for byte, [`crate::writer_lock`]) and keeps it until
+//!   [`SessionStore::release`] or the store is dropped. Another process's append is refused with
+//!   [`SessionError::AlreadyOwned`], DSH's `session "<id>" is already owned by an active write handle`; a lock
+//!   whose holder is gone is taken over, also when its pid now names another process (#202).
 //!   Taking the lock drops the fold, so the first write re-reads what a previous holder appended. Without
 //!   it, a `heddle web` server and a `heddle --resume <id> --turn` each appended from their own count and
 //!   the log held the same seqs twice (R-developer-eight-27).
@@ -31,7 +32,6 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
-use std::time::Duration;
 
 use heddle_config::{Env, expand_home, heddle_home};
 use serde::Serialize;
@@ -136,66 +136,13 @@ pub fn lock_path(handle: &SessionHandle) -> String {
         .into_owned()
 }
 
-/// How long a lock file with no pid in it is taken to be one being written rather than debris: the holder
-/// creates the file and writes its pid in the next call.
-const UNWRITTEN_LOCK_GRACE: Duration = Duration::from_secs(5);
-
 /// The lock files this process holds, and how many stores in it hold each; the last to let go removes it.
 static HELD_BY_PROCESS: LazyLock<Mutex<HashMap<PathBuf, usize>>> = LazyLock::new(Default::default);
-
-/// The pid a lock file names: decimal digits, surrounding whitespace ignored, above zero.
-fn lock_holder(text: &str) -> Option<u32> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() || !trimmed.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    trimmed.parse::<u32>().ok().filter(|pid| *pid > 0)
-}
-
-/// Whether a process with this pid exists. A process this user may not signal exists, and when the
-/// answer cannot be had the holder is taken to be alive: a live writer is never expropriated.
-#[cfg(target_os = "linux")]
-fn process_alive(pid: u32) -> bool {
-    Path::new("/proc").join(pid.to_string()).exists()
-}
-
-/// Whether a process with this pid exists. A process this user may not signal exists, and when the
-/// answer cannot be had the holder is taken to be alive: a live writer is never expropriated.
-#[cfg(all(unix, not(target_os = "linux")))]
-fn process_alive(pid: u32) -> bool {
-    // `kill -0` is what Node's `process.kill(pid, 0)` asks; the crate forbids the unsafe a direct call needs.
-    match std::process::Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .output()
-    {
-        Ok(output) => {
-            output.status.success()
-                || String::from_utf8_lossy(&output.stderr).contains("not permitted")
-        }
-        Err(_) => true,
-    }
-}
-
-/// Whether a process with this pid exists, asked of `tasklist`; alive when the answer cannot be had.
-#[cfg(not(unix))]
-fn process_alive(pid: u32) -> bool {
-    match std::process::Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-        .output()
-    {
-        Ok(output) => String::from_utf8_lossy(&output.stdout).contains(&format!(" {pid} ")),
-        Err(_) => true,
-    }
-}
 
 /// Remove a lock file only if it still names this process, so letting go never removes another's lock.
 fn remove_own_lock(path: &Path) {
     if let Ok(text) = std::fs::read_to_string(path)
-        && lock_holder(&text) == Some(std::process::id())
+        && crate::writer_lock::parse_lock(&text).map(|lock| lock.pid) == Some(std::process::id())
     {
         let _ = std::fs::remove_file(path);
     }
@@ -204,15 +151,21 @@ fn remove_own_lock(path: &Path) {
 /// Take a session's writer lock for this process, or fail with [`SessionError::AlreadyOwned`].
 ///
 /// DSH arbitrates with a kernel `flock(2)` on `session.lock`; the TypeScript build cannot take one without a
-/// native addon, so both builds share a lock file created exclusively and naming its holder's pid. What flock
-/// gives for free is supplied by hand: a holder that died without letting go leaves a file naming a pid that no
-/// longer exists, and that lock is removed and taken rather than blocking the session forever. A live holder is
-/// never expropriated: there is no expiry that could let a stalled writer's resumed appends tear the log.
+/// native addon, so both builds share a lock file created exclusively and naming its holder. What flock gives for
+/// free is supplied by hand: a holder that died without letting go (a crash, `SIGKILL`, a power cut) leaves a
+/// file naming a process that is gone, or a pid the system has since given to another process, and that lock is
+/// removed and taken rather than blocking the session for as long as that process lives (#202; the rules are
+/// [`crate::writer_lock::judge_lock`]'s). A live holder is never expropriated: there is no expiry that could let a
+/// stalled writer's resumed appends tear the log.
 ///
 /// Answers whether this process **took** the lock now (`true`) or already held it through another store
 /// (`false`): only a fresh take is a write-open after whatever wrote the session before, which is when an
 /// unfinished turn is closed ([`crate::repair`]).
 fn acquire_writer_lock(path: &Path, id: &str) -> Result<bool, SessionError> {
+    use crate::writer_lock::{
+        LockVerdict, SystemProbe, epoch_seconds, format_lock, judge_lock, own_lock, parse_lock,
+        read_lock_file, stamp_lock,
+    };
     let mut held = HELD_BY_PROCESS
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
@@ -220,11 +173,16 @@ fn acquire_writer_lock(path: &Path, id: &str) -> Result<bool, SessionError> {
         *count += 1;
         return Ok(false);
     }
-    let own = std::process::id();
+    let own = own_lock();
     let shown = path.to_string_lossy().into_owned();
-    let refused = |pid: Option<u32>| SessionError::AlreadyOwned {
+    let lock_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned());
+    let refused = |pid: Option<u32>, name: Option<String>| SessionError::AlreadyOwned {
         id: id.to_string(),
         pid,
+        name,
+        lock: lock_name.clone(),
     };
     for _ in 0..3 {
         match std::fs::OpenOptions::new()
@@ -233,46 +191,34 @@ fn acquire_writer_lock(path: &Path, id: &str) -> Result<bool, SessionError> {
             .open(path)
         {
             Ok(mut file) => {
-                if let Err(error) = file.write_all(format!("{own}\n").as_bytes()) {
+                if let Err(error) = file.write_all(format_lock(&own).as_bytes()) {
                     drop(file);
                     let _ = std::fs::remove_file(path);
                     return Err(SessionError::io(shown, error));
                 }
+                stamp_lock(&file, &own);
                 held.insert(path.to_path_buf(), 1);
                 return Ok(true);
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(SessionError::io(shown, error)),
         }
-        let text = match std::fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+        let file = match read_lock_file(path) {
+            Ok(Some(file)) => file,
+            Ok(None) => continue,
             Err(error) => return Err(SessionError::io(shown, error)),
         };
-        let holder = lock_holder(&text);
-        if holder == Some(own) {
-            held.insert(path.to_path_buf(), 1);
-            return Ok(true);
-        }
-        if let Some(pid) = holder
-            && process_alive(pid)
+        // A lock naming this process that this process does not hold is a previous process's that had the same
+        // pid. It is replaced rather than kept: its boot and start are that process's, so another reader would
+        // judge it stale.
+        if parse_lock(&file.text).map(|lock| lock.pid) != Some(own.pid)
+            && let LockVerdict::Held { pid, name } = judge_lock(
+                &file,
+                &SystemProbe,
+                epoch_seconds(std::time::SystemTime::now()),
+            )
         {
-            return Err(refused(Some(pid)));
-        }
-        if holder.is_none() {
-            // A modification time in the future reads as young, as `Date.now() - mtimeMs` does.
-            let young = std::fs::metadata(path)
-                .and_then(|meta| meta.modified())
-                .map(|modified| {
-                    modified
-                        .elapsed()
-                        .map(|age| age < UNWRITTEN_LOCK_GRACE)
-                        .unwrap_or(true)
-                })
-                .unwrap_or(false);
-            if young {
-                return Err(refused(None));
-            }
+            return Err(refused(pid, name));
         }
         match std::fs::remove_file(path) {
             Ok(()) => {}
@@ -280,7 +226,7 @@ fn acquire_writer_lock(path: &Path, id: &str) -> Result<bool, SessionError> {
             Err(error) => return Err(SessionError::io(shown, error)),
         }
     }
-    Err(refused(None))
+    Err(refused(None, None))
 }
 
 /// Let go of one store's hold on a lock; the last hold in this process removes the file.
@@ -1181,10 +1127,14 @@ impl SessionStore {
     }
 
     /// Whether a live writer holds the session: this process (through any store), or the live process its
-    /// lock names. A reader asks it before it shows a session's unfinished turn as closed
-    /// ([`crate::SessionService::events`]); a lock naming this process that this process does not hold is a
-    /// previous process's that had the same pid.
+    /// lock names, judged as a writer judges it ([`crate::writer_lock::judge_lock`], #202), so a lock whose pid
+    /// now names another process holds nothing. A reader asks it before it shows a session's unfinished turn as
+    /// closed ([`crate::SessionService::events`]); a lock naming this process that this process does not hold is
+    /// a previous process's that had the same pid.
     pub fn writer_held(&self, handle: &SessionHandle) -> bool {
+        use crate::writer_lock::{
+            LockVerdict, SystemProbe, epoch_seconds, judge_lock, parse_lock, read_lock_file,
+        };
         let path = PathBuf::from(lock_path(handle));
         if HELD_BY_PROCESS
             .lock()
@@ -1193,10 +1143,20 @@ impl SessionStore {
         {
             return true;
         }
-        let Ok(text) = std::fs::read_to_string(&path) else {
+        let Ok(Some(file)) = read_lock_file(&path) else {
             return false;
         };
-        lock_holder(&text).is_some_and(|pid| pid != std::process::id() && process_alive(pid))
+        match parse_lock(&file.text) {
+            Some(lock) if lock.pid != std::process::id() => matches!(
+                judge_lock(
+                    &file,
+                    &SystemProbe,
+                    epoch_seconds(std::time::SystemTime::now())
+                ),
+                LockVerdict::Held { .. }
+            ),
+            _ => false,
+        }
     }
 
     /// Taking the lock **fresh** is DSH's write-open, so a turn the previous writer left unfinished is closed
@@ -2975,8 +2935,8 @@ mod tests {
 
     /// R-developer-eight-27: a `heddle web` server held a session while `heddle --resume <id> --turn` appended
     /// to it from another process, and the log got seqs 14-19 twice. The other process here is a real one,
-    /// named in the lock file exactly as either build writes it (`<pid>\n`), and its append is written to the
-    /// log the way its store would write it.
+    /// named in the lock file as every build before #202 wrote it (`<pid>\n`, written after it started), and its
+    /// append is written to the log the way its store would write it.
     #[cfg(unix)]
     #[test]
     fn a_second_process_cannot_append_while_the_holder_lives_and_takes_over_once_it_is_gone() {
@@ -3036,9 +2996,11 @@ mod tests {
         assert_eq!(
             message,
             format!(
-                "session \"{}\" is already owned by an active write handle (process {})",
-                handle.id,
-                holder.id()
+                "session \"{id}\" is already owned by an active write handle (process {pid}, sleep). Its lock \
+                 file is {id}.lock, beside the session's log; if process {pid} is not heddle, delete that file and \
+                 try again.",
+                id = handle.id,
+                pid = holder.id()
             )
         );
         assert_eq!(
@@ -3084,7 +3046,7 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(&lock).unwrap(),
-            format!("{}\n", std::process::id()),
+            crate::writer_lock::format_lock(&crate::writer_lock::own_lock()),
             "the stale lock was replaced by one naming this process"
         );
     }
@@ -3096,10 +3058,12 @@ mod tests {
         let lock = Path::new(&handle.dir).join(format!("{}.lock", handle.id));
         assert_eq!(lock_path(&handle), lock.to_string_lossy());
         assert!(store.holds(&handle), "the first append took the lock");
-        // The TypeScript build's contents, byte for byte: the holder's pid and a newline.
+        // The TypeScript build's contents, byte for byte: the holder's pid, this boot and its start (#202).
+        let own = crate::writer_lock::own_lock();
+        assert_eq!(own.pid, std::process::id());
         assert_eq!(
             std::fs::read_to_string(&lock).unwrap(),
-            format!("{}\n", std::process::id())
+            crate::writer_lock::format_lock(&own)
         );
         store.release(&handle);
         assert!(!store.holds(&handle));

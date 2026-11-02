@@ -16,6 +16,8 @@ testing = []
 
 [dependencies]
 futures.workspace = true
+# The budget refusal's sentence, shared with the context row's write-time rule (#212).
+heddle-config.workspace = true
 heddle-llm.workspace = true
 heddle-session.workspace = true
 serde.workspace = true
@@ -26,6 +28,5 @@ thiserror.workspace = true
 tokio-util = "0.7"
 
 [dev-dependencies]
-heddle-config.workspace = true
 # The integration tests replay the TypeScript build's record through `testing::MemoryStore`.
 heddle-context = { workspace = true, features = ["testing"] }

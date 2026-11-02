@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -22,6 +22,113 @@ import { decodeTranscript } from '../src/session/transcript.ts'
 
 const scratch = mkdtempSync(join(tmpdir(), 'heddle-session-lock-'))
 after(() => rmSync(scratch, { recursive: true, force: true }))
+
+/**
+ * What the #202 checks need to know about this system, read **here** from the sources the protocol names rather than
+ * through `src/session/writer-lock.ts`, so a check cannot agree with the code it judges by construction: this boot's
+ * id, and a process's start and command name. The lock file then is `<pid> boot=<boot> start=<start>\n`.
+ */
+const identityReadable = process.platform === 'darwin' || process.platform === 'linux'
+
+/** The modification time a lock with identity carries, 2037-12-31T00:00:00Z: young to a build from before #202. */
+const IDENTIFIED_MTIME_S = 2_145_830_400
+
+function bootId(): string | undefined {
+  if (process.platform === 'linux') return readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim()
+  if (process.platform === 'darwin') return execFileSync('/usr/sbin/sysctl', ['-n', 'kern.bootsessionuuid'], { encoding: 'utf8' }).trim()
+  return undefined
+}
+
+/** A process's start: field 22 of `/proc/<pid>/stat` on Linux; on macOS its `lstart`, UTC, as seconds since 1970. */
+function processStart(pid: number): string | undefined {
+  if (process.platform === 'linux') {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    return stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\s+/)[19]
+  }
+  if (process.platform === 'darwin') {
+    const env = { LC_ALL: 'C', TZ: 'UTC0' }
+    const lstart = execFileSync('/bin/ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', env }).trim().replace(/\s+/g, ' ')
+    return execFileSync('/bin/date', ['-j', '-u', '-f', '%a %b %e %T %Y', lstart, '+%s'], { encoding: 'utf8', env }).trim()
+  }
+  return undefined
+}
+
+/** A process's command name: `/proc/<pid>/comm` on Linux, `ucomm` on macOS. */
+function commandName(pid: number): string | undefined {
+  if (process.platform === 'linux') return readFileSync(`/proc/${pid}/comm`, 'utf8').trim()
+  if (process.platform === 'darwin') return execFileSync('/bin/ps', ['-o', 'ucomm=', '-p', String(pid)], { encoding: 'utf8', env: { LC_ALL: 'C' } }).trim()
+  return undefined
+}
+
+/** A lock file's bytes for a pid, a boot and a start. */
+function lockBytes(pid: number, boot: string | undefined, start: string | undefined): string {
+  return `${pid}${boot !== undefined ? ` boot=${boot}` : ''}${start !== undefined ? ` start=${start}` : ''}\n`
+}
+
+/** The lock this process writes. */
+function ownLockBytes(): string {
+  return lockBytes(process.pid, bootId(), processStart(process.pid))
+}
+
+/** The refusal, word for word (#202): DSH's sentence, the process, the lock file, and how to clear it. */
+function refusal(id: string, pid: number, name: string | undefined, lock: string): string {
+  return (
+    `session "${id}" is already owned by an active write handle (process ${pid}${name !== undefined ? `, ${name}` : ''}). ` +
+    `Its lock file is ${lock}, beside the session's log; if process ${pid} is not heddle, delete that file and try again.`
+  )
+}
+
+/** A live process that is not heddle, standing in for one the system gave a dead holder's pid to (J178's `sleep`). */
+async function unrelatedProcess(): Promise<ChildProcess & { pid: number }> {
+  const child = spawn('sleep', ['30'], { stdio: 'ignore' })
+  await new Promise<void>((resolve, reject) => {
+    child.once('spawn', () => resolve())
+    child.once('error', reject)
+  })
+  assert.ok(child.pid !== undefined)
+  return child as ChildProcess & { pid: number }
+}
+
+/** Stop such a process and wait until it is reaped. */
+async function stopped(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return
+  await new Promise<void>((resolve) => {
+    child.once('exit', () => resolve())
+    child.kill('SIGKILL')
+  })
+}
+
+/** A session this process created and let go of, so its lock file can be written as another process left it. */
+function releasedSession(name: string): { root: string; id: string; lock: string } {
+  const root = join(scratch, name)
+  const store = new SessionStore(root)
+  const handle = store.create({ cwd: scratch })
+  store.release(handle)
+  return { root, id: handle.id, lock: join(handle.dir, `${handle.id}.lock`) }
+}
+
+/** Append once from a fresh store, as the next server would after a restart: the event, or the refusal. */
+function appendFresh(root: string, id: string): { seq: number; lock: string } | Error {
+  const store = new SessionStore(root)
+  const handle = store.open(id)
+  assert.ok(handle !== null)
+  try {
+    const event = store.append(handle, { type: 'test/after-a-crash' })
+    const lock = readFileSync(join(handle.dir, `${handle.id}.lock`), 'utf8')
+    store.release(handle)
+    return { seq: event.seq, lock }
+  } catch (error) {
+    return error as Error
+  }
+}
+
+/** Whether a fresh store's reader sees the session held (it shows an unfinished turn as still running only then). */
+function heldForReaders(root: string, id: string): boolean {
+  const store = new SessionStore(root)
+  const handle = store.open(id)
+  assert.ok(handle !== null)
+  return store.writerHeld(handle)
+}
 
 const storeUrl = pathToFileURL(join(import.meta.dirname, '..', 'src', 'session', 'store.ts')).href
 
@@ -112,15 +219,20 @@ test('a second process cannot append to a session another live process is writin
     const before = readFileSync(handle.transcript)
 
     /** The defect: this append used to succeed with seq 2 — a seq the holder had already written. */
+    const pid = Number(ready.pid)
     assert.throws(
       () => store.append(handle, { type: 'test/intruder' }),
       (error: Error) => {
-        assert.match(error.message, new RegExp(`^session "${id}" is already owned by an active write handle`))
-        assert.match(error.message, new RegExp(`\\(process ${String(ready.pid)}\\)$`), 'and it names the process holding it')
+        assert.equal(
+          error.message,
+          refusal(id, pid, commandName(pid), `${id}.lock`),
+          'it names the process holding it, the lock file, and what to do when that process is not heddle (#202)',
+        )
         return true
       },
       'a second writer is refused while the holder is alive',
     )
+    assert.equal(store.writerHeld(handle), true, 'and a reader sees the session held')
     assert.ok(readFileSync(handle.transcript).equals(before), 'and the refusal wrote nothing to the log')
 
     /** A holder that dies without letting go (SIGKILL runs no cleanup) leaves a lock naming a dead process. */
@@ -145,7 +257,10 @@ test('the lock is a file beside the log naming its holder, and letting go remove
   const handle = store.create({ cwd: scratch })
   const lock = join(handle.dir, `${handle.id}.lock`)
   assert.ok(existsSync(lock), `the writer holds ${lock}`)
-  assert.equal(readFileSync(lock, 'utf8'), `${process.pid}\n`, 'the lock names the holding process and nothing else')
+  assert.equal(readFileSync(lock, 'utf8'), ownLockBytes(), 'the lock names the holding process, its boot and its start (#202)')
+  if (identityReadable) {
+    assert.equal(statSync(lock).mtimeMs, IDENTIFIED_MTIME_S * 1000, 'and a lock with identity carries the time a build from before #202 reads as young')
+  }
   store.release(handle)
   assert.equal(existsSync(lock), false, 'letting go removes the lock')
   /** The log itself is untouched by any of it, and still reads. */
@@ -168,6 +283,98 @@ test('a lock left by a process that no longer exists does not block the next wri
   const next = new SessionStore(root)
   const event = next.append(next.open(handle.id)!, { type: 'test/after-a-crash' })
   assert.equal(event.seq, 1)
-  assert.equal(readFileSync(lock, 'utf8'), `${process.pid}\n`, 'the stale lock was replaced by this process')
+  assert.equal(readFileSync(lock, 'utf8'), ownLockBytes(), 'the stale lock was replaced by this process')
   next.release(handle)
+})
+
+/**
+ * Issue #202 (J178): after a crash every lock the server held names its dead pid, and when the system gives that pid to
+ * another live process — or the lock names pid 1, which this user may not signal — every later turn was refused with
+ * `already owned by an active write handle (process N)` for as long as that process lived, with nothing saying what to
+ * do. DSH's flock dies with its holder (dsh-session-persistence-jsonl lib/index.js:692-716). Each check below writes
+ * the lock as the crashed holder left it, then appends from a fresh store, as the next server does.
+ */
+
+test('a pid-only lock whose pid now names a live process that started after the lock was written is taken over (#202)', async () => {
+  const { root, id, lock } = releasedSession('reuse-pid-only')
+  const other = await unrelatedProcess()
+  try {
+    /** The lock a build before #202 left an hour ago; its pid is now the unrelated process's. */
+    writeFileSync(lock, `${other.pid}\n`)
+    const anHourAgo = Date.now() / 1000 - 3600
+    utimesSync(lock, anHourAgo, anHourAgo)
+    assert.equal(heldForReaders(root, id), false, 'a reader does not take the unrelated process for the writer')
+    const taken = appendFresh(root, id)
+    assert.ok(!(taken instanceof Error), `the next writer takes the lock\n${taken instanceof Error ? taken.message : ''}`)
+    assert.equal(taken.seq, 1)
+    assert.equal(taken.lock, ownLockBytes(), 'and the lock now names this process')
+  } finally {
+    await stopped(other)
+  }
+})
+
+test('a lock that records another start than its pid now has is taken over (#202)', async (context) => {
+  if (!identityReadable) return context.skip('no process start on this system')
+  const { root, id, lock } = releasedSession('reuse-start')
+  const other = await unrelatedProcess()
+  try {
+    writeFileSync(lock, lockBytes(other.pid, bootId(), '1'))
+    assert.equal(heldForReaders(root, id), false, 'a reader does not take the unrelated process for the writer')
+    const taken = appendFresh(root, id)
+    assert.ok(!(taken instanceof Error), `the next writer takes the lock\n${taken instanceof Error ? taken.message : ''}`)
+    assert.equal(taken.lock, ownLockBytes())
+  } finally {
+    await stopped(other)
+  }
+})
+
+test('a lock written in another boot is taken over, even when its pid and start match a live process (#202)', async (context) => {
+  if (!identityReadable) return context.skip('no boot id on this system')
+  const { root, id, lock } = releasedSession('other-boot')
+  const other = await unrelatedProcess()
+  try {
+    writeFileSync(lock, lockBytes(other.pid, '00000000-0000-4000-8000-000000000000', processStart(other.pid)))
+    assert.equal(heldForReaders(root, id), false)
+    const taken = appendFresh(root, id)
+    assert.ok(!(taken instanceof Error), `the next writer takes the lock\n${taken instanceof Error ? taken.message : ''}`)
+    assert.equal(taken.lock, ownLockBytes())
+  } finally {
+    await stopped(other)
+  }
+})
+
+test('a pid-only lock naming pid 1, a process this user may not signal, is taken over (#202)', (context) => {
+  if (process.platform === 'win32' || process.getuid?.() === 0) return context.skip('pid 1 is this user\'s here')
+  const { root, id, lock } = releasedSession('pid-one')
+  /** Written just now, so pid 1 started long before it: the rule that decides is the user, not the start. */
+  writeFileSync(lock, '1\n')
+  assert.equal(heldForReaders(root, id), false, 'a reader does not take pid 1 for the writer')
+  const taken = appendFresh(root, id)
+  assert.ok(!(taken instanceof Error), `the next writer takes the lock\n${taken instanceof Error ? taken.message : ''}`)
+  assert.equal(taken.lock, ownLockBytes())
+})
+
+test('a lock whose holder is alive and is the process it records is refused, naming the process and the file (#202)', async (context) => {
+  if (!identityReadable) return context.skip('no process start on this system')
+  const { root, id, lock } = releasedSession('live-holder')
+  const holder = await unrelatedProcess()
+  try {
+    const written = lockBytes(holder.pid, bootId(), processStart(holder.pid))
+    writeFileSync(lock, written)
+    assert.equal(heldForReaders(root, id), true, 'a reader sees the session held')
+    const refused = appendFresh(root, id)
+    assert.ok(refused instanceof Error, 'a live holder is never expropriated')
+    assert.equal(refused.message, refusal(id, holder.pid, commandName(holder.pid), `${id}.lock`))
+    assert.equal(readFileSync(lock, 'utf8'), written, 'and its lock is left as it was')
+    /** A pid-only lock written after its process started is that process's too. */
+    writeFileSync(lock, `${holder.pid}\n`)
+    const again = appendFresh(root, id)
+    assert.ok(again instanceof Error, 'a pid-only lock naming a live process that started before it is still held')
+    assert.equal(again.message, refusal(id, holder.pid, commandName(holder.pid), `${id}.lock`))
+  } finally {
+    await stopped(holder)
+  }
+  /** Once it is gone, the lock is taken. */
+  const taken = appendFresh(root, id)
+  assert.ok(!(taken instanceof Error), `the next writer takes the lock\n${taken instanceof Error ? taken.message : ''}`)
 })

@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { heddleCommand, isolatedHome, removeDir, repoRoot, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { heddleCommand, isTitleRequest, isolatedHome, refuseTitleRequest, removeDir, repoRoot, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * A fresh session's composer starts from the run's default selection (DSH parity A104, DSH's default model
@@ -25,6 +25,7 @@ async function recordingDouble() {
         response.end(JSON.stringify({ object: 'list', data: [] }))
         return
       }
+      if (isTitleRequest(body)) return refuseTitleRequest(response) // a new session's title request is no turn (#68)
       const parsed = JSON.parse(body || '{}')
       turns.push({ model: parsed.model, effort: parsed.reasoning_effort })
       response.writeHead(200, { 'content-type': 'text/event-stream' })

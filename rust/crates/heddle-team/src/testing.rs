@@ -109,6 +109,7 @@ impl MemoryStore {
                     cwd: child.cwd.clone(),
                     endpoint: child.endpoint.clone(),
                     model: child.model.clone(),
+                    reasoning_effort: child.reasoning_effort.clone(),
                     team_id: Some(child.team_id.clone()),
                     preset: None,
                 },
