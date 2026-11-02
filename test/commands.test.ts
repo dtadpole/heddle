@@ -266,6 +266,13 @@ test("/compact answers DSH's errors for a session that is not idle and for a sum
   )
 })
 
+test("/compact stopped by the session's Stop answers DSH's cancelled, not \"No compactable history yet.\" (#140, #154)", async () => {
+  const { handle, log } = session()
+  const registry = new CommandRegistry()
+  registry.register(compactCommand({ compactNow: async () => ({ compacted: false, cancelled: true }) }))
+  assert.deepEqual((await registry.execute(log, handle, '/compact'))?.result, { kind: 'error', text: 'Compaction cancelled.' })
+})
+
 test('/compact passes a compaction failure on as the run error', async () => {
   const { handle, log } = session()
   const registry = new CommandRegistry()

@@ -15,6 +15,50 @@ import { contextBreakdownWithFallback, laneOf, previewOf, projectLedger, project
 /** One logged event, in the shape the ledger reads: a sequence, a time, and whatever the type carries. */
 const event = (seq: number, at: string, rest: Record<string, unknown>): LedgerEvent => ({ seq, at, ...rest }) as LedgerEvent
 
+test('model selection is durable metadata, not a leading trajectory section', () => {
+  const activity: LedgerEvent[] = [
+    event(1, '2026-10-31T09:00:01.000Z', { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'one' }] } }),
+    event(2, '2026-10-31T09:00:01.100Z', { type: 'model/request', estimatedTokens: 10 }),
+    event(3, '2026-10-31T09:00:01.200Z', { type: 'assistant/completed', text: 'first' }),
+    event(4, '2026-10-31T09:00:01.200Z', { type: 'turn/completed', rounds: 1 }),
+    event(5, '2026-10-31T09:00:02.000Z', { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'two' }] } }),
+    event(6, '2026-10-31T09:00:02.100Z', { type: 'model/request', estimatedTokens: 10 }),
+    event(7, '2026-10-31T09:00:02.200Z', { type: 'assistant/completed', text: 'second' }),
+    event(8, '2026-10-31T09:00:02.200Z', { type: 'turn/completed', rounds: 1 }),
+  ]
+  const selection = event(0, '2026-10-31T09:00:00.000Z', { type: 'model/selection', endpoint: 'scripted', reasoningEffort: 'high' })
+  const baseline = projectLedger(activity)
+  const ledger = projectLedger([selection, ...activity])
+  const rows = projectRows(ledger)
+  assert.equal(rows.filter((row) => row.turnStart).length, 2, 'two prompts, two boundaries')
+  assert.equal(rows[0]?.kind, 'user', 'the overview reaches turn one at row zero')
+  assert.deepEqual(ledger, baseline, 'metadata changes no activity counters or records')
+  assert.deepEqual(rows, projectRows(baseline))
+  assert.deepEqual(projectTimeline(ledger), projectTimeline(baseline))
+  assert.deepEqual(projectSessionStats([selection, ...activity]), projectSessionStats(activity))
+})
+
+test('model selection exclusion keeps real commands and unknown events in their sections', () => {
+  const activity: LedgerEvent[] = [
+    event(1, '2026-10-31T09:00:00.100Z', { type: 'command/run', name: 'permission' }),
+    event(2, '2026-10-31T09:00:01.000Z', { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'one' }] } }),
+    event(3, '2026-10-31T09:00:01.100Z', { type: 'turn/completed', rounds: 1 }),
+    event(4, '2026-10-31T09:00:02.000Z', { type: 'command/run', name: 'permission' }),
+    event(5, '2026-10-31T09:00:02.100Z', { type: 'command/done', text: 'done' }),
+    event(6, '2026-10-31T09:00:03.000Z', { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'two' }] } }),
+    event(7, '2026-10-31T09:00:03.100Z', { type: 'custom/event', detail: 'kept' }),
+    event(8, '2026-10-31T09:00:03.200Z', { type: 'turn/completed', rounds: 1 }),
+  ]
+  const selection = (seq: number) => event(seq, '2026-10-31T09:00:00.000Z', { type: 'model/selection', endpoint: 'scripted' })
+  const decorated = [selection(0), ...activity.flatMap((item) => [item, selection((item.seq ?? 0) + 10)])]
+  const ledger = projectLedger(decorated)
+  assert.deepEqual(ledger, projectLedger(activity), 'selection before, within, between and after turns is metadata only')
+  const rows = projectRows(ledger)
+  assert.equal(rows[0]?.record.label, 'command/run', 'a legitimate leading command stays')
+  assert.deepEqual(rows.filter((row) => row.loose && row.record.afterTurn === 1).map((row) => [row.record.label, row.turnStart]), [['command/run', true], ['command/done', false]])
+  assert.ok(rows.some((row) => row.kind === 'system' && row.record.label === 'custom/event' && row.record.text.includes('kept')))
+})
+
 test('one prompt becomes one turn with its steps, and the records are grouped under them', () => {
   const ledger = projectLedger([
     event(1, '2026-10-11T10:00:00.000Z', { type: 'session/created', cwd: '/tmp' }),
