@@ -1,8 +1,8 @@
 ---
 title: The heddle-tools crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-31T02:58:51Z
-version: 0.6.1
+modified: 2026-11-02T00:10:00Z
+version: 0.6.6
 description: The Rust port crate for the tool registry, the built-in tools, and outside tools as processes — its public API, what it asks of other crates, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -45,7 +45,17 @@ approval (`DENIED`) → `tools/pre-execute` (`HOOKED`) → escalation (`BAD_ARGS
 resolved once from the session's record or the deployment default and never from the arguments → `run` →
 `tools/post-execute`; a sandbox denial thrown by a tool is `SANDBOX`, any other failure `TOOL_FAILED`. `call`
 never fails: every refusal is a result the model reads. `read_file` classifies a missing file as `FS_NOT_FOUND` and a
-directory as `FS_NOT_REGULAR_FILE`, each `cannot read "<path>": …` with DSH's display spelling (issue #4).
+directory as `FS_NOT_REGULAR_FILE`, each `cannot read "<path>": …` with DSH's display spelling (issue #4), and bytes
+that are not UTF-8 text as `FS_NOT_TEXT`, `cannot read "<path>": invalid UTF-8 text` (issue #234). `write_file`
+refuses an existing target that is not a regular file, such as a folder, as `FS_NOT_REGULAR_FILE`, `cannot write
+"<path>": not a regular file`, before writing anything (issue #237). `list_dir`
+classifies a missing target as `FS_NOT_FOUND`, a file as `FS_NOT_DIRECTORY`, a folder the OS refuses as
+`FS_PERMISSION_DENIED` and any other platform failure as `FS_IO_ERROR`, each `cannot list "<path>": …` (issue #223).
+A listing is in DSH's order, `localeCompare`: ICU root collation through `icu_collator` (Unicode-3.0, compiled data,
+built once) with Node's English options, ties in byte order (issue #247). Stated difference: the Rust build always uses
+root collation, where Node follows the process locale (`LANG`); under an English locale they agree.
+`bash` answers with stdout, then stderr under a `[stderr]` line, with a newline before it when stdout does not end in
+one (`marked_streams`, as DSH's renderResult; issue #246); the marked text is what the output limit cuts.
 
 ## Where the port stands
 

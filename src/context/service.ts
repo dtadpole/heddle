@@ -5,7 +5,7 @@ import Schema from '@deepseek-ai/schemastery'
 
 import { heddleHome } from '../config/schema.ts'
 import type { Chunk, Message, ToolSpec } from '../llm/types.ts'
-import { CONTEXT_WINDOW_EXCEEDED, contextWindowFor } from '../llm/types.ts'
+import { CONTEXT_WINDOW_EXCEEDED, contextWindowFor, summaryFinishFailure } from '../llm/types.ts'
 import { deriveMessage, indexBySeq, type SessionEvent, type SessionHandle, type SessionStore } from '../session/store.ts'
 
 import { resolveBudget, type Budget, type BudgetPolicy } from './budget.ts'
@@ -24,6 +24,8 @@ export * from './compaction.ts'
 export * from './instructions.ts'
 export * from './meter.ts'
 export * from './prune.ts'
+/** The rule a settings write and `config --validate` run over this row before a turn could fail on it (#212). */
+export { contextConfigProblems as configProblems } from '../config/context-rule.ts'
 
 export const name = 'context'
 
@@ -546,6 +548,9 @@ export default class ContextPlugin extends ContextService {
           },
           request.signal,
         )
+        // A summary cut at its output limit, or ended early any other way, is no checkpoint (#207): DSH's `finishError`.
+        const incomplete = summaryFinishFailure(request.endpoint, result.finishReason)
+        if (incomplete !== undefined) throw incomplete
         return result.text
       },
     })
