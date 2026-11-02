@@ -312,7 +312,7 @@ test('a hung node server is captured before the kill: its JavaScript stack, and 
     assert.equal(stacks.length, 1, `one JavaScript stack (${files.join(', ')})`)
     const stack = readFileSync(join(captures, stacks[0]), 'utf8').split('\n')
     assert.equal(stack[0], 'paused: other', 'the file says why the server paused')
-    assert.match(stack[1], /^spinsForever .*:\d+:\d+ \[local(,[a-z]+)*\]$/, 'the top frame is the function the server is stuck in, with its scope types')
+    assert.match(stack[1], /^spinsForever file:\/\/\S+spins\.mjs:\d+:\d+ \[local(,[a-z]+)*\]$/, 'the top frame is the function the server is stuck in, with its file and scope types')
     for (const name of files) assert.equal(statSync(join(captures, name)).mode & 0o777, 0o600, `${name} is private`)
     const samples = files.filter((name) => name.startsWith('sample-'))
     // `sample` needs the right to read the process's task port; a host without it still gets the JavaScript stack.
@@ -333,6 +333,19 @@ test('the stack file carries the pause reason and each frame\'s scope types, nev
   })
   assert.deepEqual(lines, ['paused: other', 'fold file:///r/dist/log.js:42:8 [local,closure,module]', '(anonymous) :1:1 []'])
   assert.ok(!lines.join('\n').includes('1.2'), 'no object of any scope is named')
+})
+
+test('a frame without a url is named by its script id, as node 24 reports frames (#257, hang 5)', () => {
+  const scripts = new Map([['41', 'file:///r/src/team/service.ts'], ['7', 'node:path']])
+  const lines = formatPaused({
+    reason: 'other',
+    callFrames: [
+      { functionName: 'join', url: '', location: { scriptId: '7', lineNumber: 1332, columnNumber: 13 }, scopeChain: [{ type: 'local' }] },
+      { functionName: 'leadOf', url: '', location: { scriptId: '41', lineNumber: 131, columnNumber: 33 }, scopeChain: [{ type: 'local' }] },
+      { functionName: 'gone', url: '', location: { scriptId: '99', lineNumber: 0, columnNumber: 0 } },
+    ],
+  }, scripts)
+  assert.deepEqual(lines.slice(1), ['join node:path:1333:14 [local]', 'leadOf file:///r/src/team/service.ts:132:34 [local]', 'gone :1:1 []'])
 })
 
 test('a hung node server blocked inside a native call still leaves a sample and a one-line stack file (#257)', async () => {

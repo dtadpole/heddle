@@ -278,14 +278,16 @@ const PAUSE_WAIT_MS = 1_500
 /**
  * The stack file's lines for a `Debugger.paused` event: the pause reason, then one frame per line with its location and
  * the **types** of its scopes (local, closure, module, …), which tell an await loop from a synchronous one without
- * reading a single value. Nothing is evaluated in the server.
+ * reading a single value. Nothing is evaluated in the server. A frame names its script by id (its `url` is empty on
+ * node 24), so `scripts` maps each id to the URL that `Debugger.scriptParsed` gave it (hang 5 came without file names).
  */
-export function formatPaused(params) {
+export function formatPaused(params, scripts = new Map()) {
   return [
     `paused: ${params.reason}`,
     ...params.callFrames.map((frame) => {
       const scopes = (frame.scopeChain ?? []).map((scope) => scope.type).join(',')
-      return `${frame.functionName || '(anonymous)'} ${frame.url}:${frame.location.lineNumber + 1}:${frame.location.columnNumber + 1} [${scopes}]`
+      const url = frame.url || scripts.get(frame.location.scriptId) || ''
+      return `${frame.functionName || '(anonymous)'} ${url}:${frame.location.lineNumber + 1}:${frame.location.columnNumber + 1} [${scopes}]`
     }),
   ]
 }
@@ -324,6 +326,7 @@ async function javascriptStackOf(run, servicePort, budgetMs) {
         }
         resolve(lines)
       }
+      const scripts = new Map()
       timer = setTimeout(() => finish(failed('the inspector socket did not open in time')), Math.max(deadline - Date.now(), 1))
       socket.onerror = () => finish(failed('the inspector socket failed'))
       socket.onopen = () => {
@@ -335,7 +338,9 @@ async function javascriptStackOf(run, servicePort, budgetMs) {
       }
       socket.onmessage = (event) => {
         const message = JSON.parse(String(event.data))
-        if (message.method === 'Debugger.paused') finish(formatPaused(message.params))
+        // Debugger.enable replays a scriptParsed per loaded script before it answers, so every id is known by the pause.
+        if (message.method === 'Debugger.scriptParsed') scripts.set(message.params.scriptId, message.params.url)
+        else if (message.method === 'Debugger.paused') finish(formatPaused(message.params, scripts))
       }
     })
   } catch (error) {
