@@ -144,7 +144,28 @@ async fn run_command(
             Ok(attachments) => attachments,
             Err(error) => return refuse(StatusCode::BAD_REQUEST, &error.to_string()),
         };
-    match host.execute(&handle, line, attachments).await {
+    /*
+     * The command runs on its own task, not on this request (#206). Measured on the Rust build: a page reload during
+     * `/compact` dropped the request, the handler future with it, and so the compaction mid-summary, before any closer
+     * or `command/done`. The log kept `command/run` and `compaction/start` open and the row said Running… for good.
+     * DSH runs the command on the host and the browser only observes it; the TypeScript server does the same, since a
+     * promise runs to its end whoever stopped listening. A Stop still cancels it through the session's live-turn
+     * registry, and it settles as "Compaction cancelled.".
+     */
+    let line = line.to_owned();
+    let runner = Arc::clone(&host);
+    let execution =
+        tokio::spawn(async move { runner.execute(&handle, &line, attachments).await }).await;
+    let execution = match execution {
+        Ok(execution) => execution,
+        Err(error) => {
+            return refuse(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("the command failed — {error}"),
+            );
+        }
+    };
+    match execution {
         // Attachments sent to a command that takes none: refused before anything was written.
         Err(CommandError::Input(message)) => refuse(StatusCode::BAD_REQUEST, &message),
         // The session log refused an append: the TypeScript server's catch-all answers a 500 for a throw.
@@ -388,6 +409,60 @@ mod tests {
 
     fn post_path(id: &str) -> String {
         format!("/api/sessions/{id}/commands")
+    }
+
+    #[tokio::test]
+    async fn a_command_whose_request_goes_away_still_runs_to_its_settlement() {
+        // #206: a reload during `/compact` dropped the request and the compaction with it, leaving `command/run` with
+        // no `command/done`, so the row said Running… for good.
+        let fixture = Fixture::new("routes-dropped");
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let registry = CommandRegistry::new();
+        let (began, go) = (Arc::clone(&started), Arc::clone(&release));
+        registry
+            .register(CommandDefinition::new("slow", "slow", move |_context| {
+                let (began, go) = (Arc::clone(&began), Arc::clone(&go));
+                Box::pin(async move {
+                    began.notify_one();
+                    go.notified().await;
+                    Ok(CommandResult::success_text("Slow work done."))
+                })
+            }))
+            .unwrap();
+        let path = post_path(&fixture.handle.id);
+        let request = call(
+            app_over(&fixture, registry),
+            Method::POST,
+            &path,
+            Some(r#"{"line":"/slow"}"#),
+        );
+        tokio::select! {
+            _ = request => panic!("the command answered before it was released"),
+            () = started.notified() => {}
+        }
+        // The request future is gone, as a reload or a closed tab drops it; the command is let go after that.
+        release.notify_one();
+        let settled = |fixture: &Fixture| {
+            fixture
+                .events()
+                .iter()
+                .find(|event| event.kind == crate::registry::COMMAND_DONE_EVENT)
+                .and_then(|event| event.get("text").cloned())
+        };
+        let mut done = None;
+        for _ in 0..200 {
+            done = settled(&fixture);
+            if done.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            done,
+            Some(json!("Slow work done.")),
+            "the command settled although nobody waited for its answer"
+        );
     }
 
     #[tokio::test]
