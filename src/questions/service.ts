@@ -22,6 +22,9 @@ export const name = 'questions'
 /** The version written on every question event, so a later shape can be told apart. */
 export const QUESTION_EVENT_VERSION = 1
 
+/** Why a request only its own turn could take reads as cancelled once that turn is gone without an answer (#228). */
+export const INTERRUPTED_REASON = 'interrupted'
+
 /** DSH's default foreground wait for a timed call, in seconds. */
 export const DEFAULT_TIMEOUT_SECONDS = 120
 
@@ -56,6 +59,11 @@ export interface Answer {
  * `waiting` - a turn in this process is waiting for it. `pending` - a timed wait ran out; it is still answerable and a
  * late answer reaches the model as a user message. `continued` - asked by a turn that no longer runs (the process ended
  * or the turn was replaced); still answerable the same way. `answered` and `cancelled` are final.
+ *
+ * A request asked with `continuable: false` is never `continued`: once no turn waits on it without its having been
+ * answered or stopped, it reads as `cancelled` with the reason `interrupted`, and an answer is refused (#228). DSH keeps
+ * only `ask_user_question` calls answerable past their turn (dsh-user-questions `applyUserQuestionEvent`); a question
+ * another tool asks, such as `exit_plan_mode`'s plan review, fails closed after a reload.
  */
 export type QuestionState = 'waiting' | 'pending' | 'continued' | 'answered' | 'cancelled'
 
@@ -187,6 +195,8 @@ export interface FoldedRequest {
   readonly askedAt: string
   readonly deadline: string | null
   readonly expired: boolean
+  /** False when the request is answerable only while the turn that asked it waits (`ask`'s `continuable`). */
+  readonly continuable: boolean
   readonly settled?: { readonly kind: 'answered'; readonly answers: readonly Answer[]; readonly at: string; readonly late: boolean } | { readonly kind: 'cancelled'; readonly reason: string; readonly at: string }
 }
 
@@ -206,6 +216,7 @@ export function foldQuestions(events: readonly SessionEvent[]): Map<string, Fold
         askedAt: typeof event.askedAt === 'string' ? event.askedAt : event.at,
         deadline: typeof event.deadline === 'string' ? event.deadline : null,
         expired: false,
+        continuable: event.continuable !== false,
       })
       continue
     }
@@ -266,8 +277,18 @@ export class QuestionService extends Service {
    * Ask a batch and wait. A legacy call, or a timed call with `-1`, waits until an answer or a cancellation; a timed
    * call with a positive wait resolves `pending` at its deadline, unless a person is holding it open. An aborted
    * signal (Stop) records the cancellation and rejects with `CANCELLED`.
+   *
+   * `continuable: false` asks a question that only this turn can take: if the turn ends without an answer and without a
+   * Stop (the process died), the request reads as cancelled instead of `continued` (#228). It is written on the
+   * `question/asked` event only when false, so every other request's event is unchanged. It is meant for untimed waits:
+   * a timed wait that runs out writes `pending` and drops its waiter, so the request then reads as cancelled and refuses
+   * an answer.
    */
-  ask(handle: SessionHandle, rawQuestions: unknown, options: { readonly timeout?: unknown; readonly signal?: AbortSignal } = {}): Promise<AskOutcome> {
+  ask(
+    handle: SessionHandle,
+    rawQuestions: unknown,
+    options: { readonly timeout?: unknown; readonly signal?: AbortSignal; readonly continuable?: boolean } = {},
+  ): Promise<AskOutcome> {
     const questions = validateQuestions(rawQuestions)
     const seconds = this.waitSeconds(options.timeout)
     const timed = seconds !== null
@@ -275,7 +296,16 @@ export class QuestionService extends Service {
     const askedAt = new Date().toISOString()
     const deadline = seconds !== null ? new Date(Date.now() + seconds * 1000).toISOString() : null
     if (options.signal?.aborted === true) throw new QuestionError('the turn was stopped before the question was asked', 'CANCELLED')
-    this.store.append(handle, { type: 'question/asked', version: QUESTION_EVENT_VERSION, requestId: id, questions, timed, askedAt, deadline })
+    this.store.append(handle, {
+      type: 'question/asked',
+      version: QUESTION_EVENT_VERSION,
+      requestId: id,
+      questions,
+      timed,
+      askedAt,
+      deadline,
+      ...(options.continuable === false ? { continuable: false } : {}),
+    })
     return new Promise<AskOutcome>((resolve, reject) => {
       const waiter: Waiter = { session: handle.id, resolve, reject, held: false, deadline }
       this.waiters.set(id, waiter)
@@ -321,8 +351,9 @@ export class QuestionService extends Service {
     const request = foldQuestions(this.store.read(handle)).get(id)
     if (request === undefined) throw new QuestionError(`no question request '${id}' in this session`, 'NOT_FOUND')
     if (request.settled !== undefined) throw new QuestionError(`question request '${id}' is already ${request.settled.kind}`, 'SETTLED')
-    const answers = validateAnswers(request.questions, rawAnswers)
     const waiter = this.waiters.get(id)
+    if (waiter === undefined && !request.continuable) throw new QuestionError(`question request '${id}' is already cancelled`, 'SETTLED')
+    const answers = validateAnswers(request.questions, rawAnswers)
     const late = waiter === undefined
     this.store.append(handle, { type: 'question/answered', version: QUESTION_EVENT_VERSION, requestId: id, answers, late })
     if (waiter !== undefined) {
@@ -385,6 +416,7 @@ export class QuestionService extends Service {
     }
     if (request.settled?.kind === 'cancelled') return { ...base, deadline: null, state: 'cancelled', reason: request.settled.reason }
     if (waiter !== undefined) return { ...base, state: 'waiting' }
+    if (!request.continuable) return { ...base, deadline: null, state: 'cancelled', reason: INTERRUPTED_REASON }
     return { ...base, deadline: null, state: request.expired ? 'pending' : 'continued' }
   }
 }

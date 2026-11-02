@@ -40,6 +40,8 @@ pub struct SessionMetaView {
     pub cwd: Option<String>,
     pub endpoint: Option<String>,
     pub model: Option<String>,
+    /// The session's recorded reasoning effort, which a fresh teammate takes from its Lead (issue #174).
+    pub reasoning_effort: Option<String>,
     /// The team this session belongs to (its Lead's id), when it is a teammate's.
     pub team_id: Option<SessionId>,
     /// The agent preset this session runs under (inventory A96), which a teammate takes from its Lead.
@@ -49,7 +51,7 @@ pub struct SessionMetaView {
 /// The metadata a teammate's session is created with: the attribution DSH's `childSessionMeta` writes, plus
 /// the team.
 ///
-/// For a `fresh` member the service fills `cwd`, `endpoint` and `model` from the Lead's metadata; for a `fork`
+/// For a `fresh` member the service fills `cwd`, `endpoint`, `model` and `reasoning_effort` from the Lead's metadata; for a `fork`
 /// the store takes them from the source session, as `SessionStore.fork` does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChildSession {
@@ -58,6 +60,9 @@ pub struct ChildSession {
     pub cwd: Option<String>,
     pub endpoint: Option<String>,
     pub model: Option<String>,
+    /// The Lead's reasoning effort for a `fresh` member (issue #174); a `fork` takes the source's, as the store's fork
+    /// copies it.
+    pub reasoning_effort: Option<String>,
     /// The Lead's session id.
     pub parent_session: SessionId,
     /// Always `subagent`.
@@ -81,6 +86,12 @@ pub trait TeamStore: Send + Sync {
     /// Every event of the session's log, in order, each the JSON object of one log line (with `seq`, `at`,
     /// `type`). An error when the session does not exist.
     fn read(&self, session: &str) -> Result<Vec<Value>, PortError>;
+    /// The seqs on the session's surface, in surface order, when the store can fold it; `None` when it cannot, and
+    /// then a policy note anywhere in the log counts (issue #185).
+    fn surface_nodes(&self, session: &str) -> Option<Vec<u64>> {
+        let _ = session;
+        None
+    }
 
     /// The session's metadata record, or `None` when there is no such session.
     fn meta(&self, session: &str) -> Option<SessionMetaView>;

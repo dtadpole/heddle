@@ -1035,7 +1035,11 @@ fn listing_entry(meta: &SessionMeta, state: &AppState) -> Value {
         return value;
     };
     let snapshot = state.runs().snapshot(&meta.id);
-    object.insert("running".into(), Value::Bool(snapshot.running));
+    // A turn the route did not start counts too (issue #187): a background subagent's child, a teammate, a notice's
+    // or a goal round runs on the agent runtime, and DSH's list says such a session is running — its tree counts a
+    // parent's running children from it (`dsh-client-ui-workspace` `runningChildCount`, "1 subagent running").
+    let running = snapshot.running || state.harness().turns.is_live(&meta.id);
+    object.insert("running".into(), Value::Bool(running));
     if let Some(since) = snapshot.running_since {
         object.insert("runningSince".into(), Value::String(iso_time(since)));
     }
@@ -5240,6 +5244,251 @@ mod tests {
         std::fs::remove_dir_all(&scratch).ok();
     }
 
+    /// A runner that writes into a real store what the agent loop writes, and fails the turn with the store's error as
+    /// `heddle`'s `Turns` maps a turn error (`ServiceError::new(error.to_string())`). With `mid_turn`, the prompt and the
+    /// model request land and the log then refuses every write (`0o444`), so the answer's first chunk is the append that
+    /// fails, after two events went out on the stream: developer-four's t4 on aac6797b.
+    #[cfg(unix)]
+    struct SavingTurns {
+        service: heddle_session::SessionService,
+        mid_turn: bool,
+    }
+
+    #[cfg(unix)]
+    impl TurnRunner for SavingTurns {
+        fn run_turn(
+            &self,
+            request: TurnRequest,
+        ) -> BoxFuture<'static, Result<TurnOutcome, ServiceError>> {
+            use std::os::unix::fs::PermissionsExt;
+            let service = self.service.clone();
+            let mid_turn = self.mid_turn;
+            Box::pin(async move {
+                let failed =
+                    |error: heddle_session::SessionError| ServiceError::new(error.to_string());
+                let handle = service
+                    .open(&request.session)
+                    .expect("the session the route opened");
+                service
+                    .user(&handle, &request.prompt, None)
+                    .map_err(failed)?;
+                if mid_turn {
+                    service
+                        .store()
+                        .model_request(
+                            &handle,
+                            &heddle_session::ModelRequestRecord {
+                                endpoint: "double".into(),
+                                ..heddle_session::ModelRequestRecord::default()
+                            },
+                        )
+                        .map_err(failed)?;
+                    std::fs::set_permissions(
+                        &handle.transcript,
+                        std::fs::Permissions::from_mode(0o444),
+                    )
+                    .unwrap();
+                    service
+                        .store()
+                        .assistant_chunk(
+                            &handle,
+                            &heddle_session::Chunk::TextDelta {
+                                text: "an answer the disk refuses".into(),
+                            },
+                        )
+                        .map_err(failed)?;
+                }
+                Ok(TurnOutcome::default())
+            })
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_turn_whose_prompt_cannot_be_saved_fails_in_words_on_the_stream_and_in_its_verdict() {
+        // #221 (J183): an append the store could not make reached the turn's error frame as the log's absolute path
+        // and the system's text (`…/<id>.v2.jsonl.zstd: No space left on device (os error 28)`), home directory
+        // included. The store now answers `the session could not be saved: <reason>`, in words, and the route carries
+        // that sentence on the stream and in a detached turn's verdict. The disk here is a log this user may not
+        // write, the one failure a test can cause for real: `permission denied`.
+        unsaved_turn_fails_in_words(false).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_turn_whose_answer_cannot_be_saved_mid_turn_ends_its_stream_and_verdict_in_words() {
+        // developer-four on aac6797b (J183's t4 with a short prompt): the prompt and the model request were saved and
+        // sent, the answer's first chunk was the append the disk refused, and the stream was reported to close with no
+        // error frame. Here the same order through the real store and the real route: two session frames, then the
+        // error frame with the words, and no chunk sent as if it were saved; the detached verdict carries the words too.
+        unsaved_turn_fails_in_words(true).await;
+    }
+
+    /// The route over a real store whose log refuses a write, at the prompt or mid-turn ([`SavingTurns`]).
+    #[cfg(unix)]
+    async fn unsaved_turn_fails_in_words(mid_turn: bool) {
+        use crate::adapters::StoreSessions;
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = std::env::temp_dir().join(format!(
+            "heddle-server-turn-unsaved-{}-{}-{mid_turn}",
+            std::process::id(),
+            token::now_ms()
+        ));
+        std::fs::create_dir_all(scratch.join("ws")).unwrap();
+        let scratch = std::fs::canonicalize(&scratch).unwrap();
+        // The boot's listener: every saved event is published on the server's hub, as heddle's session row wires it.
+        let hub = Arc::new(std::sync::OnceLock::<EventHub>::new());
+        let published = Arc::clone(&hub);
+        let inner = heddle_session::SessionService::new(
+            &heddle_session::SessionConfig {
+                root: Some(scratch.join("sessions").to_string_lossy().into_owned()),
+            },
+            &heddle_config::Env::default(),
+            Some(Arc::new(
+                move |handle: &heddle_session::SessionHandle,
+                      event: &heddle_session::SessionEvent| {
+                    if let Some(hub) = published.get() {
+                        crate::adapters::session_event_listener(hub.clone())(handle, event);
+                    }
+                },
+            )),
+        );
+        let handle = inner
+            .start(heddle_session::StartOptions {
+                cwd: Some(scratch.join("ws").to_string_lossy().into_owned()),
+                ..heddle_session::StartOptions::default()
+            })
+            .unwrap();
+        let writable = |yes: bool| {
+            std::fs::set_permissions(
+                &handle.transcript,
+                std::fs::Permissions::from_mode(if yes { 0o644 } else { 0o444 }),
+            )
+            .unwrap();
+        };
+        writable(false);
+        let binds = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&handle.transcript)
+            .is_err();
+        // Mid-turn, the runner takes the write away after the model request; otherwise the prompt is refused.
+        writable(mid_turn);
+        if !binds {
+            // Running as a user permissions do not bind (root): no failure to judge.
+            writable(true);
+            std::fs::remove_dir_all(&scratch).ok();
+            return;
+        }
+        let harness = Harness::new(
+            Arc::new(StoreSessions::new(inner.clone())),
+            Arc::new(Models),
+            Arc::new(SavingTurns {
+                service: inner.clone(),
+                mid_turn,
+            }),
+            Arc::new(Sandbox),
+            scratch.clone(),
+        );
+        let builder = ServerBuilder::new(
+            harness,
+            ServerOptions {
+                token: Some("test-token".into()),
+                // One secret folder per case: the two cases run in parallel in one process.
+                secret_path: Some(temp_secret(if mid_turn {
+                    "turn-unsaved-mid"
+                } else {
+                    "turn-unsaved"
+                })),
+                ..ServerOptions::default()
+            },
+        );
+        let _ = hub.set(builder.events());
+        let (router, state) = builder.into_router(3082).expect("the test router");
+        let mut pushed = state.events().subscribe();
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        const WORDS: &str = "the session could not be saved: permission denied";
+
+        let body = json!({"session": handle.id, "prompt": "t4"});
+        let (status, bytes) = post_json(&router, "/api/turn", &cookie, &body.to_string()).await;
+        let text = body_text(&bytes);
+        assert_eq!(status, StatusCode::OK, "{text}");
+        let frames: Vec<(String, Value)> = text
+            .split("\n\n")
+            .filter_map(|block| {
+                let name = block
+                    .lines()
+                    .find_map(|line| line.strip_prefix("event: "))?;
+                let data = block.lines().find_map(|line| line.strip_prefix("data: "))?;
+                Some((name.to_owned(), serde_json::from_str::<Value>(data).ok()?))
+            })
+            .collect();
+        let kinds: Vec<&str> = frames
+            .iter()
+            .map(|(name, data)| {
+                if name == "session" {
+                    data["event"]["type"].as_str().unwrap_or("")
+                } else {
+                    name.as_str()
+                }
+            })
+            .collect();
+        let expected: &[&str] = if mid_turn {
+            &["message", "model/request", "error"]
+        } else {
+            &["error"]
+        };
+        assert_eq!(
+            kinds, expected,
+            "what was saved, then the error frame, and nothing unsaved\n{text}"
+        );
+        // The frame parser above drops a block whose data is not JSON, so a malformed `done` would pass unseen there.
+        assert!(!text.contains("event: done"), "{text}");
+        let error = &frames.last().expect("a frame").1;
+        assert_eq!(error["message"], json!(WORDS), "in words\n{text}");
+        assert_eq!(error["session"], json!(handle.id));
+        assert!(
+            !text.contains(scratch.to_string_lossy().as_ref()),
+            "and without the store's path on disk\n{text}"
+        );
+
+        writable(mid_turn);
+        let body = json!({"session": handle.id, "prompt": "t5", "detach": true});
+        let (status, bytes) = post_json(&router, "/api/turn", &cookie, &body.to_string()).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{}", body_text(&bytes));
+        let turn = serde_json::from_slice::<Value>(&bytes).unwrap()["turn"]
+            .as_str()
+            .expect("the turn id")
+            .to_owned();
+        let mut seen = Vec::new();
+        let verdict = loop {
+            let (event, data, _) =
+                tokio::time::timeout(std::time::Duration::from_secs(5), next_pushed(&mut pushed))
+                    .await
+                    .expect("the verdict arrives");
+            if event == "turn" && data["turn"] == json!(turn) {
+                break data;
+            }
+            if event == "session" {
+                seen.push(data["event"]["type"].as_str().unwrap_or("").to_owned());
+            }
+        };
+        assert_eq!(verdict["outcome"], json!("error"));
+        assert_eq!(
+            verdict["message"],
+            json!(WORDS),
+            "the detached verdict carries the same sentence"
+        );
+        if mid_turn {
+            assert!(
+                seen.ends_with(&["message".to_owned(), "model/request".to_owned()]),
+                "the verdict follows the events that were saved: {seen:?}"
+            );
+        }
+        writable(true);
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
     /// A runner that counts the turns it is asked to run.
     struct CountingTurns(Arc<std::sync::atomic::AtomicUsize>);
 
@@ -5828,6 +6077,57 @@ mod tests {
             self.interrupted.lock().unwrap().push(session.to_owned());
             self.is_live(session)
         }
+    }
+
+    /// Issue #187: a session whose turn runs on the agent runtime (a background subagent's child) is listed
+    /// running, though the route never started it; the idle parent is not.
+    #[tokio::test]
+    async fn the_listing_counts_a_turn_the_agent_runtime_holds_as_running() {
+        let parent = "session-00000000-0000-0000-0000-000000000001";
+        let child = "session-00000000-0000-0000-0000-000000000002";
+        let mut sessions = Sessions::with_one();
+        let mut rest = Map::new();
+        rest.insert("parentSession".into(), Value::String(parent.into()));
+        rest.insert("origin".into(), Value::String("subagent".into()));
+        sessions.metas.push(SessionMeta {
+            id: child.into(),
+            rest,
+            ..SessionMeta::default()
+        });
+        let runner = Arc::new(LiveTurns {
+            live: vec![child.to_owned()],
+            interrupted: std::sync::Mutex::new(Vec::new()),
+        });
+        let (router, _) = ServerBuilder::new(
+            Harness::new(
+                Arc::new(sessions),
+                Arc::new(Models),
+                runner,
+                Arc::new(Sandbox),
+                PathBuf::from("/work"),
+            ),
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("listing-live-child")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, _, bytes) = call(&router, Method::GET, "/api/sessions", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let running = |id: &str| {
+            body.as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["id"] == id)
+                .map(|entry| entry["running"].clone())
+        };
+        assert_eq!(running(child), Some(Value::Bool(true)), "{body}");
+        assert_eq!(running(parent), Some(Value::Bool(false)), "{body}");
     }
 
     #[tokio::test]
