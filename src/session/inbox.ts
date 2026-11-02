@@ -157,9 +157,31 @@ export function queueTurn(
   return message
 }
 
-/** The queued next-turn message a request put there, so a retry of that request is answered with the same row (#162). */
+/**
+ * The next-turn message a request put in the queue, claimed or not, read from the log rather than from memory, so a
+ * retry of that request (also after a restart) is answered with the same row instead of a second one (#162).
+ */
 export function queuedByRequest(store: InboxStore, handle: SessionHandle, requestId: string): InboxMessage | undefined {
-  return pendingInbox(store, handle)['next-turn'].find((message) => message.requestId === requestId)
+  for (const event of store.read(handle)) {
+    if (event.type !== INBOX_SPLICED || event.target !== 'next-turn' || !Array.isArray(event.inserted)) continue
+    const found = (event.inserted as InboxMessage[]).find((message) => message.requestId === requestId)
+    if (found !== undefined) return found
+  }
+  return undefined
+}
+
+/**
+ * Move a queued prompt into the running turn: out of next-turn, onto the end of next-step, where the loop claims it at
+ * its next step boundary (DSH's steer of a queued row, #162). Answers whether it was still queued.
+ */
+export function steerQueued(store: InboxStore, handle: SessionHandle, id: string): boolean {
+  const inbox = pendingInbox(store, handle)
+  const start = inbox['next-turn'].findIndex((message) => message.id === id)
+  if (start === -1) return false
+  const message = inbox['next-turn'][start]!
+  store.append(handle, { type: INBOX_SPLICED, target: 'next-turn', start, removedCount: 1, inserted: [] })
+  store.append(handle, { type: INBOX_SPLICED, target: 'next-step', start: inbox['next-step'].length, inserted: [message] })
+  return true
 }
 
 /**
