@@ -127,6 +127,14 @@ pub trait RoundRunner: Send + Sync + 'static {
         prompt: String,
         source: GoalRoundSource,
     ) -> BoxFuture<'static, Result<(), String>>;
+
+    /// Whether a person's prompt waits in the session's next-turn queue (#162, #177): DSH's round driver yields to
+    /// queued input (`competingQueued`), so the queued turn runs first and its end asks for the next round. The default
+    /// has no queue.
+    fn competing(&self, session: &str) -> bool {
+        let _ = session;
+        false
+    }
 }
 
 /// What one chain did. Serialized `{rounds, stopped, blocked?, error?}`.
@@ -504,6 +512,15 @@ impl GoalDriver {
                         revision,
                         round,
                     };
+                    // A person's queued prompt goes first (#177); its turn's end requests the next round.
+                    if self.runner.competing(session) {
+                        return DriverOutcome {
+                            rounds,
+                            stopped: "yielded".to_owned(),
+                            blocked: None,
+                            error: None,
+                        };
+                    }
                     self.set_round_running(session, true);
                     let ran = self.runner.run(session, prompt, source).await;
                     self.set_round_running(session, false);
