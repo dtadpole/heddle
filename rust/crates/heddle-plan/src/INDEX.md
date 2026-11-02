@@ -16,7 +16,7 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 | File | What it is |
 |---|---|
 | [`lib.rs`](lib.rs) | the crate root, its documentation, the re-exports and `ROUTES` |
-| [`mode.rs`](mode.rs) | `plan_active`, `set_plan_mode`, the `plan/mode` event, the two notices, `PlanLog` and `PlanSessions` (ports `mode.ts`) |
+| [`mode.rs`](mode.rs) | `plan_active`, `set_plan_mode` (and `set_plan_mode_with`, unnarrated), the `plan/mode` event, the two notices, `PlanLog` and `PlanSessions` (ports `mode.ts`) |
 | [`policy.rs`](policy.rs) | `PLAN_POLICY_SECTION`, compared byte for byte with `policy.ts`, and `with_plan_policy` (ports `policy.ts`) |
 | [`tool.rs`](tool.rs) | `exit_plan_mode`: its spec, refusals and review outcomes, `PlanReviewChannel`, `plan_title` (ports `tool.ts`) |
 | [`service.rs`](service.rs) | `/plan`, `apply_plan_policy`, the `model/request` hook and `PlanService` (ports `service.ts`) |

@@ -21,10 +21,10 @@ import { MAX_UPLOAD_BYTES, saveUpload, UPLOAD_NOT_REFERENCED, uploadDirectory, u
 import { rendererFor, renderSourceOffThread } from './code.ts'
 import { pickFolder } from './picker.ts'
 import { createDirectory, DirectoryError, listDirectory } from './directories.ts'
-import { contextBreakdownWithFallback, projectLedger, projectRows, projectSessionStats, projectTimeline } from './ledger.ts'
+import { contextBreakdownWithFallback, isReplacementCopy, projectLedger, projectRows, projectSessionStats, projectTimeline } from './ledger.ts'
 import { catalogOf } from './tool-catalog.ts'
 import { inspectTool } from './tool-inspector.ts'
-import { isHtmlDocument, NOT_AN_HTML_DOCUMENT, PREVIEW_CSP, rewriteResources } from './html.ts'
+import { isHtmlDocument, NOT_AN_HTML_DOCUMENT, PREVIEW_CSP, PREVIEW_FRAME_CSP, PREVIEW_SHELL, rewriteResources } from './html.ts'
 import { renderMarkdownOffThread } from './markdown.ts'
 import { acceptedLanguages, documentLanguage, negotiateLocale, type Locale } from '../config/locale.ts'
 import { presetRoster, type PresetDefinition, type PresetResolution } from '../config/presets.ts'
@@ -808,6 +808,16 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     return
   }
 
+  // Behind the existing auth door; deliberately no query parsing, workspace lookup or file read.
+  if (url.pathname === '/api/html/frame' && request.method === 'GET') {
+    respond(response, 200, 'text/html; charset=utf-8', PREVIEW_SHELL, {
+      'x-content-type-options': 'nosniff',
+      'referrer-policy': 'no-referrer',
+      'content-security-policy': PREVIEW_FRAME_CSP,
+    })
+    return
+  }
+
   /**
    * An HTML document, prepared to be shown as a page.
    *
@@ -863,12 +873,18 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
      * "Weaving" row reconcile against. A page can miss the end of a turn (an error event, a reload mid-turn, a
      * dropped stream); without an authoritative answer that miss became a session that never stops looking active.
      */
+    /**
+     * A turn the route did not start counts too (issue #187): a background subagent's child, a teammate, a notice's
+     * or a goal round run on the agent runtime, and DSH's list says such a session is running — its tree counts a
+     * parent's running children from it (`dsh-client-ui-workspace` `runningChildCount`, "1 subagent running").
+     */
+    const turns = ctx.get('turns') as TurnRegistry | undefined
     const sessions = ctx.session.list().map((entry) => {
       const since = state.runningSince.get(entry.id)
       const completed = state.completedAt.get(entry.id)
       return {
         ...entry,
-        running: (state.running.get(entry.id) ?? 0) > 0,
+        running: (state.running.get(entry.id) ?? 0) > 0 || turns?.isRunning(entry.id) === true,
         ...(since !== undefined ? { runningSince: new Date(since).toISOString() } : {}),
         ...(completed !== undefined ? { turnCompletedAt: new Date(completed).toISOString() } : {}),
       }
@@ -3216,7 +3232,12 @@ export function unknownTurnSession(
       try {
         ctx.session.store.append(handle, { type: 'turn/failed', message: (error as Error).message })
       } catch (recordError) {
-        ctx.logger.warn('web: the failed turn could not be recorded — %s', (recordError as Error).message)
+        /**
+         * The server's own line, in the Rust build's words (`record_turn_failure`): a refused turn — a session another
+         * process holds (#202) — cannot record its failure either, and a `warn` record reaches no output at the default
+         * logger level, so the server said nothing at all.
+         */
+        process.stderr.write(`heddle web: the failed turn could not be recorded: ${(recordError as Error).message}\n`)
       }
     }
   } finally {
@@ -3836,6 +3857,13 @@ export function transcriptTurns(
       continue
     }
     if (event.type === 'message') {
+      /**
+       * A replacement copy is not a turn. It is a message that shadows part of the model's surface: today, a tool result
+       * cut down under context pressure (`src/context/prune.ts`). It is what the model is sent, not what a person reads,
+       * and the original it shadows is already on the call. DSH's chat keeps such a copy model-only (`isAppendSurfaceEvent`).
+       * Folded, it became a second, unpaired tool row (#186).
+       */
+      if (isReplacementCopy(event)) continue
       /** A message is a whole thing, not a delta, so whatever run was open has ended. */
       closeRuns()
       const message = event.message as
@@ -4179,20 +4207,19 @@ export function inlineScripts(html: string): string[] {
  *
  * Defence in depth behind the sanitizer (live issues developer-two-6 and -7). Approved by the coordinator as option (1):
  * `script-src` is strict ('self' and the sha256 of each inline script, computed from the page as served, so the policy
- * follows every page change); images, stylesheets, fonts and media may also come over `https:` only because the HTML
- * preview is a `srcdoc` frame, which inherits this policy, and a previewed document may load remote assets under its own
- * `PREVIEW_CSP`. Serving the preview at its own URL (issue #50) would let these drop `https:`. The Rust `page_policy`
- * writes the same.
+ * follows every page change). The HTML preview loads a fixed shell with its own response policy (#50), separate
+ * from this main DOM policy. Markdown images render in the main DOM and retain HTTPS; remote styles, fonts and
+ * media belong to the HTML shell policy, not this page. Rust `page_policy` agrees.
  */
 export function pagePolicy(html: string, browserEnabled = false): string {
   const hashes = inlineScripts(html).map((code) => `'sha256-${createHash('sha256').update(code, 'utf8').digest('base64')}'`)
   return [
     "default-src 'self'",
     ["script-src 'self'", ...hashes].join(' '),
-    "style-src 'self' 'unsafe-inline' https:",
+    "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob: https:",
-    "font-src 'self' data: https:",
-    "media-src 'self' https:",
+    "font-src 'self' data:",
+    "media-src 'self'",
     browserEnabled ? 'frame-src http: https:' : "frame-src 'self'",
     "object-src 'none'",
     "base-uri 'self'",

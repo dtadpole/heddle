@@ -91,6 +91,7 @@ pub const SERVER_CORE_ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/todo"),
     ("GET", "/api/team"),
     ("GET", "/api/html"),
+    ("GET", "/api/html/frame"),
     ("GET", "/vendor/purify.js"),
 ];
 
