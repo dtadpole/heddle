@@ -185,6 +185,16 @@ pub struct ModeWrite {
 }
 
 /// The session store, as the routes use it. Ids are strings the routes have already validated.
+/// One prompt waiting in a session's next-turn queue (#162).
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueueRow {
+    pub id: String,
+    /// The page's id for the send that queued it.
+    pub request_id: Option<String>,
+    /// The user message's parts: text first, then any attachments.
+    pub content: Vec<Value>,
+}
+
 pub trait SessionService: Send + Sync {
     /// Every session's meta, in the store's order.
     fn list(&self) -> Vec<SessionMeta>;
@@ -264,6 +274,47 @@ pub trait SessionService: Send + Sync {
     /// keeps no presets.
     fn record_preset(&self, id: &str, preset: &str) -> Option<SessionMeta> {
         let _ = (id, preset);
+        None
+    }
+
+    /// Queue a prompt in the session's durable next-turn inbox (#162): `content` is the user message's parts, and
+    /// `request_id` the page's id for the send. The default keeps no queue.
+    fn queue_turn(
+        &self,
+        id: &str,
+        content: Vec<Value>,
+        request_id: Option<String>,
+    ) -> Result<QueueRow, ServiceError> {
+        let _ = (id, content, request_id);
+        Err(ServiceError::new("this session store keeps no queue"))
+    }
+
+    /// The session's queued prompts, oldest first (#162).
+    fn queued(&self, id: &str) -> Vec<QueueRow> {
+        let _ = id;
+        Vec::new()
+    }
+
+    /// Take a queued prompt back out, as DSH's canceled splice; whether it was still queued (#162).
+    fn remove_queued(&self, id: &str, row: &str) -> Result<bool, ServiceError> {
+        let _ = (id, row);
+        Ok(false)
+    }
+
+    /// Rewrite a queued prompt's parts in place; whether it was still queued (#162).
+    fn replace_queued(
+        &self,
+        id: &str,
+        row: &str,
+        content: Vec<Value>,
+    ) -> Result<bool, ServiceError> {
+        let _ = (id, row, content);
+        Ok(false)
+    }
+
+    /// Claim the first queued prompt for the turn about to answer it (#162).
+    fn claim_next_turn(&self, id: &str) -> Option<QueueRow> {
+        let _ = id;
         None
     }
 

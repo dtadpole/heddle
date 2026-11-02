@@ -15,7 +15,7 @@ use serde_json::Value;
 
 use crate::selection::SessionSelection;
 use crate::services::{
-    CreatedSession, FlagPatch, ForkOutcome, ModeWrite, OpenAt, ServiceError, SessionMeta,
+    CreatedSession, FlagPatch, ForkOutcome, ModeWrite, OpenAt, QueueRow, ServiceError, SessionMeta,
     SessionService, StartSession,
 };
 use crate::stream::EventHub;
@@ -287,6 +287,67 @@ impl SessionService for StoreSessions {
             changed: change.changed,
             seq: change.event.map(|event| event.seq),
         })
+    }
+
+    fn queue_turn(
+        &self,
+        id: &str,
+        content: Vec<Value>,
+        request_id: Option<String>,
+    ) -> Result<QueueRow, ServiceError> {
+        let handle = self
+            .handle(id)
+            .ok_or_else(|| ServiceError::new(format!("no session {id}")))?;
+        let parts = parts_of(content)?;
+        let store = self.service.store();
+        if let Some(request) = request_id.as_deref()
+            && let Some(already) = heddle_session::inbox::queued_by_request(store, &handle, request)
+                .map_err(|error| ServiceError::new(error.to_string()))?
+        {
+            return Ok(queue_row(already));
+        }
+        heddle_session::inbox::queue_turn_request(store, &handle, parts, None, request_id)
+            .map(queue_row)
+            .map_err(|error| ServiceError::new(error.to_string()))
+    }
+
+    fn queued(&self, id: &str) -> Vec<QueueRow> {
+        let Some(handle) = self.handle(id) else {
+            return Vec::new();
+        };
+        heddle_session::inbox::pending_inbox(self.service.store(), &handle)
+            .map(|inbox| inbox.next_turn.into_iter().map(queue_row).collect())
+            .unwrap_or_default()
+    }
+
+    fn remove_queued(&self, id: &str, row: &str) -> Result<bool, ServiceError> {
+        let handle = self
+            .handle(id)
+            .ok_or_else(|| ServiceError::new(format!("no session {id}")))?;
+        heddle_session::inbox::remove_queued(self.service.store(), &handle, row)
+            .map_err(|error| ServiceError::new(error.to_string()))
+    }
+
+    fn replace_queued(
+        &self,
+        id: &str,
+        row: &str,
+        content: Vec<Value>,
+    ) -> Result<bool, ServiceError> {
+        let handle = self
+            .handle(id)
+            .ok_or_else(|| ServiceError::new(format!("no session {id}")))?;
+        let parts = parts_of(content)?;
+        heddle_session::inbox::replace_queued(self.service.store(), &handle, row, parts)
+            .map_err(|error| ServiceError::new(error.to_string()))
+    }
+
+    fn claim_next_turn(&self, id: &str) -> Option<QueueRow> {
+        let handle = self.handle(id)?;
+        heddle_session::inbox::claim_next_turn(self.service.store(), &handle)
+            .ok()
+            .flatten()
+            .map(queue_row)
     }
 
     fn user_content(&self, id: &str, content: Vec<Value>) -> Result<(), ServiceError> {
@@ -728,5 +789,27 @@ mod tests {
         assert_eq!(sessions.meta(id), None);
         assert_eq!(sessions.effective_mode(id, "read-only"), "read-only");
         assert_eq!(sessions.folder(id), None);
+    }
+}
+
+/// Content parts from their JSON form (the queue's, #162).
+fn parts_of(content: Vec<Value>) -> Result<Vec<heddle_session::ContentPart>, ServiceError> {
+    content
+        .into_iter()
+        .map(serde_json::from_value::<heddle_session::ContentPart>)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| ServiceError::new(format!("a content part is malformed: {error}")))
+}
+
+/// A queued inbox message as the server's row (#162).
+fn queue_row(message: heddle_session::inbox::InboxMessage) -> QueueRow {
+    QueueRow {
+        id: message.id,
+        request_id: message.request_id,
+        content: message
+            .content
+            .iter()
+            .filter_map(|part| serde_json::to_value(part).ok())
+            .collect(),
     }
 }

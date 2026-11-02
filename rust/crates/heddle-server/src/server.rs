@@ -435,6 +435,9 @@ impl ServerBuilder {
             .route("/api/sessions/{id}", get(session_view_route))
             .route("/api/sessions/{id}/fork", post(fork_session))
             .route("/api/sessions/{id}/flags", post(flags_session))
+            .route("/api/sessions/{id}/queue", get(queue_list))
+            .route("/api/sessions/{id}/queue/remove", post(queue_remove))
+            .route("/api/sessions/{id}/queue/edit", post(queue_edit))
             .route("/api/sessions/{id}/title", post(title_session))
             .route("/api/sessions/{id}/permission", post(permission_session))
             .route("/api/sessions/{id}/steer", post(steer_session))
@@ -2496,6 +2499,47 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
         sessions.record_preset(&session, named);
     }
 
+    // A prompt the page queued (`queue: true`) for a session that is busy, or already has prompts waiting, goes into
+    // the session's durable next-turn queue and is answered at once (#162), as DSH queues it on the host. A retry with
+    // the same `requestId` answers the row it queued; on a free session the prompt runs now. web.ts does the same.
+    if body.bool("queue") == Some(true) {
+        let request_id = body.non_empty("requestId").map(str::to_owned);
+        let sessions = state.harness().sessions.clone();
+        let already = request_id.as_deref().and_then(|request| {
+            sessions
+                .queued(&session)
+                .into_iter()
+                .find(|row| row.request_id.as_deref() == Some(request))
+        });
+        let busy = state.runs().is_running(&session) || state.harness().turns.is_live(&session);
+        if already.is_some() || busy || !sessions.queued(&session).is_empty() {
+            let duplicate = already.is_some();
+            let row = match already {
+                Some(row) => row,
+                None => {
+                    let mut content = vec![json!({"type": "text", "text": prompt})];
+                    content.extend(attachments.iter().cloned());
+                    match sessions.queue_turn(&session, content, request_id) {
+                        Ok(row) => row,
+                        Err(error) => {
+                            return respond::error(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                &error.message,
+                            );
+                        }
+                    }
+                }
+            };
+            kick_queue(&state, &session);
+            let mut answer =
+                json!({"session": session, "queued": true, "id": row.id, "duplicate": duplicate});
+            if let Some(request) = row.request_id {
+                answer["requestId"] = Value::String(request);
+            }
+            return respond::json(StatusCode::ACCEPTED, &answer);
+        }
+    }
+
     // Checked again here: the shutdown may have begun while the session was opened. A turn that slips past this
     // starts stopped (`RunRegistry::begin`).
     if state.runs().is_closing() {
@@ -3094,6 +3138,219 @@ async fn stream_terminal(
         .header("x-accel-buffering", "no")
         .body(Body::from_stream(body))
         .expect("a response builder with static headers")
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// The session queue (#162): the durable next-turn inbox, kept by the host as DSH keeps it. `src/server/queue.ts`.
+
+/// A queued row as a page draws it: `{id, requestId?, text, editable, content}`.
+fn queue_item(row: &crate::services::QueueRow) -> Value {
+    let text: String = row
+        .content
+        .iter()
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect();
+    let editable = row
+        .content
+        .iter()
+        .all(|part| part.get("type").and_then(Value::as_str) == Some("text"));
+    let mut item =
+        json!({"id": row.id, "text": text, "editable": editable, "content": row.content});
+    if let Some(request) = &row.request_id {
+        item["requestId"] = Value::String(request.clone());
+    }
+    item
+}
+
+/// `GET /api/sessions/{id}/queue` — `{items}`, oldest first. Asking also wakes the drain, so rows a restart left run once
+/// the session is free.
+async fn queue_list(State(state): State<AppState>, SessionPath(id): SessionPath) -> Response {
+    let id = id.as_str().to_owned();
+    let sessions = state.harness().sessions.clone();
+    if !sessions.exists(&id) {
+        return respond::no_session(&id);
+    }
+    kick_queue(&state, &id);
+    let items: Vec<Value> = sessions.queued(&id).iter().map(queue_item).collect();
+    respond::json(StatusCode::OK, &json!({"items": items}))
+}
+
+/// `POST /api/sessions/{id}/queue/remove {id}` — `{outcome: 'removed'}`, or `409 {outcome: 'claimed'}`.
+async fn queue_remove(
+    State(state): State<AppState>,
+    SessionPath(id): SessionPath,
+    body: JsonBody,
+) -> Response {
+    let id = id.as_str().to_owned();
+    let sessions = state.harness().sessions.clone();
+    if !sessions.exists(&id) {
+        return respond::no_session(&id);
+    }
+    let Some(row) = body.non_empty("id") else {
+        return respond::error(StatusCode::BAD_REQUEST, "an id is required");
+    };
+    match sessions.remove_queued(&id, row) {
+        Ok(true) => respond::json(StatusCode::OK, &json!({"outcome": "removed", "id": row})),
+        Ok(false) => respond::json(
+            StatusCode::CONFLICT,
+            &json!({"outcome": "claimed", "id": row, "error": format!("queued message {row} is no longer waiting")}),
+        ),
+        Err(error) => respond::error(StatusCode::INTERNAL_SERVER_ERROR, &error.message),
+    }
+}
+
+/// `POST /api/sessions/{id}/queue/edit {id, text}` — text-only rows; `400` for one with an attachment, `409` once
+/// claimed.
+async fn queue_edit(
+    State(state): State<AppState>,
+    SessionPath(id): SessionPath,
+    body: JsonBody,
+) -> Response {
+    let id = id.as_str().to_owned();
+    let sessions = state.harness().sessions.clone();
+    if !sessions.exists(&id) {
+        return respond::no_session(&id);
+    }
+    let Some(row) = body.non_empty("id") else {
+        return respond::error(StatusCode::BAD_REQUEST, "an id is required");
+    };
+    let Some(text) = body.str("text").filter(|text| !text.trim().is_empty()) else {
+        return respond::error(StatusCode::BAD_REQUEST, "a non-empty text is required");
+    };
+    let Some(current) = sessions
+        .queued(&id)
+        .into_iter()
+        .find(|queued| queued.id == row)
+    else {
+        return respond::json(
+            StatusCode::CONFLICT,
+            &json!({"outcome": "claimed", "id": row, "error": format!("queued message {row} is no longer waiting")}),
+        );
+    };
+    if !current
+        .content
+        .iter()
+        .all(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+    {
+        return respond::error(
+            StatusCode::BAD_REQUEST,
+            "a queued message with an attachment cannot be edited; remove it and send it again",
+        );
+    }
+    match sessions.replace_queued(&id, row, vec![json!({"type": "text", "text": text})]) {
+        Ok(true) => respond::json(StatusCode::OK, &json!({"outcome": "edited", "id": row})),
+        Ok(false) => respond::json(
+            StatusCode::CONFLICT,
+            &json!({"outcome": "claimed", "id": row, "error": format!("queued message {row} is no longer waiting")}),
+        ),
+        Err(error) => respond::error(StatusCode::INTERNAL_SERVER_ERROR, &error.message),
+    }
+}
+
+/// Sessions whose queue drain is running, so each has one drainer at most.
+fn draining() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static DRAINING: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    DRAINING.get_or_init(Default::default)
+}
+
+/// Run the session's queued prompts, one turn each, once it has nothing in flight (#162). A no-op when one drainer is
+/// already at it or nothing waits. The drainer waits for the session to go idle (the route's own turns and every turn
+/// the agent runtime holds, a `/compact` included), claims the first row and runs it as the next turn, and repeats.
+fn kick_queue(state: &AppState, session: &str) {
+    if state.harness().sessions.queued(session).is_empty() {
+        return;
+    }
+    {
+        let mut active = draining()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !active.insert(session.to_owned()) {
+            return;
+        }
+    }
+    let state = state.clone();
+    let session = session.to_owned();
+    tokio::spawn(async move {
+        loop {
+            // Idle: no turn of the route's, none the agent runtime holds. Polled, because the two registries have no
+            // shared waiter; a tenth of a second is far below a turn's length.
+            while state.runs().is_running(&session) || state.harness().turns.is_live(&session) {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            // One more beat past the turn that just settled, so its own listeners (the goal driver's) have run.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if state.runs().is_running(&session) || state.harness().turns.is_live(&session) {
+                continue;
+            }
+            if state.runs().is_closing() {
+                break;
+            }
+            let Some(row) = state.harness().sessions.claim_next_turn(&session) else {
+                break;
+            };
+            run_queued(&state, &session, row).await;
+        }
+        draining()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&session);
+        // A row queued while the drainer was leaving gets a drainer of its own.
+        kick_queue(&state, &session);
+    });
+}
+
+/// One claimed row as the session's next turn, on its recorded selection, with its verdict on the stream as a detached
+/// turn's.
+async fn run_queued(state: &AppState, session: &str, row: crate::services::QueueRow) {
+    let sessions = state.harness().sessions.clone();
+    let meta = sessions.meta(session);
+    let recorded = session_request_selection(meta.as_ref());
+    let Some(selection) = turn_selection(
+        None,
+        None,
+        None,
+        &recorded,
+        state.options().default_endpoint.as_deref(),
+        state.harness().models.as_ref(),
+    ) else {
+        return;
+    };
+    let text: String = row
+        .content
+        .iter()
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect();
+    let attachments: Vec<Value> = row
+        .content
+        .iter()
+        .filter(|part| part.get("type").and_then(Value::as_str) != Some("text"))
+        .cloned()
+        .collect();
+    let guard = state.runs().begin(session);
+    let cancel = guard.cancellation();
+    let request = crate::services::TurnRequest {
+        session: session.to_owned(),
+        endpoint: selection.endpoint.clone(),
+        prompt: text,
+        attachments,
+        cancel: cancel.clone(),
+        max_rounds: state.options().max_rounds,
+        model: selection.model.clone(),
+        reasoning_effort: selection.reasoning_effort.clone(),
+    };
+    let outcome = state.harness().turns.clone().run_turn(request).await;
+    drop(guard);
+    let (outcome_name, mut verdict, failure) =
+        turn_verdict(outcome, cancel.is_cancelled(), session, false);
+    verdict.insert("turn".into(), Value::String(stream::new_client_id()));
+    verdict.insert("outcome".into(), Value::String(outcome_name.to_owned()));
+    state.events().push(names::TURN, &Value::Object(verdict));
+    if let Some(message) = failure {
+        record_turn_failure(sessions.as_ref(), session, message);
+    }
 }
 
 #[cfg(test)]
