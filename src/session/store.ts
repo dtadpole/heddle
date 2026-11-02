@@ -1412,6 +1412,31 @@ export class SessionStore {
   }
 
   /**
+   * Append several events as **one write**, whole or not at all (#162, developer-eight's review): the next-turn claim
+   * and the user message it delivers, or a row moved from the queue into the next step, must never land half, which
+   * two appends would allow on a crash or a failed write between them. Each event gets its own seq and is published
+   * after the write, as `append` publishes one; a user message dates the row as `message` does.
+   */
+  appendAll(handle: SessionHandle, events: readonly (Omit<SessionEvent, 'seq' | 'at'> & { readonly type: string })[]): readonly SessionEvent[] {
+    if (events.length === 0) return []
+    this.claim(handle)
+    const at = new Date().toISOString()
+    const first = this.count(handle)
+    const records: SessionEvent[] = events.map((event, index) => ({ seq: first + index, at, ...event }))
+    const entry = this.load(handle)
+    const lines = records.map((record) => `${JSON.stringify(record)}\n`)
+    this.appendBytes(handle, entry, entry.framed ? Buffer.concat(lines.map((line) => encodeFrame(line))) : Buffer.from(lines.join(''), 'utf8'))
+    entry.events.push(...records)
+    for (const record of records) {
+      this.onEvent?.(handle, record)
+      this.titles.observe(handle, record)
+      const message = record.type === 'message' ? (record.message as RecordedMessage | undefined) : undefined
+      if (message?.role === 'user') this.touch(handle, { bumpTurns: true, ...(message.source === undefined ? { promptedAt: record.at } : {}) })
+    }
+    return records
+  }
+
+  /**
    * Take this session's writer lock, or throw {@link SessionOwnedError} while another process holds it.
    *
    * `append` calls it, so a caller only needs it to be refused **before** doing anything else — a route that
