@@ -116,6 +116,8 @@ function harness(admission: Admission = 'streamed', outcome = 'done'): Harness {
     const fetchSessionAccess = async () => {}, stopTurn = async () => {};
     let adoptionOrder = null;
     const windowFor = () => undefined;
+    // #251: a turn's end asks the transcript for model-retry rows still waiting; this harness draws none.
+    const log = { querySelectorAll: () => [] };
     const cells = new Map();
     const statusBar = { hidden: false, querySelector(selector) {
       if (!cells.has(selector)) cells.set(selector, { textContent: '', hidden: false });
