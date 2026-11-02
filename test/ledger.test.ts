@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 
-import { contextBreakdownWithFallback, laneOf, previewOf, projectLedger, projectRows, projectSessionStats, projectTimeline, type LedgerEvent } from '../src/server/ledger.ts'
+import { contextBreakdownWithFallback, isReplacementCopy, laneOf, previewOf, projectLedger, projectRows, projectSessionStats, projectTimeline, type LedgerEvent } from '../src/server/ledger.ts'
 
 /**
  * Unit tests for the Trajectory ledger.
@@ -14,6 +14,50 @@ import { contextBreakdownWithFallback, laneOf, previewOf, projectLedger, project
 
 /** One logged event, in the shape the ledger reads: a sequence, a time, and whatever the type carries. */
 const event = (seq: number, at: string, rest: Record<string, unknown>): LedgerEvent => ({ seq, at, ...rest }) as LedgerEvent
+
+test('model selection is durable metadata, not a leading trajectory section', () => {
+  const activity: LedgerEvent[] = [
+    event(1, '2026-10-31T09:00:01.000Z', { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'one' }] } }),
+    event(2, '2026-10-31T09:00:01.100Z', { type: 'model/request', estimatedTokens: 10 }),
+    event(3, '2026-10-31T09:00:01.200Z', { type: 'assistant/completed', text: 'first' }),
+    event(4, '2026-10-31T09:00:01.200Z', { type: 'turn/completed', rounds: 1 }),
+    event(5, '2026-10-31T09:00:02.000Z', { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'two' }] } }),
+    event(6, '2026-10-31T09:00:02.100Z', { type: 'model/request', estimatedTokens: 10 }),
+    event(7, '2026-10-31T09:00:02.200Z', { type: 'assistant/completed', text: 'second' }),
+    event(8, '2026-10-31T09:00:02.200Z', { type: 'turn/completed', rounds: 1 }),
+  ]
+  const selection = event(0, '2026-10-31T09:00:00.000Z', { type: 'model/selection', endpoint: 'scripted', reasoningEffort: 'high' })
+  const baseline = projectLedger(activity)
+  const ledger = projectLedger([selection, ...activity])
+  const rows = projectRows(ledger)
+  assert.equal(rows.filter((row) => row.turnStart).length, 2, 'two prompts, two boundaries')
+  assert.equal(rows[0]?.kind, 'user', 'the overview reaches turn one at row zero')
+  assert.deepEqual(ledger, baseline, 'metadata changes no activity counters or records')
+  assert.deepEqual(rows, projectRows(baseline))
+  assert.deepEqual(projectTimeline(ledger), projectTimeline(baseline))
+  assert.deepEqual(projectSessionStats([selection, ...activity]), projectSessionStats(activity))
+})
+
+test('model selection exclusion keeps real commands and unknown events in their sections', () => {
+  const activity: LedgerEvent[] = [
+    event(1, '2026-10-31T09:00:00.100Z', { type: 'command/run', name: 'permission' }),
+    event(2, '2026-10-31T09:00:01.000Z', { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'one' }] } }),
+    event(3, '2026-10-31T09:00:01.100Z', { type: 'turn/completed', rounds: 1 }),
+    event(4, '2026-10-31T09:00:02.000Z', { type: 'command/run', name: 'permission' }),
+    event(5, '2026-10-31T09:00:02.100Z', { type: 'command/done', text: 'done' }),
+    event(6, '2026-10-31T09:00:03.000Z', { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'two' }] } }),
+    event(7, '2026-10-31T09:00:03.100Z', { type: 'custom/event', detail: 'kept' }),
+    event(8, '2026-10-31T09:00:03.200Z', { type: 'turn/completed', rounds: 1 }),
+  ]
+  const selection = (seq: number) => event(seq, '2026-10-31T09:00:00.000Z', { type: 'model/selection', endpoint: 'scripted' })
+  const decorated = [selection(0), ...activity.flatMap((item) => [item, selection((item.seq ?? 0) + 10)])]
+  const ledger = projectLedger(decorated)
+  assert.deepEqual(ledger, projectLedger(activity), 'selection before, within, between and after turns is metadata only')
+  const rows = projectRows(ledger)
+  assert.equal(rows[0]?.record.label, 'command/run', 'a legitimate leading command stays')
+  assert.deepEqual(rows.filter((row) => row.loose && row.record.afterTurn === 1).map((row) => [row.record.label, row.turnStart]), [['command/run', true], ['command/done', false]])
+  assert.ok(rows.some((row) => row.kind === 'system' && row.record.label === 'custom/event' && row.record.text.includes('kept')))
+})
 
 test('one prompt becomes one turn with its steps, and the records are grouped under them', () => {
   const ledger = projectLedger([
@@ -690,4 +734,27 @@ test("a user record carries its images and files in content order, as DSH's insp
   assert.deepEqual(users, JSON.parse(readFileSync(new URL('attachments.expected.json', timelineFixture), 'utf8')))
   const plain = projectLedger([{ seq: 1, type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'hi' }] } }])
   assert.equal('attachments' in (plain.turns[0]?.steps[0]?.records[0] ?? {}), false, 'a message without attachments carries no key')
+})
+
+test('a tool result pruned under context pressure keeps one row with the original, the same as the Rust projection (shared fixture)', () => {
+  /**
+   * #186: a pruned copy is written as a second `message` for the same call, marked `surfaceOp: { op: 'replace' }`. DSH keeps
+   * a replacement copy model-only (`isAppendSurfaceEvent`), and its trajectory keeps the call's first result. Both builds
+   * found the call already answered and drew the copy as an extra, unpaired "tool result" row.
+   */
+  const events = readFileSync(new URL('pruned-result.jsonl', timelineFixture), 'utf8')
+    .split('\n')
+    .filter((line) => line.trim() !== '')
+    .map((line) => JSON.parse(line) as LedgerEvent)
+  const original = events.find((one) => one.seq === 5)?.message?.content?.[0]?.text
+  const rows = projectRows(projectLedger(events))
+  const tools = rows.filter((row) => row.kind === 'tool')
+  assert.deepEqual(
+    tools.map((row) => ({ label: row.record.label, result: row.record.result })),
+    [{ label: '→ read_file', result: original }],
+    'one row for the call, holding what the tool returned',
+  )
+  assert.ok(!rows.some((row) => `${row.record.text}${row.record.result ?? ''}`.includes('[pruned,')), 'and the cut copy is drawn nowhere')
+  assert.equal(isReplacementCopy({ type: 'message', surfaceOp: 'append' }), false, 'an append is not a replacement')
+  assert.equal(isReplacementCopy({ type: 'message' }), false, 'nor is an event without a marker')
 })

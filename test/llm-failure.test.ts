@@ -3,7 +3,7 @@ import { createServer } from 'node:http'
 import { test } from 'node:test'
 
 import { failureCode, failureMessage, providerMessage, WINDOW_REMEDY, wire } from '../src/llm/http.ts'
-import { CONTEXT_WINDOW_EXCEEDED, ModelError } from '../src/llm/types.ts'
+import { CONTEXT_WINDOW_EXCEEDED, ModelError, QUOTA_EXCEEDED } from '../src/llm/types.ts'
 
 /**
  * What a refused HTTP call is coded as, and what it says (#153).
@@ -72,7 +72,8 @@ test('a window refusal names the way out, and any other failure does not', () =>
     `'chat' answered 400 — This model's maximum context length is 8192 tokens. ${WINDOW_REMEDY}`,
     'a sentence that already ends is not given a second full stop',
   )
-  assert.equal(failureMessage('chat', 401, '{"error":{"message":"bad key"}}'), "'chat' answered 401 — bad key")
+  // Any other failure keeps the provider's sentence and adds nothing (a 401 or 403 says the key is invalid, S31).
+  assert.equal(failureMessage('chat', 500, '{"error":{"message":"upstream broke"}}'), "'chat' answered 500 — upstream broke")
   assert.equal(failureMessage('chat', 503, ''), "'chat' answered 503")
 })
 
@@ -98,4 +99,29 @@ test("over the wire, Anthropic's refusal is recoverable and fails with the sente
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()))
   }
+})
+
+test('a refused credential says the key is invalid, without the provider\'s words (S31)', () => {
+  const body = JSON.stringify({ error: { message: 'Incorrect API key provided: sk-abc****wxyz', code: 'invalid_api_key' } })
+  const said = failureMessage('scripted', 401, body)
+  assert.equal(said, "'scripted' answered 401 — API key is invalid; check the key this endpoint reads.")
+  assert.ok(!said.includes('sk-'), 'no part of the key')
+  assert.equal(failureMessage('scripted', 403, 'forbidden'), "'scripted' answered 403 — API key is invalid; check the key this endpoint reads.")
+  assert.equal(failureCode(401, body), 'HTTP', 'the retry policy reads 401 and 403 as AUTH by status')
+})
+
+test('a quota refusal is its own code at any status and says so (S31)', () => {
+  const openai = JSON.stringify({ error: { message: 'You exceeded your current quota, please check your plan and billing details.', type: 'insufficient_quota' } })
+  assert.equal(failureCode(429, openai), QUOTA_EXCEEDED, 'a quota 429 is not a rate limit, so the retry policy leaves it')
+  assert.equal(failureMessage('scripted', 429, openai), "'scripted' answered 429 — You exceeded your current quota, please check your plan and billing details. Request quota exhausted.")
+  const deepseek = JSON.stringify({ error: { message: 'Insufficient Balance' } })
+  assert.equal(failureCode(402, deepseek), QUOTA_EXCEEDED)
+  assert.equal(failureMessage('deepseek', 402, deepseek), "'deepseek' answered 402 — Insufficient Balance. Request quota exhausted.")
+  for (const body of ['quota_exceeded', 'usage limit reached for this month', 'credits exhausted', 'Balance depleted', 'you are out of budget', 'exceeds the quota']) {
+    assert.equal(failureCode(429, body), QUOTA_EXCEEDED, body)
+  }
+  for (const body of [JSON.stringify({ error: { message: 'Rate limit reached for requests' } }), 'quota. exceeded', 'the quota is fine', 'insufficiently quoted']) {
+    assert.equal(failureCode(429, body), 'HTTP', body)
+  }
+  assert.equal(failureMessage('scripted', 429, JSON.stringify({ error: { message: 'Rate limit reached for requests' } })), "'scripted' answered 429 — Rate limit reached for requests")
 })

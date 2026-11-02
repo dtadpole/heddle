@@ -6,6 +6,11 @@
 //! stays on). The wait never runs out (`timeout: -1`), so a `pending` answer cannot happen; if it did, it is read as a
 //! dismissal — the safe outcome, because it leaves plan mode on. A failed ask (a stop) is passed on as it came.
 //!
+//! The review is asked not continuable (#228): only the turn that asked it can take the answer. A review left open by a
+//! crash reads as cancelled after the restart and an Approve is refused, so no approval reaches the model as a late
+//! message while plan mode stays on — DSH's "after a service reload while the review is pending, the call fails
+//! closed". `/plan off` remains the manual escape, and the model may present the plan again.
+//!
 //! The binary builds this channel over its question service when the `questions` row is loaded and hands it to
 //! [`crate::PlanService::provide_review_channel`]; without that row `exit_plan_mode` refuses with DSH's sentence.
 
@@ -48,13 +53,15 @@ pub enum QuestionOutcome {
     },
 }
 
-/// The ask's options: `{timeout, signal}`.
+/// The ask's options: `{timeout, signal, continuable}`.
 #[derive(Debug, Clone, Default)]
 pub struct AskOptions {
     /// How long to wait; `-1` never runs out.
     pub timeout: Option<i64>,
     /// The call's Stop.
     pub cancel: Option<CancellationToken>,
+    /// Whether the request may stay answerable after its turn is gone; the review's is `false` (#228).
+    pub continuable: bool,
 }
 
 /// The part of the question service the review uses: `ask(handle, questions, {timeout, signal})`.
@@ -133,6 +140,7 @@ impl PlanReviewChannel for QuestionsReview {
             AskOptions {
                 timeout: Some(REVIEW_TIMEOUT),
                 cancel,
+                continuable: false,
             },
         );
         Box::pin(async move { Ok(read_review(&asked.await?)) })
@@ -149,7 +157,7 @@ mod tests {
     /// A question service that answers what it is told and records what it was asked.
     struct Asker {
         answer: Result<QuestionOutcome, String>,
-        asked: Mutex<Vec<(Value, Option<i64>)>>,
+        asked: Mutex<Vec<(Value, Option<i64>, bool)>>,
     }
 
     impl QuestionAsker for Asker {
@@ -162,7 +170,7 @@ mod tests {
             self.asked
                 .lock()
                 .unwrap()
-                .push((questions, options.timeout));
+                .push((questions, options.timeout, options.continuable));
             let answer = self.answer.clone();
             Box::pin(async move { answer })
         }
@@ -215,8 +223,10 @@ mod tests {
                         { "label": "Keep planning", "description": "Stay in plan mode; feedback goes back to the model." },
                     ],
                 }]),
-                Some(-1)
-            )
+                Some(-1),
+                false
+            ),
+            "only the turn that asked the review can take its answer (#228)"
         );
         let keep = |feedback: &str| {
             Ok(PlanReviewAnswer::KeepPlanning {

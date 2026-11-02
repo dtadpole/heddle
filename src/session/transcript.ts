@@ -264,3 +264,131 @@ export function isEventRecord(record: unknown): boolean {
   const { seq, at, type } = record as { seq?: unknown; at?: unknown; type?: unknown }
   return typeof seq === 'number' && Number.isSafeInteger(seq) && seq >= 0 && typeof at === 'string' && typeof type === 'string'
 }
+
+/** One whole frame that decoded, and its lines. */
+interface ReadFrame {
+  readonly start: number
+  readonly end: number
+  readonly lines: readonly string[]
+}
+
+/** A framed transcript read past the torn frames in its middle ({@link recoverTranscript}). */
+export interface RecoveredTranscript {
+  /** The lines of every frame kept, in order. */
+  readonly lines: readonly string[]
+  /** The byte range of every frame kept, in order: the file a repair writes is these ranges, joined. */
+  readonly kept: readonly Frame[]
+  /** The byte ranges left out, in order: each torn frame stepped over (with any frame its failed write left whole), and a torn tail. */
+  readonly dropped: readonly Frame[]
+}
+
+/** The lines of one frame's text, empty lines dropped, as {@link decodeTranscript} splits them. */
+function frameLines(text: string): string[] {
+  return text.split('\n').filter((line) => line.length > 0)
+}
+
+/** One frame's text, or undefined when it does not decode (a torn or foreign frame; zstd checks the content checksum). */
+function decodeFrame(frame: Buffer): string | undefined {
+  try {
+    return zstdDecompressSync(frame).toString('utf8')
+  } catch {
+    return undefined
+  }
+}
+
+/** The whole, decodable frames from `start` on, and where the walk stopped. */
+function walkFrames(buffer: Buffer, start: number): { frames: ReadFrame[]; end: number } {
+  const frames: ReadFrame[] = []
+  let cursor = start
+  while (cursor < buffer.length) {
+    const end = frameEnd(buffer, cursor)
+    if (end === undefined || end <= cursor) break
+    const text = decodeFrame(buffer.subarray(cursor, end))
+    if (text === undefined) break
+    frames.push({ start: cursor, end, lines: frameLines(text) })
+    cursor = end
+  }
+  return { frames, end: cursor }
+}
+
+/** A line's `seq` when it is a session event, else undefined. */
+function seqOf(line: string): number | undefined {
+  try {
+    const record: unknown = JSON.parse(line)
+    return isEventRecord(record) ? (record as { seq: number }).seq : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The first place after `from` where whole frames start again: a frame magic whose frame walks whole, decodes (its
+ * content checksum holds) and holds only session events, then every whole frame after it.
+ */
+function resync(buffer: Buffer, from: number): { start: number; frames: ReadFrame[]; end: number } | undefined {
+  for (let at = buffer.indexOf(FRAME_MAGIC, from + 1); at !== -1; at = buffer.indexOf(FRAME_MAGIC, at + 1)) {
+    const end = frameEnd(buffer, at)
+    if (end === undefined) continue
+    const text = decodeFrame(buffer.subarray(at, end))
+    if (text === undefined) continue
+    const lines = frameLines(text)
+    if (lines.length === 0 || !lines.every((line) => seqOf(line) !== undefined)) continue
+    const rest = walkFrames(buffer, end)
+    return { start: at, frames: [{ start: at, end, lines }, ...rest.frames], end: rest.end }
+  }
+  return undefined
+}
+
+/**
+ * Read a framed transcript **past a torn frame in its middle**, when whole frames follow it (#221); undefined when there
+ * is nothing to step over — the log is whole, plain text, or torn only at its tail, which the store cuts as it always has
+ * (J155).
+ *
+ * A tear in the middle is what an append that failed part-way left before the rollback existed (`./append.ts`): its
+ * partial frame, then everything the process appended after the disk had room again. Cutting at the tear, right for a
+ * crash, threw those turns away. Here the walk stops at the tear as before, then looks for the next frame magic whose
+ * frame walks whole, decodes with its content checksum, and holds only session events, and goes on from there. A false
+ * start is not a practical risk: four magic bytes, a frame header and block chain that walk to an end, a 32-bit checksum
+ * over the content, and JSON lines with a whole-number `seq`, a string `at` and a string `type` must all hold at once.
+ *
+ * The sequence must also join. The writer never counted the event whose frame tore, so the first event after the tear
+ * carries that event's seq, `s`, and the last event kept before it must be `s - 1`. A batch write (a fork's seed, the
+ * turn closers) that tore part-way may have left its first frames whole; they carry `s`, `s + 1`, … and were never
+ * counted either, so they are dropped with the torn frame. When the seqs do not join that way, the walk does not step
+ * over that tear: from there on the bytes are a torn tail, as before.
+ *
+ * The Rust build's `recover_transcript` keeps and drops the same bytes.
+ */
+export function recoverTranscript(buffer: Buffer): RecoveredTranscript | undefined {
+  if (!looksCompressed(buffer)) return undefined
+  const first = walkFrames(buffer, 0)
+  let kept = first.frames
+  const dropped: Frame[] = []
+  let cursor = first.end
+  while (cursor < buffer.length) {
+    const run = resync(buffer, cursor)
+    if (run === undefined) break
+    const resumed = seqOf(run.frames[0]?.lines[0] ?? '') as number
+    let orphans = kept.length
+    while (orphans > 0) {
+      const frame = kept[orphans - 1] as ReadFrame
+      if (frame.lines.length === 0 || !frame.lines.every((line) => (seqOf(line) ?? -1) >= resumed)) break
+      orphans -= 1
+    }
+    const orphanSeqs = kept.slice(orphans).flatMap((frame) => frame.lines.map(seqOf))
+    const lastLines = orphans === 0 ? [] : (kept[orphans - 1] as ReadFrame).lines
+    const last = lastLines.length === 0 ? undefined : seqOf(lastLines[lastLines.length - 1] as string)
+    const joins = (orphans === 0 ? resumed === 0 : last === resumed - 1) && orphanSeqs.every((seq, index) => seq === resumed + index)
+    if (!joins) break
+    dropped.push({ start: orphans < kept.length ? (kept[orphans] as ReadFrame).start : cursor, end: run.start })
+    kept = [...kept.slice(0, orphans), ...run.frames]
+    cursor = run.end
+  }
+  if (dropped.length === 0) return undefined
+  if (cursor < buffer.length) dropped.push({ start: cursor, end: buffer.length })
+  return {
+    lines: kept.flatMap((frame) => frame.lines),
+    kept: kept.map(({ start, end }) => ({ start, end })),
+    dropped,
+  }
+}

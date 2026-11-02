@@ -406,7 +406,7 @@ test('an invalid file refusal is visible after a settled HTML preview', async (c
     const row = (name) => `Array.from(document.querySelectorAll('#tree .row')).find((entry) => (entry.dataset.path ?? '').endsWith(${JSON.stringify(name)}))`
     await browser.waitFor(`${row('old.html')} !== undefined && ${row('invalid.txt')} !== undefined`, 15000)
     await browser.evaluate(`${row('old.html')}.click()`)
-    await browser.waitFor(`!document.getElementById('file-html').hidden && document.getElementById('html-view').srcdoc.includes('OLD PREVIEW')`, 15000)
+    await browser.waitFor(`!document.getElementById('file-html').hidden && document.getElementById('html-view').contentDocument?.body?.textContent.includes('OLD PREVIEW')`, 15000)
     await browser.evaluate(`${row('invalid.txt')}.click()`)
     await browser.waitFor(`document.getElementById('file-body').textContent.includes('not UTF-8')`, 10000)
     assert.equal(await browser.evaluate(`document.getElementById('file-body').hidden`), false, 'Refs #113: refusal is visible')

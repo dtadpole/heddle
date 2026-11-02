@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto'
 
 import { attachmentDisposition, attachmentsOf, FILE_ANSWER_HEADERS, HIGHLIGHT_GRAMMARS, highlightAsset, inlineContentType, inlineScripts, pagePolicy, markedPage, pageAccess, scopeAttachmentUrls, tokenFormPage, transcriptTurns, abortSession } from '../src/server/web.ts'
 import { highlightCode } from '../src/server/highlight.ts'
+import { PREVIEW_CSP, PREVIEW_FRAME_CSP } from '../src/server/html.ts'
 import { mergeUsage } from '../src/agent/loop.ts'
 
 /**
@@ -30,6 +31,23 @@ test('a tool call keeps its name as a label, apart from its arguments', () => {
   assert.deepEqual(turns, [
     { kind: 'tool', name: 'bash', label: '→ bash', text: '{"command":"pwd"}', state: 'running', toolCallId: 'c1' },
   ])
+})
+
+test('a tool result pruned under context pressure stays one turn with the original, the same as the Rust fold (shared fixture)', () => {
+  /**
+   * #186: the pruned copy is a second `message` for the same call, marked `surfaceOp: { op: 'replace' }`. It is what the model
+   * is sent, not what a person reads, as DSH's chat keeps a replacement copy model-only. The fold found the call already
+   * closed and pushed the copy as an extra, unpaired tool turn.
+   */
+  const events = readFileSync(new URL('../rust/crates/heddle-web-trajectory/tests/fixtures/pruned-result.jsonl', import.meta.url), 'utf8')
+    .split('\n')
+    .filter((line) => line.trim() !== '')
+    .map((line) => JSON.parse(line) as { type: string; seq: number; message?: { content?: { text?: string }[] } })
+  const original = events.find((one) => one.seq === 5)?.message?.content?.[0]?.text
+  const turns = transcriptTurns(events)
+  assert.deepEqual(turns.map((turn) => turn.kind), ['user', 'tool', 'assistant'], 'the person, one call, the answer')
+  assert.equal(turns[1]?.result, original, 'and the call holds what the tool returned')
+  assert.ok(!turns.some((turn) => `${turn.text}${turn.result ?? ''}`.includes('[pruned,')), 'the cut copy is drawn nowhere')
 })
 
 test('a person\'s message carries the logged event time, which is the clock its bubble shows', () => {
@@ -662,11 +680,25 @@ test('the page policy carries a hash for every inline script of the served page,
 
 test('D-068 only explicit Browser capability adds HTTP(S) frames without weakening other directives', () => {
   const html = '<script>const x = 1</script>'
-  const strict = pagePolicy(html)
-  const enabled = pagePolicy(html, true)
-  assert.ok(strict.includes("frame-src 'self'"))
-  assert.equal(enabled, strict.replace("frame-src 'self'", 'frame-src http: https:'))
-  assert.ok(enabled.includes("object-src 'none'") && enabled.includes("frame-ancestors 'none'"))
+  const hash = `'sha256-${createHash('sha256').update('const x = 1', 'utf8').digest('base64')}'`
+  for (const browserEnabled of [false, true]) {
+    assert.equal(pagePolicy(html, browserEnabled), [
+      "default-src 'self'",
+      `script-src 'self' ${hash}`,
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data: blob: https:",
+      "font-src 'self' data:",
+      "media-src 'self'",
+      browserEnabled ? 'frame-src http: https:' : "frame-src 'self'",
+      "object-src 'none'",
+      "base-uri 'self'",
+      "frame-ancestors 'none'",
+      "form-action 'self'",
+    ].join('; '))
+  }
+  const preview = "default-src 'none'; img-src 'self' https: data:; style-src 'self' 'unsafe-inline' https:; font-src 'self' https: data:; media-src 'self' https:; frame-src 'none'; script-src 'none'; form-action 'none'; base-uri 'none'"
+  assert.equal(PREVIEW_CSP, preview, 'the child resource policy is unchanged')
+  assert.equal(PREVIEW_FRAME_CSP, `${preview}; frame-ancestors 'self'; sandbox allow-same-origin`, 'the fixed shell policy is unchanged')
 })
 
 test('the page highlights a code block exactly as the TypeScript server does, from the modules both servers serve', async () => {

@@ -43,6 +43,7 @@ pub(crate) mod test_support;
 pub use mode::{
     MODEL_REQUEST_EVENT, NOTICE_EVENT, PLAN_EVENT, PLAN_NOTICE_ORIGIN, PLAN_OFF_NOTICE,
     PLAN_ON_NOTICE, PlanChange, PlanLog, PlanSessions, notice_message, plan_active, set_plan_mode,
+    set_plan_mode_with,
 };
 pub use policy::{PLAN_POLICY_SECTION, with_plan_policy, with_policy_section};
 pub use review::{

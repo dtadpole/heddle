@@ -381,6 +381,12 @@ test('an html document is previewed as a page, and nothing in it can act', async
     assert.ok(String(payload.html).includes(join(work, 'mark.svg').split('/').pop() ?? ''), 'the document came back')
     assert.match(String(payload.html), /\/api\/raw\?path=/, 'with its relative image pointed at the route that serves it')
     assert.match(String(payload.csp), /script-src 'none'/, 'and a policy that forbids script')
+    const shell = await fetch(`${origin}/api/html/frame`, { headers: { cookie } })
+    assert.equal(shell.status, 200)
+    const shellPolicy = shell.headers.get('content-security-policy')
+    assert.equal(shellPolicy, `${payload.csp}; frame-ancestors 'self'; sandbox allow-same-origin`)
+    assert.equal(shell.headers.get('referrer-policy'), 'no-referrer')
+    assert.equal(await shell.text(), '<!doctype html><html><head></head><body></body></html>\n')
 
     await browser.goto(server.url)
     await browser.waitFor('document.querySelectorAll("#tree .row").length > 0', 20_000)
@@ -433,7 +439,9 @@ test('an html document is previewed as a page, and nothing in it can act', async
           forms: inner.querySelectorAll('form').length,
           inputs: inner.querySelectorAll('input').length,
           bases: inner.querySelectorAll('base').length,
-          policyText: inner.querySelector('meta[http-equiv="Content-Security-Policy"]')?.content,
+          source: frame.getAttribute('src'),
+          referrerPolicy: frame.getAttribute('referrerpolicy'),
+          documentUrl: inner.URL,
           headingBackground: inner.querySelector('h1') === null ? null : getComputedStyle(inner.querySelector('h1')).backgroundColor,
           handlers: [...inner.querySelectorAll('*')].filter((e) => [...e.attributes].some((a) => a.name.startsWith('on'))).length,
           policy: inner.querySelector('meta[http-equiv="Content-Security-Policy"]') === null ? 'missing' : 'present',
@@ -454,13 +462,16 @@ test('an html document is previewed as a page, and nothing in it can act', async
     assert.equal(framed.handlers, 0, 'and an inline handler with it')
     assert.equal(framed.iframes, 0, 'nothing may be framed inside it')
     assert.equal(framed.forms + framed.inputs, 0, 'and nothing may be submitted')
-    assert.equal(framed.policy, 'present', 'the document carries the policy the browser enforces')
+    assert.equal(framed.policy, 'missing', 'no source meta policy replaces the shell response header')
+    assert.equal(framed.source, '/api/html/frame', 'fixed frame address contains no workspace path')
+    assert.equal(framed.documentUrl, `${origin}/api/html/frame`)
+    assert.equal(framed.referrerPolicy, 'no-referrer')
     assert.equal(framed.heading, 'Fixture page', 'the page rendered as a page rather than as its source')
     assert.equal(framed.headingColour, 'rgb(1, 2, 3)', "with the document's own stylesheet applied")
     assert.equal(framed.headingBackground, 'rgb(4, 5, 6)', 'relative linked CSS still loads through the raw route')
     assert.ok(framed.imagesLoaded > 0, `and its own image loaded (${framed.imagesLoaded} of ${framed.images})`)
     assert.equal(framed.bases, 0, 'neither source nor application injects a base')
-    assert.match(framed.policyText, /base-uri 'none'/, 'the restrictive policy is unchanged')
+    assert.match(shellPolicy, /base-uri 'none'/, 'the response-header policy remains restrictive')
     // Flush a protocol round trip after the frame loads, then inspect recorded browser console diagnostics.
     await browser.send('Runtime.evaluate', { expression: '0' })
     const baseErrors = browser.page.console.filter((entry) => /base-uri|setting the document.s base URI/i.test(entry.text))

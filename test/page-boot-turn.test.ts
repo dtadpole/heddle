@@ -39,9 +39,12 @@ function harness(created: string): Run {
     const QUEUE_KEY_NONE = '__none__'
     const NO_WORKSPACE_REFUSAL = 'Choose a workspace first.'
     let current = null
+    let unavailableSession = null
+    const chosenEndpoint = null, chosenModel = null, chosenEffort = null
+    const heldSeats = new Map(), recordedSelections = new Set(), pendingSaves = new Set()
+    const selectionForSeat = () => ({})
     let activeFolder = null
     let workspaceRoutes = 'served'
-    let liveTurns = 0
     let directTurnPending = 0
     let directPendingKey = null
     let stopRequested = false

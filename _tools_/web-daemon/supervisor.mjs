@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { basename, join } from 'node:path'
 import process from 'node:process'
 import { pathToFileURL } from 'node:url'
 
@@ -37,6 +38,16 @@ import { pathToFileURL } from 'node:url'
  * holder whose command line is a supervisor refuses the start, and anything else — a dead pid, a reused one — is a
  * stale lock taken over. Node has no `flock`, so this is the convention's third discriminator: a pidfile with its
  * command line checked.
+ *
+ * **Evidence before the kill** (`--capture-dir DIR`, #257): a hang-kill alone leaves nothing to say what the server was
+ * stuck in — the live TS server was killed as hung four times in one day, and the log above each kill was silent.
+ * With a capture directory, a server judged hung is examined before the SIGKILL, for at most `CAPTURE_BUDGET_MS`:
+ * every server is sampled with macOS `sample` for native stacks (`sample-….txt`; the case where the thread is blocked
+ * inside a native call), then a node server is sent SIGUSR1, which opens its inspector on loopback from a thread of
+ * its own and interrupts the spinning JavaScript, and `Debugger.pause` yields the JavaScript stack (`stack-….txt`).
+ * The directory is 0700 and each file 0600. Only then is the server killed, as before. The inspector is open for
+ * those seconds only, on loopback, on a port the system picks, and dies with the server. A program that is not node
+ * is never sent SIGUSR1: its default action is to terminate.
  *
  * A server run that lasts at least `STABLE_MS` resets the failure count and is restarted immediately. Runs that
  * die sooner are restarted at a doubling delay, and after `--max-failures` of them it **slows down instead of
@@ -157,6 +168,7 @@ export function parseSupervisorArgs(argv) {
   let healthGraceMs = DEFAULT_HEALTH_GRACE_MS
   let reclaimPort = null
   let lock = null
+  let captureDir = null
   const number = (flag, at) => {
     const value = argv[at + 1]
     if (value === undefined || !/^\d+$/.test(value) || Number(value) < 1) {
@@ -196,9 +208,14 @@ export function parseSupervisorArgs(argv) {
       if (value === undefined || !value.startsWith('/')) throw new Error('--lock needs an absolute path')
       lock = value
       index += 1
+    } else if (arg === '--capture-dir') {
+      const value = argv[index + 1]
+      if (value === undefined || !value.startsWith('/')) throw new Error('--capture-dir needs an absolute path')
+      captureDir = value
+      index += 1
     } else if (arg === '--help' || arg === '-h') {
       throw new Error(
-        'usage: supervisor.mjs [--max-failures N] [--retry-seconds S] [--give-up] [--health-url URL [--health-every S] [--health-misses N] [--health-grace S]] [--reclaim-port N] [--lock FILE] -- <program> [arguments…]',
+        'usage: supervisor.mjs [--max-failures N] [--retry-seconds S] [--give-up] [--health-url URL [--health-every S] [--health-misses N] [--health-grace S]] [--reclaim-port N] [--lock FILE] [--capture-dir DIR] -- <program> [arguments…]',
       )
     } else {
       throw new Error(`unknown supervisor option ${arg}`)
@@ -206,7 +223,196 @@ export function parseSupervisorArgs(argv) {
   }
   const command = argv.slice(separator + 1)
   if (command.length === 0) throw new Error('no server command after --')
-  return { command, maxFailures, slowRetryMs, giveUp, healthUrl, healthEveryMs, healthMisses, healthGraceMs, reclaimPort, lock }
+  return { command, maxFailures, slowRetryMs, giveUp, healthUrl, healthEveryMs, healthMisses, healthGraceMs, reclaimPort, lock, captureDir }
+}
+
+/** The longest a hung server is examined before it is killed (#257). */
+export const CAPTURE_BUDGET_MS = 5_000
+/** How long `sample` records the hung process for. */
+const SAMPLE_SECONDS = 3
+
+/** Whether the server program is node, so that it opens its inspector on SIGUSR1 rather than dying of it. */
+export function isNodeProgram(program) {
+  return /^node(\.exe)?$/.test(basename(program))
+}
+
+/**
+ * What to capture from a hung server: `{ stack, sample }`. A node server can be paused through its inspector for the
+ * JavaScript stack; any process can be sampled. A program that is not node gets no SIGUSR1: terminating is its default.
+ */
+export function captureSteps(command) {
+  return { stack: isNodeProgram(command[0]), sample: true }
+}
+
+/**
+ * The command the supervisor spawns: the installer's, plus, when hangs are captured and the server is node, an
+ * inspector port of `127.0.0.1:0` as a node argument. That opens nothing: it only means that the inspector SIGUSR1
+ * starts listens on loopback, on a port the system picks, so it never collides with a debugger on 9229.
+ *
+ * An argument and not `NODE_OPTIONS`: node passes `NODE_OPTIONS` on to every child, and the server's children are the
+ * bash tool's commands and every terminal shell, so each `node` a person or a model ran there would carry the flag
+ * (integrator-one's review). An argument stays on the server process. The supervisor's own environment is untouched.
+ *
+ * Not `--report-on-signal`: node handles that signal on its event loop, so a server whose JavaScript spins never
+ * writes the report (measured, node 24.21, 2026-11-01). SIGUSR1 starts the inspector from its own thread and
+ * interrupts running JavaScript, which is the case a hang is.
+ */
+export function serverCommandLine(command, captureDir) {
+  if (captureDir === null || !captureSteps(command).stack) return command
+  return [command[0], '--inspect-port=127.0.0.1:0', ...command.slice(1)]
+}
+
+/** The loopback port `pid` listens on besides `servicePort` — its inspector, once SIGUSR1 has opened it. */
+function inspectorPortOf(pid, servicePort) {
+  const shown = spawnSync(LSOF, ['-nP', '-a', '-p', String(pid), '-iTCP', '-sTCP:LISTEN', '-Fn'], { encoding: 'utf8' })
+  for (const match of (shown.stdout ?? '').matchAll(/^n127\.0\.0\.1:(\d+)$/gm)) {
+    const port = Number(match[1])
+    if (port !== servicePort) return port
+  }
+  return null
+}
+
+/** How long `Debugger.pause` may go unanswered: a server blocked inside a native call never answers it. */
+const PAUSE_WAIT_MS = 1_500
+
+/**
+ * The stack file's lines for a `Debugger.paused` event: the pause reason, then one frame per line with its location and
+ * the **types** of its scopes (local, closure, module, …), which tell an await loop from a synchronous one without
+ * reading a single value. Nothing is evaluated in the server.
+ */
+export function formatPaused(params) {
+  return [
+    `paused: ${params.reason}`,
+    ...params.callFrames.map((frame) => {
+      const scopes = (frame.scopeChain ?? []).map((scope) => scope.type).join(',')
+      return `${frame.functionName || '(anonymous)'} ${frame.url}:${frame.location.lineNumber + 1}:${frame.location.columnNumber + 1} [${scopes}]`
+    }),
+  ]
+}
+
+/**
+ * The JavaScript stack of a hung node server as the stack file's lines: `formatPaused`'s, or one line saying why the
+ * inspector did not pause, so the file always says what happened.
+ *
+ * SIGUSR1 opens the inspector on loopback; `Debugger.pause` stops the running JavaScript at its next interrupt check
+ * and the paused event carries the call frames. A server blocked inside a native call never services the inspector,
+ * which is what the native `sample` before this is for. The inspector stays open only until the kill that follows.
+ */
+async function javascriptStackOf(run, servicePort, budgetMs) {
+  const deadline = Date.now() + budgetMs
+  const failed = (reason) => [`inspector did not pause: ${reason}`]
+  run.signalling('SIGUSR1')
+  let port = null
+  while (port === null && Date.now() < deadline) {
+    port = inspectorPortOf(run.pid, servicePort)
+    if (port === null) await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+  if (port === null) return failed(`no inspector port within ${budgetMs} ms of SIGUSR1`)
+  try {
+    const listed = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(Math.max(deadline - Date.now(), 1)) })
+    const [target] = await listed.json()
+    if (target?.webSocketDebuggerUrl === undefined) return failed('the inspector listed no target')
+    const socket = new WebSocket(target.webSocketDebuggerUrl)
+    return await new Promise((resolve) => {
+      let timer = null
+      const finish = (lines) => {
+        clearTimeout(timer)
+        try {
+          socket.close()
+        } catch {
+          // already closed
+        }
+        resolve(lines)
+      }
+      timer = setTimeout(() => finish(failed('the inspector socket did not open in time')), Math.max(deadline - Date.now(), 1))
+      socket.onerror = () => finish(failed('the inspector socket failed'))
+      socket.onopen = () => {
+        clearTimeout(timer)
+        const wait = Math.max(Math.min(PAUSE_WAIT_MS, deadline - Date.now()), 1)
+        timer = setTimeout(() => finish(failed(`no Debugger.paused within ${wait} ms (blocked inside a native call?)`)), wait)
+        socket.send(JSON.stringify({ id: 1, method: 'Debugger.enable' }))
+        socket.send(JSON.stringify({ id: 2, method: 'Debugger.pause' }))
+      }
+      socket.onmessage = (event) => {
+        const message = JSON.parse(String(event.data))
+        if (message.method === 'Debugger.paused') finish(formatPaused(message.params))
+      }
+    })
+  } catch (error) {
+    return failed(error.message)
+  }
+}
+
+/** Make `dir` a 0700 directory; true when it exists afterwards. */
+function prepareCaptureDir(dir) {
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    chmodSync(dir, 0o700)
+    return true
+  } catch (error) {
+    process.stderr.write(`heddle-supervisor: cannot prepare ${dir} for the hang capture: ${error.message}\n`)
+    return false
+  }
+}
+
+/**
+ * Examine a hung server before it is killed (#257), within `CAPTURE_BUDGET_MS`: first `sample` for native stacks, then,
+ * for node, the JavaScript stack through the inspector. In that order because a paused server sits in the debugger's
+ * loop, and a sample taken then would show that instead of the hang. Never throws and never waits past the budget,
+ * because the kill that follows is what brings the service back.
+ */
+async function captureHung(run, command, captureDir, servicePort) {
+  if (run.pid === null || !prepareCaptureDir(captureDir)) return
+  const started = Date.now()
+  const steps = captureSteps(command)
+  const before = new Set(readdirSync(captureDir))
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+  if (steps.sample) {
+    const sampleFile = join(captureDir, `sample-${stamp}-${run.pid}.txt`)
+    await new Promise((resolve) => {
+      let sampler
+      try {
+        sampler = spawn('/usr/bin/sample', [String(run.pid), String(SAMPLE_SECONDS), '-file', sampleFile], { stdio: 'ignore' })
+      } catch {
+        resolve()
+        return
+      }
+      const timer = setTimeout(() => {
+        try {
+          sampler.kill('SIGKILL')
+        } catch {
+          // already gone
+        }
+        resolve()
+      }, (SAMPLE_SECONDS + 1) * 1000)
+      sampler.once('error', () => {
+        clearTimeout(timer)
+        resolve()
+      })
+      sampler.once('exit', () => {
+        clearTimeout(timer)
+        resolve()
+      })
+    })
+  }
+  const left = CAPTURE_BUDGET_MS - (Date.now() - started)
+  if (steps.stack && left > 200) {
+    const lines = await javascriptStackOf(run, servicePort, left)
+    writeFileSync(join(captureDir, `stack-${stamp}-${run.pid}.txt`), `${lines.join('\n')}\n`, { mode: 0o600 })
+  }
+  const written = readdirSync(captureDir).filter((name) => !before.has(name))
+  for (const name of written) {
+    try {
+      chmodSync(join(captureDir, name), 0o600)
+    } catch {
+      // gone or not ours; the listing below still names it
+    }
+  }
+  process.stderr.write(
+    written.length > 0
+      ? `heddle-supervisor: captured the hung server before the kill: ${written.join(', ')} in ${captureDir}\n`
+      : `heddle-supervisor: captured nothing from the hung server within ${CAPTURE_BUDGET_MS} ms (${captureDir})\n`,
+  )
 }
 
 /** The command line of `pid`, or `null` when it is not running. */
@@ -356,7 +562,7 @@ function startServer(command) {
           })
           child.once('exit', (code, signal) => finish(code, signal))
         })
-  return { startedAt, signalling, done }
+  return { startedAt, pid: child?.pid ?? null, signalling, done }
 }
 
 async function main() {
@@ -367,7 +573,11 @@ async function main() {
     process.stderr.write(`heddle-supervisor: ${error.message}\n`)
     process.exit(2)
   }
-  const { command, maxFailures, slowRetryMs, giveUp, healthUrl, healthEveryMs, healthMisses, healthGraceMs, reclaimPort, lock } = parsed
+  const { command, maxFailures, slowRetryMs, giveUp, healthUrl, healthEveryMs, healthMisses, healthGraceMs, reclaimPort, lock, captureDir } = parsed
+  // What this supervisor spawns, and so also what a leftover of its own on the port looks like.
+  const serverCommand = serverCommandLine(command, captureDir)
+  const servicePort = healthUrl === null ? null : Number(new URL(healthUrl).port) || null
+  if (captureDir !== null) prepareCaptureDir(captureDir)
   if (lock !== null) {
     const holder = takeLock(lock)
     if (holder !== null) {
@@ -395,11 +605,11 @@ async function main() {
   process.on('SIGTERM', stop)
   process.on('SIGINT', stop)
 
-  process.stdout.write(`heddle-supervisor: running ${command.join(' ')}\n`)
+  process.stdout.write(`heddle-supervisor: running ${serverCommand.join(' ')}\n`)
   while (!stopping) {
-    if (reclaimPort !== null) await reclaim(reclaimPort, command)
+    if (reclaimPort !== null) await reclaim(reclaimPort, serverCommand)
     if (stopping) break
-    current = startServer(command)
+    current = startServer(serverCommand)
     let watch = null
     if (healthUrl !== null) {
       // Probe the running server; a hung one is killed, and its exit takes the ordinary restart path below.
@@ -417,8 +627,10 @@ async function main() {
         misses = verdict.misses
         if (verdict.restart && !stopping) {
           process.stderr.write(`heddle-supervisor: ${healthUrl} missed ${misses} probes in a row; the server is hung, restarting it\n`)
-          run.signalling('SIGKILL')
+          // Stop probing first: the capture below takes seconds, and a second verdict must not start a second one.
           clearInterval(watch)
+          if (captureDir !== null) await captureHung(run, command, captureDir, servicePort)
+          run.signalling('SIGKILL')
         }
       }, healthEveryMs)
     }
