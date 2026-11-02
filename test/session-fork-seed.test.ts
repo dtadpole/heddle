@@ -185,8 +185,8 @@ test("an event that belongs to the source stays behind, and the seqs after it ar
   const svc = service()
   const store = svc.store
   const source = svc.start({ cwd: scratch, title: 'Renumbered' })
-  /** A goal, a team journal entry and a repair record: the source's own, which the child must not inherit. */
-  store.append(source, { type: 'goal/change', version: 1, operation: 'create', goal: { id: 'goal-1', objective: 'x', phase: 'active' } })
+  /** A team journal entry and a repair record: the source's own, which the child must not inherit. (A goal is the
+   * conversation's and comes along, issue #166.) */
   store.append(source, { type: 'team/member', version: 1, teamId: source.id, member: { id: 'm', name: 'm' } })
   store.append(source, { type: 'transcript/repaired', droppedBytes: 3 })
   reasoningTurn(svc, source, 'first', ['one'], ['thinking one'])
@@ -198,7 +198,7 @@ test("an event that belongs to the source stays behind, and the seqs after it ar
   const child = forkOf(svc, source)
   const events = store.read(child)
   assert.deepEqual(events.map((event) => event.seq), events.map((_, index) => index), 'the child’s seqs run on without a hole')
-  assert.ok(!events.some((event) => event.type === 'goal/change' || event.type.startsWith('team/') || event.type === 'transcript/repaired'), 'none of the source’s own records came along')
+  assert.ok(!events.some((event) => event.type.startsWith('team/') || event.type === 'transcript/repaired'), 'none of the source’s own records came along')
   assert.equal(events.filter((event) => event.type === 'session/created').length, 1, 'and only the child’s own creation')
 
   const bySeq = new Map(events.map((event) => [event.seq, event]))
@@ -230,7 +230,7 @@ test('forkSeed returns the inherited events untouched when nothing is left out',
 /** The same source and expected seed as heddle-session `surface.rs`, so both builds write a fork's log with the same bytes. */
 const SEED_SOURCE = [
   '{"seq":0,"at":"t0","type":"session/created","cwd":"/w"}',
-  '{"seq":1,"at":"t1","type":"goal/change","version":1}',
+  '{"seq":1,"at":"t1","type":"transcript/repaired","droppedBytes":3}',
   '{"seq":2,"at":"t2","type":"message","message":{"role":"user","content":[{"type":"text","text":"one"}]}}',
   '{"seq":3,"at":"t3","type":"assistant/chunk","chunk":{"type":"text-delta","text":"a"}}',
   '{"seq":4,"at":"t4","type":"assistant/chunk","chunk":{"type":"done","finishReason":"stop"}}',
