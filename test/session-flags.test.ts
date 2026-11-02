@@ -183,6 +183,32 @@ test('a fork inherits the projection cut at the last completed turn, not a dangl
   assert.equal(completedPrefix(noCompletion).length, 2, 'a log that never completed a turn is returned whole')
 })
 
+/**
+ * Issue #232: DSH's omitted-`atSeq` cut is "the latest completed-turn prefix, including standalone events before the next
+ * turn begins" (dsh-api-session-controller `latestCompletedPrefixBoundary`): a mode switch or a compaction made after the
+ * last turn reaches the branch, and the walk stops at the next turn's user message, an inbox splice or a model request.
+ */
+test('a fork keeps the standalone events after the last completed turn, up to where the next turn begins', () => {
+  const at = (seq: number, type: string, extra: Record<string, unknown> = {}) => ({ seq, at: '2026-10-17T00:00:00.000Z', type, ...extra })
+  const message = (seq: number, role: string, text: string) => at(seq, 'message', { message: { role, content: [{ type: 'text', text }] } })
+  const log = [
+    message(0, 'user', 'q'),
+    message(1, 'assistant', 'a'),
+    at(2, 'turn/completed'),
+    at(3, 'command/run'),
+    at(4, 'permission/mode', { mode: 'read-only' }),
+    at(5, 'plan/mode', { active: true }),
+    at(6, 'command/done'),
+    message(7, 'user', 'a turn that is still running'),
+    at(8, 'plan/mode', { active: false }),
+  ]
+  assert.deepEqual(completedPrefix(log).map((event) => event.seq), [0, 1, 2, 3, 4, 5, 6], 'the mode switches are inherited; the running turn is not')
+  const spliced = [message(0, 'user', 'q'), at(1, 'turn/completed'), at(2, 'permission/mode'), at(3, 'agent/inbox/spliced'), at(4, 'plan/mode')]
+  assert.deepEqual(completedPrefix(spliced).map((event) => event.seq), [0, 1, 2], 'an inbox splice begins the next turn')
+  const trailing = [message(0, 'user', 'q'), at(1, 'turn/completed'), at(2, 'compaction/end')]
+  assert.deepEqual(completedPrefix(trailing).map((event) => event.seq), [0, 1, 2], 'with nothing after it beginning a turn, all of it')
+})
+
 test('a fork is refused on a question with no answer, and allowed on a conversation that was itself forked', () => {
   const at = (seq: number, type: string, extra: Record<string, unknown> = {}) => ({ seq, at: '2026-10-17T00:00:00.000Z', type, ...extra })
   const message = (seq: number, role: string, text: string) => at(seq, 'message', { message: { role, content: [{ type: 'text', text }] } })

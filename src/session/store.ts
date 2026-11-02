@@ -474,20 +474,32 @@ export function deriveMessage(bySeq: ReadonlyMap<number, SessionEvent>, seq: num
 }
 
 /**
- * The events a fork inherits: everything up to the **last completed turn**.
+ * The events a fork inherits: everything up to the **last completed turn**, and the standalone events after it until the
+ * next turn begins.
  *
- * DSH cuts its fork seed at `latestCompletedPrefixBoundary` and refuses a source with no completed turn. A session here can
+ * DSH cuts its fork seed at `latestCompletedPrefixBoundary`, "the latest completed-turn prefix, including standalone events
+ * before the next turn begins": it walks past the last `turn/end` until a turn starts, a user message is appended or the
+ * inbox is spliced (dsh-api-session-controller). So a `/permission read-only`, a `/plan` or a `/compact` made after the
+ * last turn reaches the branch (issue #232; "forked agents inherit logged plan state", dsh-plan-mode). A session here can
  * hold a user message whose answer never arrived; copying that dangling half-turn would ask the model to continue work it
- * never saw finish, so the cut excludes it. A log with no `turn/completed` returns as it is — callers decide whether that is
- * forkable at all (the service refuses it).
+ * never saw finish, so the cut stops before it. A log with no `turn/completed` returns as it is — callers decide whether
+ * that is forkable at all (the service refuses it).
  */
 export function completedPrefix(events: readonly SessionEvent[]): readonly SessionEvent[] {
   let boundary: number | undefined
-  for (const event of events) {
-    if (event.type === 'turn/completed') boundary = event.seq
+  for (let index = 0; index < events.length; index += 1) {
+    if (events[index]!.type === 'turn/completed') boundary = index
   }
   if (boundary === undefined) return events
-  return events.filter((event) => event.seq <= boundary)
+  let end = boundary
+  for (let index = boundary + 1; index < events.length && !beginsTurn(events[index]!); index += 1) end = index
+  return events.slice(0, end + 1)
+}
+
+/** Whether an event begins a turn, where the fork cut's walk past the last completed turn stops (DSH's turn start, appended user message, inbox splice). */
+function beginsTurn(event: SessionEvent): boolean {
+  if (event.type === 'message') return (event.message as { readonly role?: unknown } | undefined)?.role === 'user'
+  return event.type === 'agent/inbox/spliced' || event.type === 'model/request' || event.type === 'assistant/chunk'
 }
 
 /**
