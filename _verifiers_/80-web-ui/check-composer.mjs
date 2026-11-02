@@ -1420,7 +1420,9 @@ test('a pending image is delivered to a vision route as image content', async (c
 test('a pending image on a text-only route becomes the deterministic placeholder', async (context) => {
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
-  const server = await startServer('attach-text-only')
+  // A route **declared** text only (#178): an undeclared one whose model list cannot be read now holds the image back
+  // with a different, truthful placeholder ("image not sent: … could not be read"), so this test declares what it means.
+  const server = await startServer('attach-text-only', { inputModalities: ['text'] })
   const browser = await openBrowser({ width: 1400, height: 900 })
   try {
     const chosen = join(server.work, 'picture.png')

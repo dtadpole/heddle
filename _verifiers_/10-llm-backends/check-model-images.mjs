@@ -5,7 +5,7 @@ import { createServer } from 'node:http'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { fixtureDir, heddleCommand, isTitleRequest, refuseTitleRequest, removeDir, repoRoot, runCli, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, isTitleRequest, readTranscript, refuseTitleRequest, removeDir, repoRoot, runCli, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * A model's image input can be declared per model, so an image never depends on a slow provider list (#178).
@@ -24,8 +24,11 @@ const CAPABILITY = 'a Web UI whose turn route runs model turns'
 /** A one-pixel PNG. */
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64')
 
-/** A chat double whose model list answers only after 2.5 s; every completion body is kept. */
-async function slowListDouble() {
+/**
+ * A chat double whose model list answers after `delayMs` (2.5 s by default) with `list`, or refuses with a 500 when
+ * `failList`; every completion body is kept.
+ */
+async function slowListDouble({ delayMs = 2500, list = [{ id: 'vis-fake', input_modalities: ['text', 'image'] }, { id: 'text-fake', input_modalities: ['text'] }], failList = false } = {}) {
   const state = { completions: [], listReads: 0 }
   const server = createServer((request, response) => {
     let body = ''
@@ -35,10 +38,15 @@ async function slowListDouble() {
     request.on('end', () => {
       if (new URL(request.url ?? '/', 'http://x').pathname.endsWith('/models')) {
         state.listReads += 1
+        if (failList) {
+          response.writeHead(500, { 'content-type': 'application/json' })
+          response.end(JSON.stringify({ error: 'list unavailable' }))
+          return
+        }
         setTimeout(() => {
           response.writeHead(200, { 'content-type': 'application/json' })
-          response.end(JSON.stringify({ data: [{ id: 'vis-fake', input_modalities: ['text', 'image'] }, { id: 'text-fake', input_modalities: ['text'] }] }))
-        }, 2500).unref()
+          response.end(JSON.stringify({ data: list }))
+        }, delayMs).unref()
         return
       }
       if (isTitleRequest(body)) return refuseTitleRequest(response)
@@ -121,22 +129,23 @@ function api(server, path, options = {}) {
 }
 
 /** Upload the PNG and run one turn on `model` with it attached; the turn's streamed body. */
-async function imageTurn(server, work, model) {
+async function imageTurn(server, work, model, endpoint = 'mixed', session) {
   const uploaded = await api(server, '/api/uploads?name=dot.png', { method: 'POST', body: PNG })
   assert.equal(uploaded.status, 200, `the upload was stored (${uploaded.status})`)
   const stored = String((await uploaded.json()).path ?? '')
   const response = await api(server, '/api/turn', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ prompt: 'What is in the picture?', folder: work, endpoint: 'mixed', model, attachments: [stored] }),
+    body: JSON.stringify({ prompt: 'What is in the picture?', folder: work, endpoint, model, attachments: [stored], ...(session !== undefined ? { session } : {}) }),
   })
   const text = await response.text()
   assert.equal(response.status, 200, `the turn was accepted\n${text.slice(0, 400)}`)
   assert.match(text, /seen/, `the turn was answered\n${text.slice(-300)}`)
-  return text
+  const named = /event: session\ndata: (\{.*\})/.exec(text)
+  return { text, session: named ? JSON.parse(named[1]).session : undefined }
 }
 
-/** One endpoint serving an image model beside a text model, each declared; its list is slow. */
+/** One endpoint serving an image model beside a text model, each declared, plus `plain`, which declares nothing. */
 async function withServer(label, double, body) {
   const home = fixtureDir(label)
   const work = join(home, 'work')
@@ -153,10 +162,10 @@ async function withServer(label, double, body) {
         model: 'vis-fake',
         stream: true,
         models: [{ id: 'vis-fake', inputModalities: ['text', 'image'] }, { id: 'text-fake', inputModalities: ['text'] }],
-      }],
+      }, { name: 'plain', kind: 'openai-chat', baseUrl: double.url, model: 'vis-fake', stream: true }],
     })
     server = await startServer(['web', '--host', '127.0.0.1', '--port', '0', '--session-root', sessions], { HOME: home, HEDDLE_HOME: home, HEDDLE_CONFIG: join(home, 'heddle.json') })
-    await body(server, work)
+    await body(server, work, sessions)
   } finally {
     if (server) await killServer(server)
     await double.close()
@@ -187,5 +196,34 @@ test('a model declared text-only beside it gets the placeholder, without a list 
     assert.match(sent, /\[image omitted because this model accepts text only; attachment sha256:[0-9a-f]{8}\]/, "DSH's placeholder, as declared")
     assert.doesNotMatch(sent, /"type":"image_url"/)
     assert.equal(double.state.listReads, 0, 'the provider list was not read')
+  })
+})
+
+test('a model nothing declares, whose list cannot be read, has its image held back truthfully and the person is told (#178)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  const double = await slowListDouble({ failList: true })
+  await withServer('model-images-unread', double, async (server, work, sessions) => {
+    const first = await imageTurn(server, work, 'vis-fake', 'plain')
+    const sent = double.state.completions.at(-1) ?? ''
+    assert.match(sent, /\[image not sent: this model's image support could not be read from the provider; attachment sha256:[0-9a-f]{8}\]/, 'the model is told the image was withheld')
+    assert.doesNotMatch(sent, /accepts text only|"type":"image_url"/, 'not a false "text only", and no image bytes')
+    const completed = readTranscript(join(sessions, first.session)).filter((event) => event.type === 'assistant/completed').at(-1)
+    assert.ok((completed?.ended ?? []).some((reason) => /^image not sent: the model's image support could not be read/.test(reason)), `the turn keeps the notice for the person\n${JSON.stringify(completed?.ended)}`)
+    assert.equal(double.state.listReads, 1)
+    await imageTurn(server, work, 'vis-fake', 'plain', first.session)
+    assert.equal(double.state.listReads, 2, 'a failed read is not cached: the next image turn asks again')
+  })
+})
+
+test('a model whose list answers text only gets DSH\'s placeholder and no notice (#178)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  const double = await slowListDouble({ delayMs: 0, list: [{ id: 'vis-fake', input_modalities: ['text'] }] })
+  await withServer('model-images-answered-text', double, async (server, work, sessions) => {
+    const turn = await imageTurn(server, work, 'vis-fake', 'plain')
+    const sent = double.state.completions.at(-1) ?? ''
+    assert.match(sent, /\[image omitted because this model accepts text only; attachment sha256:[0-9a-f]{8}\]/, 'the placeholder, as the list said')
+    assert.doesNotMatch(sent, /"type":"image_url"/)
+    const completed = readTranscript(join(sessions, turn.session)).filter((event) => event.type === 'assistant/completed').at(-1)
+    assert.equal(completed?.ended, undefined, 'a known text-only model is no surprise to report')
   })
 })
