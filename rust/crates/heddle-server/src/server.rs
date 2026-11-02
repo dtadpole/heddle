@@ -1498,6 +1498,18 @@ async fn flags_session(
             if archived == Some(true) {
                 state.terminals().close_session(id.as_str()).await;
             }
+            // Every page redraws its tree after a pin, an archive or an unarchive, whoever made it (issue #167), as
+            // DSH's workspace feed publishes `archived` and `pinned`; the `sessions` frame a rename pushes, after the
+            // record write, as web.ts does.
+            state.events().push(
+                "sessions",
+                &json!({
+                    "type": "session/flags",
+                    "session": id.as_str(),
+                    "pinned": meta.rest.get("pinned").and_then(Value::as_bool).unwrap_or(false),
+                    "archived": meta.rest.get("archived").and_then(Value::as_bool).unwrap_or(false),
+                }),
+            );
             respond::json(StatusCode::OK, &meta)
         }
         Err(error) => {
