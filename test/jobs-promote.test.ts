@@ -57,7 +57,7 @@ function harness(options: { readonly promoteOnTimeout?: boolean; readonly maxCon
   const a = sessions.start({ cwd: workspace })
   const call = (name: string, args: Record<string, unknown>, signal?: AbortSignal) =>
     tools.call(name, args, { cwd: workspace, session: a, log: () => undefined, ...(signal !== undefined ? { signal } : {}) })
-  return { jobs, sessions, a, call, events, pids }
+  return { jobs, sessions, a, call, events, pids, tools }
 }
 
 function groupAlive(pgid: number): boolean {
@@ -173,4 +173,19 @@ test('a registration the row refuses (the session at its cap) runs in the foregr
   const quick = await h.call('bash', { command: 'echo still fine' })
   assert.equal(quick.output, 'still fine\n')
   for (const job of h.jobs.list(h.a.id)) h.jobs.kill(job.id, h.a.id)
+})
+
+/**
+ * DSH's timeout text follows promotion (dsh-tool-bash lib/index.js:506-508): while the jobs row promotes, the model is
+ * told the call moves to the background on expiry; with promotion off, that it is killed.
+ */
+test('bash tells the model what its timeout does: moved to a job while promotion is on, killed when it is off', () => {
+  const timeoutText = (h: ReturnType<typeof harness>) => {
+    const bash = h.tools.describe().find((tool) => tool.name === 'bash')
+    return String((bash?.parameters as { properties?: { timeoutMs?: { description?: string } } } | undefined)?.properties?.timeoutMs?.description ?? '')
+  }
+  const promoting = timeoutText(harness())
+  assert.match(promoting, /^Timeout in milliseconds\. The executor applies its configured default \(\d+\) and cap \(\d+\); on expiry the command moves to the background as a job instead of being killed\.$/)
+  const killing = timeoutText(harness({ promoteOnTimeout: false }))
+  assert.match(killing, /^Wall time before the command is killed/)
 })
