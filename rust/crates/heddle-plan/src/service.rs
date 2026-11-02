@@ -498,14 +498,14 @@ mod tests {
 
         let channel = Arc::new(Approving(Mutex::new(Vec::new())));
         plan.provide_review_channel(channel.clone());
-        // The loop logs the assistant's call before it runs it; the review reads its id from there (#231).
+        // The loop records the finished call as a chunk before it runs it; the review reads its id from there (#231).
         fixture
             .store
             .append(
                 &fixture.handle,
-                heddle_session::NewEvent::new("message").field(
-                    "message",
-                    json!({ "role": "assistant", "content": [{ "type": "tool-call", "id": "call_ship", "name": "exit_plan_mode", "arguments": json!({ "plan": "# Ship it\n\nsteps" }).to_string() }] }),
+                heddle_session::NewEvent::new("assistant/chunk").field(
+                    "chunk",
+                    json!({ "type": "tool-call", "id": "call_ship", "name": "exit_plan_mode", "arguments": json!({ "plan": "# Ship it\n\nsteps" }).to_string() }),
                 ),
                 heddle_session::AppendOptions::default(),
             )

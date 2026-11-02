@@ -71,10 +71,12 @@ function planArgument(raw: unknown): string | undefined {
 /**
  * The id of the newest `exit_plan_mode` call in the log that has no answer yet and presents `markdown` (#231).
  *
- * The loop logs the assistant's `tool_calls` message before it runs the calls, and answers each call after, so while the
- * review waits its call is the open one. DSH hands the tool its call id (`exec.callId`); heddle's tools are not given
- * theirs, so the review reads it from the log. The plan text must match too, so a review is never linked to some other
- * call. `undefined` when no such call is found; the review is still asked, only without the link.
+ * The loop records each finished call as an `assistant/chunk` of type `tool-call` while the model answers, runs the
+ * calls, and only then commits the assistant's `tool_calls` message with the answers. So while the review waits, its call
+ * is a recorded `tool-call` chunk with no tool message answering it; a call in a committed message is read the same way.
+ * DSH hands the tool its call id (`exec.callId`); heddle's tools are not given theirs, so the review reads it from the
+ * log. The plan text must match too, so a review is never linked to some other call. `undefined` when no such call is
+ * found; the review is still asked, only without the link.
  */
 export function openPlanCallId(events: readonly Record<string, unknown>[], markdown: string): string | undefined {
   const answered = new Set<string>()
@@ -82,11 +84,14 @@ export function openPlanCallId(events: readonly Record<string, unknown>[], markd
     const message = event.type === 'message' && isRecord(event.message) ? event.message : undefined
     if (message?.role === 'tool' && typeof message.toolCallId === 'string') answered.add(message.toolCallId)
   }
-  for (let at = events.length - 1; at >= 0; at -= 1) {
-    const event = events[at] as Record<string, unknown>
+  /** The tool-call parts an event carries: a recorded call chunk's, or an assistant message's. */
+  const calls = (event: Record<string, unknown>): readonly unknown[] => {
+    if (event.type === 'assistant/chunk' && isRecord(event.chunk) && event.chunk.type === 'tool-call') return [event.chunk]
     const message = event.type === 'message' && isRecord(event.message) ? event.message : undefined
-    if (message?.role !== 'assistant' || !Array.isArray(message.content)) continue
-    for (const part of [...message.content].reverse()) {
+    return message?.role === 'assistant' && Array.isArray(message.content) ? [...message.content].reverse() : []
+  }
+  for (let at = events.length - 1; at >= 0; at -= 1) {
+    for (const part of calls(events[at] as Record<string, unknown>)) {
       if (!isRecord(part) || part.type !== 'tool-call' || part.name !== EXIT_PLAN_MODE || typeof part.id !== 'string') continue
       if (!answered.has(part.id) && planArgument(part.arguments) === markdown) return part.id
     }

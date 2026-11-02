@@ -147,35 +147,40 @@ fn plan_argument(raw: &Value) -> Option<String> {
 
 /// The id of the newest `exit_plan_mode` call in the log that has no answer yet and presents `markdown` (#231).
 ///
-/// The loop logs the assistant's `tool_calls` message before it runs the calls, and answers each call after, so while
-/// the review waits its call is the open one. DSH hands the tool its call id (`exec.callId`); heddle's tools are not
-/// given theirs, so the review reads it from the log. The plan text must match too, so a review is never linked to
-/// some other call. `None` when no such call is found; the review is still asked, only without the link. The
-/// TypeScript `openPlanCallId`.
+/// The loop records each finished call as an `assistant/chunk` of type `tool-call` while the model answers, runs the
+/// calls, and only then commits the assistant's `tool_calls` message with the answers. So while the review waits, its
+/// call is a recorded `tool-call` chunk with no tool message answering it; a call in a committed message is read the
+/// same way. DSH hands the tool its call id (`exec.callId`); heddle's tools are not given theirs, so the review reads
+/// it from the log. The plan text must match too, so a review is never linked to some other call. `None` when no such
+/// call is found; the review is still asked, only without the link. The TypeScript `openPlanCallId`.
 pub fn open_plan_call_id(events: &[Value], markdown: &str) -> Option<String> {
-    let message = |event: &Value| (event["type"] == "message").then(|| event["message"].clone());
     let answered: std::collections::HashSet<String> = events
         .iter()
-        .filter_map(message)
-        .filter(|message| message["role"] == "tool")
-        .filter_map(|message| message["toolCallId"].as_str().map(str::to_owned))
+        .filter(|event| event["type"] == "message" && event["message"]["role"] == "tool")
+        .filter_map(|event| event["message"]["toolCallId"].as_str().map(str::to_owned))
         .collect();
-    events.iter().rev().filter_map(message).find_map(|message| {
-        if message["role"] != "assistant" {
-            return None;
+    // The tool-call parts an event carries: a recorded call chunk's, or an assistant message's (newest last).
+    let calls = |event: &Value| -> Vec<Value> {
+        if event["type"] == "assistant/chunk" && event["chunk"]["type"] == "tool-call" {
+            return vec![event["chunk"].clone()];
         }
-        message["content"]
-            .as_array()?
-            .iter()
-            .rev()
-            .find_map(|part| {
-                let id = part["id"].as_str()?;
-                let open = part["type"] == "tool-call"
-                    && part["name"] == EXIT_PLAN_MODE
-                    && !answered.contains(id)
-                    && plan_argument(&part["arguments"]).as_deref() == Some(markdown);
-                open.then(|| id.to_owned())
-            })
+        if event["type"] == "message" && event["message"]["role"] == "assistant" {
+            return event["message"]["content"]
+                .as_array()
+                .map(|parts| parts.iter().rev().cloned().collect())
+                .unwrap_or_default();
+        }
+        Vec::new()
+    };
+    events.iter().rev().find_map(|event| {
+        calls(event).into_iter().find_map(|part| {
+            let id = part["id"].as_str()?;
+            let open = part["type"] == "tool-call"
+                && part["name"] == EXIT_PLAN_MODE
+                && !answered.contains(id)
+                && plan_argument(&part["arguments"]).as_deref() == Some(markdown);
+            open.then(|| id.to_owned())
+        })
     })
 }
 
@@ -705,5 +710,13 @@ mod tests {
             json!({ "type": "tool-call", "id": "call_bad", "name": "exit_plan_mode", "arguments": "{not json" }),
         ]);
         assert_eq!(open_plan_call_id(&[broken], PLAN), None);
+        // What the log holds while the review waits: the call's recorded chunk, its message not yet committed.
+        events.push(json!({ "type": "assistant/chunk", "chunk": { "type": "text-delta", "text": "Here." } }));
+        events.push(json!({ "type": "assistant/chunk", "chunk": call("call_live", PLAN) }));
+        assert_eq!(
+            open_plan_call_id(&events, PLAN).as_deref(),
+            Some("call_live"),
+            "a recorded tool-call chunk with no answer is the open call"
+        );
     }
 }

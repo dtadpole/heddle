@@ -231,6 +231,9 @@ test("the review links to the open exit_plan_mode call presenting the same plan,
   assert.equal(openPlanCallId(events, '# Another plan'), undefined, 'a different plan links to nothing')
   assert.equal(openPlanCallId([...events, answer('call_new')], PLAN), undefined, 'an answered call is not the open one')
   assert.equal(openPlanCallId([assistant({ type: 'tool-call', id: 'call_bad', name: 'exit_plan_mode', arguments: '{not json' })], PLAN), undefined)
+  /** What the log holds while the review waits: the call's recorded chunk, its message not yet committed. */
+  const live = [...events, answer('call_new'), { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'Here.' } }, { type: 'assistant/chunk', chunk: call('call_live', PLAN) }]
+  assert.equal(openPlanCallId(live, PLAN), 'call_live', 'a recorded tool-call chunk with no answer is the open call')
 })
 
 test("exit_plan_mode hands its host's call id to the review", async () => {
