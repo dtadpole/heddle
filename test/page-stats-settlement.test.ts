@@ -112,7 +112,7 @@ function harness(admission: Admission = 'streamed', outcome = 'done'): Harness {
     const firstTreeReady = Promise.resolve(), workspaceRoutes = 'absent';
     const newConversationTarget = () => null;
     let directTurnPending = 0, directPendingKey = null;
-    const rememberCurrent = () => {}, chooseWorkspace = () => {}, renderQueue = () => {}, pumpQueue = async () => {};
+    const rememberCurrent = () => {}, chooseWorkspace = () => {}, renderQueue = () => {}, pumpQueue = async () => {}, syncHostQueue = async () => {};
     const fetchSessionAccess = async () => {}, stopTurn = async () => {};
     let adoptionOrder = null;
     const windowFor = () => undefined;
