@@ -89,7 +89,8 @@ test('renderPromoted is DSH’s text: the output so far on its own line, then th
 test('a call that ends within its wall time answers as a foreground call, and leaves no job and no notice behind', async () => {
   const h = harness()
   const ok = await h.call('bash', { command: 'echo out; echo err >&2' })
-  assert.equal(ok.output, 'out\nerr\n')
+  // stderr under its own marker, as DSH's bash renders a run (live-testing issue #246).
+  assert.equal(ok.output, 'out\n[stderr]\nerr\n')
   assert.equal(ok.error, undefined)
   assert.equal((ok.data as { exitCode?: number }).exitCode, 0)
   const failed = await h.call('bash', { command: 'echo x; exit 3' })

@@ -15,13 +15,13 @@ import { handlePlanRequest } from '../plan/http.ts'
 import type { PlanService } from '../plan/service.ts'
 import { describeContent, reasoningLevelFor } from '../llm/types.ts'
 import { mergeTokenUsage, type TokenUsage } from '../llm/usage.ts'
-import { AttachmentInputError, readAttachments } from './attachments.ts'
+import { AttachmentInputError, readAttachments, validateUploadContent } from './attachments.ts'
 import { logFileName } from './log-download.ts'
 import { MAX_UPLOAD_BYTES, saveUpload, UPLOAD_NOT_REFERENCED, uploadDirectory, uploadReferencedBy } from './uploads.ts'
 import { rendererFor, renderSourceOffThread } from './code.ts'
 import { pickFolder } from './picker.ts'
 import { createDirectory, DirectoryError, listDirectory } from './directories.ts'
-import { contextBreakdownWithFallback, projectLedger, projectRows, projectSessionStats, projectTimeline } from './ledger.ts'
+import { contextBreakdownWithFallback, isReplacementCopy, projectLedger, projectRows, projectSessionStats, projectTimeline } from './ledger.ts'
 import { catalogOf } from './tool-catalog.ts'
 import { inspectTool } from './tool-inspector.ts'
 import { isHtmlDocument, NOT_AN_HTML_DOCUMENT, PREVIEW_CSP, PREVIEW_FRAME_CSP, PREVIEW_SHELL, rewriteResources } from './html.ts'
@@ -1137,7 +1137,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    * bytes into the harness's own store and name that copy.
    *
    * Three rules the route keeps rather than trusting the page: the body is capped at the same ceiling
-   * as a turn; an empty body is refused instead of creating an empty file; and the name is sanitised by
+   * as a turn; ordinary empty files are accepted but empty images are refused; and the name is sanitised by
    * `saveUpload` before any path is built, so a hand-made request cannot choose where the file lands.
    */
   if (url.pathname === '/api/uploads' && request.method === 'POST') {
@@ -1156,11 +1156,15 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       }
       chunks.push(Buffer.from(chunk))
     }
-    if (bytes === 0) {
-      respond(response, 400, 'text/plain', 'an empty file has nothing to add\n')
+    const name = url.searchParams.get('name') ?? 'file'
+    try {
+      validateUploadContent(name, bytes, request.headers['content-type'])
+    } catch (error) {
+      if (!(error instanceof AttachmentInputError)) throw error
+      respond(response, 400, 'text/plain', `${error.message}\n`)
       return
     }
-    const saved = saveUpload(url.searchParams.get('name') ?? 'file', Buffer.concat(chunks))
+    const saved = saveUpload(name, Buffer.concat(chunks))
     respond(response, 200, 'application/json', `${JSON.stringify(saved)}\n`)
     return
   }
@@ -3857,6 +3861,13 @@ export function transcriptTurns(
       continue
     }
     if (event.type === 'message') {
+      /**
+       * A replacement copy is not a turn. It is a message that shadows part of the model's surface: today, a tool result
+       * cut down under context pressure (`src/context/prune.ts`). It is what the model is sent, not what a person reads,
+       * and the original it shadows is already on the call. DSH's chat keeps such a copy model-only (`isAppendSurfaceEvent`).
+       * Folded, it became a second, unpaired tool row (#186).
+       */
+      if (isReplacementCopy(event)) continue
       /** A message is a whole thing, not a delta, so whatever run was open has ended. */
       closeRuns()
       const message = event.message as

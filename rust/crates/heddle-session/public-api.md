@@ -28,6 +28,8 @@ Everything is re-exported at the crate root.
 | `recorded_mode`, `effective_mode`, `inherit_recorded_mode`, `MODE_EVENT` | the `permission/mode` fold, generic over `M: Serialize + DeserializeOwned` — the vocabulary is `heddle-sandbox`'s `SandboxMode`, which fits as declared |
 | `write_session_definition`, `read_session_definition`, `update_session_definition`, `existing_session_names`, `ensure_sessions_folder`, `session_name` | `<branch>/_sessions_/<session-yyyymmdd-hhmm>/{session.json, INDEX.md}` |
 | `decode_transcript`, `encode_frame`, `split_frames`, `frame_end`, `looks_compressed` | the frame walk |
+| `recover_transcript`, `RecoveredTranscript` | the frame walk past a frame torn in the middle, when whole frames whose seqs join follow it: the frames kept and the byte ranges dropped (#221); the store's open writes the log again from `kept` |
+| `append` (by its path) | an append whole or not at all: `append_whole`, `append_to` over an `AppendTarget`, `unsaved_reason`, `replace_whole` (#221) |
 | `write_atomic` | a whole-file write a concurrent reader never sees half-done (sibling temporary file, then rename); every meta, definition and workspace-record write goes through it |
 | `workspace_key`, `log_name`, `meta_name`, `transcript_in`, `default_session_root(&Env)` | where a log is filed |
 | `title_from`, `fork_title` | a session's label from its first message; `<title> (n)` |
