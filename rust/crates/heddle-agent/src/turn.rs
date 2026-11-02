@@ -750,20 +750,24 @@ async fn run_turn_body(
         });
 
         // A listener that ends the round takes it down; the sentence says the failure came from a hook.
-        let mut prepared = match runtime.hooks.pre_step(PreStep {
-            messages: report.messages.clone(),
-            tools: tools.clone(),
-            round: rounds,
-        }) {
-            Ok(prepared) => prepared,
-            Err(failure) => return Err(TurnError::Hook(pre_step_failure_message(&failure))),
+        let pre_step = |messages: Vec<Message>| -> Result<PreStep, TurnError> {
+            let mut prepared = match runtime.hooks.pre_step(PreStep {
+                messages,
+                tools: tools.clone(),
+                round: rounds,
+            }) {
+                Ok(prepared) => prepared,
+                Err(failure) => return Err(TurnError::Hook(pre_step_failure_message(&failure))),
+            };
+            // The session's preset is applied again to what the hook answered (developer-five's review of A96): a
+            // listener may add a registered tool, and one outside the preset would otherwise reach the model's tool
+            // list even though a call to it is refused. A profile without presets is unchanged.
+            if let Some(preset) = preset {
+                prepared.tools = preset.narrow(prepared.tools, |spec| spec.name.as_str());
+            }
+            Ok(prepared)
         };
-        // The session's preset is applied again to what the hook answered (developer-five's review of A96): a
-        // listener may add a registered tool, and one outside the preset would otherwise reach the model's tool list
-        // even though a call to it is refused. A profile without presets is unchanged.
-        if let Some(preset) = preset {
-            prepared.tools = preset.narrow(prepared.tools, |spec| spec.name.as_str());
-        }
+        let mut prepared = pre_step(report.messages.clone())?;
 
         // `(id, name, arguments)` for each complete tool call the round asked for.
         let mut calls: Vec<(String, String, String)> = Vec::new();
@@ -939,6 +943,39 @@ async fn run_turn_body(
                         ]),
                     )?;
                     provider_retries = plan.retry;
+                    // A message that landed during the failed call or its wait is part of the retried request
+                    // (#250). Written then, a steer (or a teammate's mail) sits on the surface before the retried
+                    // request, since no answer run is open to hold it. Sending the request prepared before the wait
+                    // left it out, and the next attempt's reading counted it as said before the call, so no round
+                    // answered it. DSH's retry re-runs the step, which builds its request from the session again; so
+                    // the request is derived again from the surface, as the overflow retry below derives it, and goes
+                    // through the pre-step hook again as a new message list. A wait nothing landed in sends the same
+                    // request. The TypeScript loop keeps the same rule.
+                    if has_new_input(
+                        &input_before,
+                        &user_input_seqs(runtime.session.as_ref(), session),
+                    ) {
+                        let generation_before = runtime.session.surface(session).replace_generation;
+                        report = runtime.context.assemble(
+                            session,
+                            PrepareOptions {
+                                cwd: instruction_cwd.clone(),
+                                endpoint: options.endpoint.clone(),
+                                model: options.model.clone(),
+                                tools: tools.clone(),
+                                system: system.clone(),
+                                cancel: None,
+                            },
+                        )?;
+                        prepared = pre_step(report.messages.clone())?;
+                        last_context = Some(ContextSummary {
+                            estimated_tokens: report.estimated_tokens,
+                            threshold_tokens: report.threshold_tokens,
+                            pruned: report.pruned,
+                            compacted: runtime.session.surface(session).replace_generation
+                                > generation_before,
+                        });
+                    }
                     continue;
                 }
             }
@@ -2988,6 +3025,93 @@ pub(crate) mod tests {
                 "llm/retry",
                 "llm/retry-started"
             ]
+        );
+    }
+
+    /// #250: a message steered while a provider retry is pending reaches the retried request, which answers it, so no
+    /// round follows; before, the retry sent the request prepared before the steer and the model never saw it.
+    #[tokio::test]
+    async fn a_message_steered_during_a_provider_retry_is_in_the_retried_request() {
+        let session = RecordingSession::new();
+        let steered = Arc::clone(&session);
+        let hook: Arc<dyn Fn() + Send + Sync> = {
+            let flag = Arc::new(AtomicBool::new(false));
+            Arc::new(move || {
+                if !flag.swap(true, Ordering::SeqCst) {
+                    steered.push_user("STEERED-250 mention this");
+                }
+            })
+        };
+        let model = ScriptedModel::new(vec![
+            Step::Fail(http_failure(429, Some(20))),
+            Step::Chunks(vec![
+                Chunk::TextDelta {
+                    text: "answered with the steer".into(),
+                },
+                done("stop"),
+            ]),
+        ])
+        .with_stream_hook(hook)
+        .with_retry_policy(fast_policy(5));
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            registry_with(Vec::new()),
+            Arc::new(crate::ports::NoTurnHooks),
+        );
+        let result = run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "go"),
+        )
+        .await
+        .unwrap();
+        let requests = model.requests();
+        assert_eq!(
+            requests.len(),
+            2,
+            "the refused request and its retry, and no round after it"
+        );
+        let carries = |request: &GenerateRequest| {
+            serde_json::to_string(&request.messages)
+                .unwrap()
+                .contains("STEERED-250")
+        };
+        assert!(
+            !carries(&requests[0]),
+            "the first request went out before the steer"
+        );
+        assert!(
+            carries(&requests[1]),
+            "the retried request carries the steer"
+        );
+        assert_eq!(result.rounds, 1);
+        assert_eq!(result.text, "answered with the steer");
+        assert_eq!(session.events_of(events::LLM_RETRY_STARTED).len(), 1);
+    }
+
+    /// The other half of #250: a retry that no message reached sends the very request that was refused.
+    #[tokio::test]
+    async fn a_provider_retry_nothing_reached_sends_the_same_request() {
+        let (_session, model, result) = provider_retry_turn(
+            vec![
+                Step::Fail(http_failure(503, None)),
+                Step::Chunks(vec![
+                    Chunk::TextDelta {
+                        text: "same request".into(),
+                    },
+                    done("stop"),
+                ]),
+            ],
+            Some(fast_policy(5)),
+        )
+        .await;
+        assert_eq!(result.unwrap().text, "same request");
+        let requests = model.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            serde_json::to_string(&requests[0].messages).unwrap(),
+            serde_json::to_string(&requests[1].messages).unwrap(),
+            "the retried messages are the refused ones"
         );
     }
 
