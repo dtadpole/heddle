@@ -8,7 +8,7 @@ import { after, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 import { createServer } from 'node:net'
-import { afterProbe, CAPTURE_BUDGET_MS, captureSteps, formatPaused, isNodeProgram, isOurLeftover, lockVerdict, nextAttempt, parseSupervisorArgs, restartDelay, serverEnvironment } from '../../supervisor.mjs'
+import { afterProbe, CAPTURE_BUDGET_MS, captureSteps, formatPaused, isNodeProgram, isOurLeftover, lockVerdict, nextAttempt, parseSupervisorArgs, restartDelay, serverCommandLine } from '../../supervisor.mjs'
 
 /**
  * supervisor.mjs: the rules it keeps, and the behaviour it promises.
@@ -122,17 +122,13 @@ test('a hung node server is sampled and paused for its JavaScript stack; any oth
   assert.ok(CAPTURE_BUDGET_MS <= 5_000, 'the capture never delays the restart by more than five seconds')
 })
 
-test('the server environment gains a loopback inspector port only when hangs are captured and the server is node (#257)', () => {
-  const env = { PATH: '/usr/bin', HOME: '/h' }
-  const node = ['/v/bin/node', '/r/dist/cli.js', 'web']
-  assert.equal(serverEnvironment(env, node, null), env, 'no capture directory: the environment is the supervisor\'s own')
-  assert.equal(serverEnvironment(env, ['/b/heddle', 'web'], '/h/.heddle/hang-captures'), env, 'the Rust binary gets no NODE_OPTIONS')
-  const captured = serverEnvironment(env, node, '/h/.heddle/hang-captures')
-  assert.equal(captured.PATH, '/usr/bin')
-  assert.equal(env.NODE_OPTIONS, undefined, 'the supervisor\'s own environment is not changed')
-  assert.equal(captured.NODE_OPTIONS, '--inspect-port=127.0.0.1:0', 'loopback only, a port the system picks; nothing opens until SIGUSR1')
-  const kept = serverEnvironment({ ...env, NODE_OPTIONS: '--max-old-space-size=4096' }, node, '/h/c')
-  assert.equal(kept.NODE_OPTIONS, '--max-old-space-size=4096 --inspect-port=127.0.0.1:0', 'existing options come first and are kept')
+test('a captured node server gets a loopback inspector port as its own argument, never through NODE_OPTIONS (#257)', () => {
+  const node = ['/v/bin/node', '/r/dist/cli.js', 'web', '--port', '3082']
+  assert.equal(serverCommandLine(node, null), node, 'no capture directory: the installer\'s command, untouched')
+  assert.deepEqual(serverCommandLine(node, '/h/.heddle/hang-captures'), ['/v/bin/node', '--inspect-port=127.0.0.1:0', '/r/dist/cli.js', 'web', '--port', '3082'])
+  assert.deepEqual(node, ['/v/bin/node', '/r/dist/cli.js', 'web', '--port', '3082'], 'the parsed command is not changed in place')
+  const rust = ['/b/heddle', 'web', '--port', '3097']
+  assert.equal(serverCommandLine(rust, '/h/.heddle-rust-preview/hang-captures'), rust, 'the Rust binary gets no node flag')
 })
 
 test('a failed start backs off, and a run that lasted resets the count', () => {
@@ -242,6 +238,7 @@ function httpServer({ name, hangAfterMs = null, spinAfterMs = null, blockAfterMs
       "import { createServer } from 'node:http'",
       "import { execSync } from 'node:child_process'",
       `appendFileSync(${JSON.stringify(pids)}, process.pid + '\\n')`,
+      `appendFileSync(${JSON.stringify(`${pids}.argv`)}, JSON.stringify({ execArgv: process.execArgv, nodeOptions: process.env.NODE_OPTIONS ?? null }) + '\\n')`,
       "createServer((request, response) => response.end('ok')).listen(Number(process.argv[2]), '127.0.0.1')",
       "process.on('SIGTERM', () => process.exit(0))",
       hangAfterMs === null ? '' : `setTimeout(() => process.kill(process.pid, 'SIGSTOP'), ${hangAfterMs})`,
@@ -306,6 +303,9 @@ test('a hung node server is captured before the kill: its JavaScript stack, and 
     const { stderr } = run.output()
     assert.match(stderr, /the server is hung, restarting it/)
     assert.match(stderr, /captured the hung server before the kill: /)
+    const started = JSON.parse(lines(`${server.pids}.argv`)[0])
+    assert.deepEqual(started.execArgv, ['--inspect-port=127.0.0.1:0'], 'the server process carries the inspector port as its own argument')
+    assert.equal(started.nodeOptions, process.env.NODE_OPTIONS ?? null, 'and its environment, which its children inherit, is not changed')
     assert.equal(statSync(captures).mode & 0o777, 0o700, 'the capture directory is private')
     const files = readdirSync(captures)
     const stacks = files.filter((name) => name.startsWith('stack-'))

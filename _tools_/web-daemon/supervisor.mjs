@@ -245,19 +245,21 @@ export function captureSteps(command) {
 }
 
 /**
- * The server's environment: the supervisor's own, plus, when hangs are captured and the server is node, an inspector
- * port of `127.0.0.1:0`. That opens nothing: it only means that the inspector SIGUSR1 starts listens on loopback, on a
- * port the system picks, so it never collides with a debugger on 9229. Options already in `NODE_OPTIONS` come first.
+ * The command the supervisor spawns: the installer's, plus, when hangs are captured and the server is node, an
+ * inspector port of `127.0.0.1:0` as a node argument. That opens nothing: it only means that the inspector SIGUSR1
+ * starts listens on loopback, on a port the system picks, so it never collides with a debugger on 9229.
+ *
+ * An argument and not `NODE_OPTIONS`: node passes `NODE_OPTIONS` on to every child, and the server's children are the
+ * bash tool's commands and every terminal shell, so each `node` a person or a model ran there would carry the flag
+ * (integrator-one's review). An argument stays on the server process. The supervisor's own environment is untouched.
  *
  * Not `--report-on-signal`: node handles that signal on its event loop, so a server whose JavaScript spins never
  * writes the report (measured, node 24.21, 2026-11-01). SIGUSR1 starts the inspector from its own thread and
  * interrupts running JavaScript, which is the case a hang is.
  */
-export function serverEnvironment(env, command, captureDir) {
-  if (captureDir === null || !captureSteps(command).stack) return env
-  const inspector = '--inspect-port=127.0.0.1:0'
-  const existing = env.NODE_OPTIONS?.trim()
-  return { ...env, NODE_OPTIONS: existing ? `${existing} ${inspector}` : inspector }
+export function serverCommandLine(command, captureDir) {
+  if (captureDir === null || !captureSteps(command).stack) return command
+  return [command[0], '--inspect-port=127.0.0.1:0', ...command.slice(1)]
 }
 
 /** The loopback port `pid` listens on besides `servicePort` — its inspector, once SIGUSR1 has opened it. */
@@ -527,10 +529,10 @@ async function probe(url) {
  * Resolves with a handle the loop can signal and await; it never rejects, because a program that cannot even be
  * created is a failed start like any other and the loop above is the one place that decides what to do about it.
  */
-function startServer(command, env = process.env) {
+function startServer(command) {
   let child = null
   try {
-    child = spawn(command[0], command.slice(1), { stdio: 'inherit', env })
+    child = spawn(command[0], command.slice(1), { stdio: 'inherit' })
   } catch (error) {
     process.stderr.write(`heddle-supervisor: could not start ${command[0]}: ${error.message}\n`)
   }
@@ -572,7 +574,8 @@ async function main() {
     process.exit(2)
   }
   const { command, maxFailures, slowRetryMs, giveUp, healthUrl, healthEveryMs, healthMisses, healthGraceMs, reclaimPort, lock, captureDir } = parsed
-  const env = serverEnvironment(process.env, command, captureDir)
+  // What this supervisor spawns, and so also what a leftover of its own on the port looks like.
+  const serverCommand = serverCommandLine(command, captureDir)
   const servicePort = healthUrl === null ? null : Number(new URL(healthUrl).port) || null
   if (captureDir !== null) prepareCaptureDir(captureDir)
   if (lock !== null) {
@@ -602,11 +605,11 @@ async function main() {
   process.on('SIGTERM', stop)
   process.on('SIGINT', stop)
 
-  process.stdout.write(`heddle-supervisor: running ${command.join(' ')}\n`)
+  process.stdout.write(`heddle-supervisor: running ${serverCommand.join(' ')}\n`)
   while (!stopping) {
-    if (reclaimPort !== null) await reclaim(reclaimPort, command)
+    if (reclaimPort !== null) await reclaim(reclaimPort, serverCommand)
     if (stopping) break
-    current = startServer(command, env)
+    current = startServer(serverCommand)
     let watch = null
     if (healthUrl !== null) {
       // Probe the running server; a hung one is killed, and its exit takes the ordinary restart path below.
