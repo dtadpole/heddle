@@ -1,12 +1,12 @@
 ---
 title: Local build
-version: 1.11.0
+version: 1.12.0
 description: Runs a cargo command in one of three build slots on the owner's Mac, so the eighteen seats of the Rust port share ten cores and one disk instead of all building at once, and queues the seats fairly for the one browser slot.
 grounded_in:
   - source: owner statement 2026-10-22 that the team works locally on this Mac, not on the h8 devservers
   - source: rust/INDEX.md, the build environment of the Rust port
 created: 2026-10-23T03:10:31Z
-modified: 2026-10-31T12:45:00Z
+modified: 2026-11-01T17:20:00Z
 ---
 
 # `local-build`
@@ -66,13 +66,18 @@ than two hours from the user TMPDIR, but never one a running process names:
 - Chrome's own leftovers: `scoped_dir*`, `com.google.Chrome*` and the hidden `.com.google.Chrome*`.
 
 Then it prints TMPDIR's total, entry count and five largest entries, so a leak shows in its own output. It also
-reports the npm and uv cache sizes, and never removes them. [tmp-sweep.md](tmp-sweep.md) has the details.
+reports the npm and uv cache sizes, and never removes them. With `--worktrees` it also removes the stale scratch
+worktrees of `~/heddle`: those under `/private/tmp` and the `heddle--developer-*-*` siblings that are over two
+hours old, clean, unused by any process and pushed, then runs `git worktree prune`.
+[tmp-sweep.md](tmp-sweep.md) has the details.
 
 ## Build output sweep
 
 After each successful build, `run` removes the superseded heddle artifacts in `target/*/deps`: a newer one with
 the same name exists, and the old one is over an hour old. `_tools_/local-build/deps-sweep --all` sweeps every
-worktree. [deps-sweep.md](deps-sweep.md) has the details.
+worktree. When the disk has less than 18 GiB free, `deps-sweep --floor` removes each worktree's
+`rust/target/debug` that nothing wrote for 30 minutes and no process holds, and lists each with its owner. It
+tells no one: the coordinator tells the owners. [deps-sweep.md](deps-sweep.md) has the details.
 
 ## Tests
 
@@ -83,7 +88,7 @@ node --test _tools_/local-build/_tests_/tmp-sweep/unit.test.mjs
 node --test _tools_/local-build/_tests_/deps-sweep/unit.test.mjs
 ```
 
-Last run 2026-10-31 05:48 PDT, this change on main a3620cef, in a ts slot: slot-runner 32, browser-slot 24, tmp-sweep 7 and deps-sweep 5 passed, 0 failed.
+Last run 2026-11-01 09:25 PST, this change on main b906e4fb, in a ts slot: slot-runner 32, browser-slot 24, tmp-sweep 12 and deps-sweep 10 passed, 0 failed.
 
 The suite runs the script against a temporary slot root and a fake cargo: no real slot, no real build. It
 judges slot release, the exit status, the job cap, six concurrent callers held until released (so a full set of slots is proven, not timed), a killed owner, an old stamp, a live
@@ -96,8 +101,8 @@ owner, an ownerless directory, the ownership guard, both owner-file formats, the
 - [ts-slots.md](ts-slots.md): TypeScript test runs, their pool of two and the node test concurrency.
 - [shared-target.md](shared-target.md): worktrees sharing one target, the wrong-tree trap and the guard.
 - [browser-slot.md](browser-slot.md): the browser slot queue, its priority turn and stale-holder rule.
-- [tmp-sweep.md](tmp-sweep.md): what the TMPDIR sweep removes and keeps.
-- [deps-sweep.md](deps-sweep.md): the build output sweep after each build.
+- [tmp-sweep.md](tmp-sweep.md): what the TMPDIR and worktree sweeps remove and keep.
+- [deps-sweep.md](deps-sweep.md): the build output sweep after each build, and the debug targets under the disk floor.
 - [status-and-exit-codes.md](status-and-exit-codes.md): the `status` report and every exit code.
 - [capacity.md](capacity.md): the coordinator's cap file, the machine report and the disk line.
 - [`../../rust/INDEX.md`](../../rust/INDEX.md): where the port builds and runs, and the per-part status.

@@ -71,6 +71,12 @@ pub struct EndpointListing {
     pub endpoints: Vec<Map<String, Value>>,
     /// The nominated default, when it names a configured endpoint; else `null`.
     pub default: Option<String>,
+    /// The model a new session starts with on the default endpoint, when configured (DSH parity A104).
+    #[serde(rename = "defaultModel", skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+    /// The reasoning effort a new session starts with on the default endpoint, when configured.
+    #[serde(rename = "defaultEffort", skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<String>,
 }
 
 /// A switch, validated: the endpoint, and the overrides it carries.
@@ -190,6 +196,7 @@ mod tests {
                 .map(|entry| entry.as_object().expect("an object entry").clone())
                 .collect(),
             default: Some("scripted".to_owned()),
+            ..EndpointListing::default()
         }
     }
 

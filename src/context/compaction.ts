@@ -117,6 +117,16 @@ export interface CompactOptions {
   readonly summarize: (messages: readonly Message[]) => Promise<string>
   /** Take a fresh measurement — after a prune, and after a replacement. */
   readonly measure: () => Measurement
+  /**
+   * The turn's own signal, for a compaction that runs as a turn's pre-step (#154).
+   *
+   * The summariser carries it to the summary request, so a Stop or a shutdown cancels the call. A summary that failed
+   * because the signal fired lands nothing and is recorded as stopped, not refused. DSH's `dsh-compaction-basic` has the
+   * same rule ("Cancellation stays authoritative throughout"): an abort mid-request throws, and no replacement lands. A
+   * summary that had already returned when the Stop came is committed, as DSH's automatic compaction commits it; the
+   * loop's own check then stops the turn before its model request.
+   */
+  readonly signal?: AbortSignal
 }
 
 /** {@link CompactOptions} plus the one switch overflow recovery needs. */
@@ -267,6 +277,7 @@ export class CompactionEngine {
     try {
       summary = await options.summarize(messages)
     } catch (error) {
+      if (options.signal?.aborted === true) return this.stopped(handle, plan, options)
       return this.refuse(handle, plan, options, `the summariser failed — ${(error as Error).message}`)
     }
     if (summary.trim().length === 0) {
@@ -376,6 +387,32 @@ export class CompactionEngine {
 
     const outcome = await this.compact(handle, plan, { ...options, measurement: measured })
     return { ...outcome, pruned }
+  }
+
+  /**
+   * Record a compaction its turn's Stop cancelled (#154), leaving the surface exactly as it was.
+   *
+   * `compaction/failed` closes the span, as a refusal does, but without `refused`: nothing refused it, and `/compact`
+   * reads `refused: true` as a summary it must report as an error.
+   */
+  private stopped(handle: SessionHandle, plan: CompactionPlan, options: CompactOptions): CompactionOutcome {
+    const reason = 'stopped by the caller'
+    const event = this.store.append(handle, {
+      type: 'compaction/failed',
+      fromSeq: plan.fromSeq,
+      throughSeq: plan.throughSeq,
+      stopped: true,
+      reason,
+    })
+    return {
+      compacted: false,
+      reason,
+      pruned: 0,
+      before: options.measurement.totalTokens,
+      after: options.measurement.totalTokens,
+      plan,
+      reasonSeq: event.seq,
+    }
   }
 
   /** Record a refused compaction and report it, leaving the surface exactly as it was. */
