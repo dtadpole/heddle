@@ -144,7 +144,8 @@ other's pages.
   owner's clipboard, so copy, cut and paste are `withheld` there; use `start --headless`.
 - **An upload can go through the control a person clicks.** A hidden file input has no accessibility
   node, hence no uid. Given the control's uid, `upload_file` clicks it with the chooser intercepted, so
-  no native picker is drawn, and gives the files to the input the chooser names; no chooser in 3 s is refused.
+  no native picker is drawn, and gives the files to the input the chooser names. No chooser in 3 s is an
+  error, and so is a switch-off Chrome refuses; the next upload_file retries it first.
 - **The no-sandbox retry.** A machine whose outer confinement forbids Chrome's own sandbox gets a
   second start with `--no-sandbox`, and `status` says which start it was. Silently weakening a browser
   would be wrong; failing on every confined machine would be useless.

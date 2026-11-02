@@ -176,10 +176,12 @@ test('a visible browser gets the key events but no clipboard command, and is tol
  *
  * uid `btn` is a button; a press on it opens a chooser for backend node 99 when `chooser` is given, as a
  * hidden input behind a styled button does. `strayFirst` makes another tab's chooser arrive first.
+ * `refuseOff` is how many switch-offs of interception Chrome refuses before one succeeds.
  */
-function chooserPage({ chooser, strayFirst = false } = {}) {
+function chooserPage({ chooser, strayFirst = false, refuseOff = 0 } = {}) {
   const handlers = []
   const calls = []
+  const control = { refuseOff }
   const fire = (method, params, sessionId = 'S') => {
     for (const h of handlers.filter((entry) => entry.method === method)) h.handler(params, { sessionId })
   }
@@ -196,6 +198,10 @@ function chooserPage({ chooser, strayFirst = false } = {}) {
     elementBox: async () => ({ centerX: 10, centerY: 20 }),
     async send(method, params) {
       calls.push({ method, params })
+      if (method === 'Page.setInterceptFileChooserDialog' && params.enabled === false && control.refuseOff > 0) {
+        control.refuseOff -= 1
+        throw new Error('Target closed')
+      }
       if (method === 'DOM.resolveNode') return { result: { object: { objectId: `obj-${params.backendNodeId}` } } }
       if (method === 'Runtime.callFunctionOn') {
         if (params.functionDeclaration.includes('tagName')) return { result: { result: { value: { tag: 'BUTTON', type: 'button' } } } }
@@ -249,6 +255,38 @@ test('a single-file chooser refuses several files rather than keeping only some'
   assert.deepEqual(intercepts(calls), [true, false])
   const one = await uploadFile(chooserPage({ chooser: { mode: 'selectSingle' } }).page, { uid: 'btn', filePaths: ['/fx/a.txt'] })
   assert.deepEqual(one.uploaded, ['a.txt'])
+})
+
+/**
+ * "Interception is on for the click only" is a claim, so a switch-off Chrome refuses must not read as a
+ * clean upload: the page would silently swallow its own later choosers (developer-two, 2026-11-02, on
+ * reading 65c229132, whose cleanup ignored that failure).
+ */
+test('a refused switch-off makes the upload an error that names the files, and the next upload retries it first', async () => {
+  const { page, calls } = chooserPage({ chooser: { mode: 'selectMultiple' }, refuseOff: 1 })
+  await assert.rejects(
+    uploadFile(page, { uid: 'btn', filePaths: ['/fx/a.txt'] }),
+    /^Error: the files were given \(a\.txt\), but file-chooser interception could not be switched off \(Target closed\).*cli\.mjs stop/,
+  )
+  assert.equal(page.chooserInterceptLeftOn, true, 'the page remembers the setting outlived the call')
+  calls.length = 0
+  const again = await uploadFile(page, { uid: 'btn', filePaths: ['/fx/b.txt'] })
+  assert.deepEqual(again.uploaded, ['b.txt'])
+  assert.deepEqual(intercepts(calls), [false, true, false], 'switched off before anything else, then the usual pair')
+  assert.equal(page.chooserInterceptLeftOn, false)
+})
+
+test('a refused switch-off is added to the upload\'s own failure, and a still-refused retry uploads nothing', async () => {
+  const { page, calls } = chooserPage({ refuseOff: 2 })
+  await assert.rejects(
+    uploadFile(page, { uid: 'btn', filePaths: ['/fx/a.txt'], chooserTimeoutMs: 100 }),
+    /opened no file chooser within 100 ms; .*; and file-chooser interception could not be switched off \(Target closed\)/,
+  )
+  calls.length = 0
+  await assert.rejects(uploadFile(page, { uid: 'btn', filePaths: ['/fx/a.txt'] }), /^Error: nothing was uploaded: file-chooser interception could not be switched off/)
+  assert.deepEqual(intercepts(calls), [false], 'the retry was the only call')
+  assert.equal(calls.some((call) => call.method === 'Input.dispatchMouseEvent' || call.method === 'DOM.setFileInputFiles'), false, 'no click, no files')
+  assert.equal(page.chooserInterceptLeftOn, true)
 })
 
 /** The snapshot's text form: indentation, uid first, role rules, quoted values, collapsed text. */

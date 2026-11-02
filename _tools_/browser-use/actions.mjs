@@ -440,6 +440,10 @@ export async function uploadFile(page, { uid, filePaths, chooserTimeoutMs = CHOO
   const node = page.uidToNode.get(uid)
   if (node === undefined) throw new Error(`the snapshot has no element with uid ${uid}; take a new snapshot`)
   if (node.backendNodeId === undefined) throw new Error(`the element with uid ${uid} is not a DOM node`)
+  if (page.chooserInterceptLeftOn === true) {
+    const stuck = await switchInterceptOff(page)
+    if (stuck !== undefined) throw new Error(`nothing was uploaded: ${interceptLeftOn(stuck)}`)
+  }
   const { objectId } = await resolveObject(page, uid)
   const kind = await callOn(page, objectId, `function () { return { tag: this.tagName, type: this.type } }`)
   if (kind?.tag !== 'INPUT' || kind?.type !== 'file') {
@@ -451,10 +455,35 @@ export async function uploadFile(page, { uid, filePaths, chooserTimeoutMs = CHOO
 }
 
 /**
+ * Switch file-chooser interception off, and say whether that worked.
+ *
+ * A failure is recorded on the page (`chooserInterceptLeftOn`), because the setting outlives the call:
+ * until it is switched off, a chooser the page opens on its own is handed to nobody and never drawn.
+ * The next upload_file on the page tries again before doing anything else.
+ */
+async function switchInterceptOff(page) {
+  try {
+    await page.send('Page.setInterceptFileChooserDialog', { enabled: false })
+    page.chooserInterceptLeftOn = false
+    return undefined
+  } catch (error) {
+    page.chooserInterceptLeftOn = true
+    return error
+  }
+}
+
+/** What a reader is told when interception could not be switched off. */
+const interceptLeftOn = (error) =>
+  `file-chooser interception could not be switched off (${error?.message ?? error}), so this page draws no chooser ` +
+  'of its own until it is; the next upload_file tries again, and `cli.mjs stop` ends the browser and the setting with it'
+
+/**
  * Click the control a uid names and give its file chooser the files.
  *
  * Interception is switched on only for the click and off again afterwards, so a chooser the page opens
- * later, outside any upload, behaves as it would have without the tool.
+ * later, outside any upload, behaves as it would have without the tool. That claim is checked, not
+ * assumed: a switch-off that fails turns the call into an error that says so, naming the files if they
+ * were given, rather than a success that leaves the page changed.
  */
 async function uploadThroughChooser(page, { uid, filePaths, chooserTimeoutMs }) {
   let answer
@@ -465,6 +494,8 @@ async function uploadThroughChooser(page, { uid, filePaths, chooserTimeoutMs }) 
     if (message.sessionId === page.sessionId) answer(params)
   })
   let timer
+  let outcome
+  let failure
   try {
     await page.send('Page.setInterceptFileChooserDialog', { enabled: true })
     await click(page, { uid })
@@ -488,12 +519,20 @@ async function uploadThroughChooser(page, { uid, filePaths, chooserTimeoutMs }) 
     const resolved = await page.send('DOM.resolveNode', { backendNodeId: chooser.backendNodeId })
     const inputId = resolved.result?.object?.objectId
     const names = inputId === undefined ? undefined : await callOn(page, inputId, FILE_NAMES)
-    return { uploaded: names ?? [], uid, via: 'file chooser' }
+    outcome = { uploaded: names ?? [], uid, via: 'file chooser' }
+  } catch (error) {
+    failure = error
   } finally {
     clearTimeout(timer)
     remove()
-    await page.send('Page.setInterceptFileChooserDialog', { enabled: false }).catch(() => {})
   }
+  const stuck = await switchInterceptOff(page)
+  if (stuck !== undefined) {
+    if (failure !== undefined) throw new Error(`${failure.message}; and ${interceptLeftOn(stuck)}`)
+    throw new Error(`the files were given (${outcome.uploaded.join(', ')}), but ${interceptLeftOn(stuck)}`)
+  }
+  if (failure !== undefined) throw failure
+  return outcome
 }
 
 /** Answer the dialog the page is showing. */
