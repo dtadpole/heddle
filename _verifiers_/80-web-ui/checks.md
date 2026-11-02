@@ -1,9 +1,9 @@
 ---
 title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-31T23:10:00Z
+modified: 2026-11-02T00:05:00Z
 level: L3
-version: 1.7.0
+version: 1.8.0
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
 status: unverified
 grounded_in:
@@ -206,6 +206,17 @@ grounded_in:
   keyboard on the recording row, so the next chord is recorded, and Remove and Restore default leave it on their row,
   or on the search field when a search for the old keys no longer matches the row (another tab's change too);
   two Escape presses within 500 ms stop the running turn, one press does not, and a queued message stays queued (S43).
+- [`check-plan-review.mjs`](check-plan-review.mjs) — the plan review where a person reads it (#231, DSH's
+  `dsh-client-ui-plan`), against a provider double that answers with `exit_plan_mode`. The review is DSH's short
+  question, with the plan as its `detail` and a `plan-review` intent naming the presenting call. While it waits:
+  - the plan opens by itself in the right sidebar as rendered Markdown, once per plan in a browser session, leaving the
+    focus where it was;
+  - the review card holds no plan text, only View full plan (which selects the open tab) and Approve / Keep planning;
+  - a closed tab is not reopened by a reload.
+  After Approve the finished turn keeps one plan card whose Open focuses the plan's tab, and a reload and a second page
+  draw the same single card. Another session closes the first session's plan tab, and coming back shows no stale tab.
+  A narrow window opens nothing by itself, but View full plan still opens the plan. A model's own `ask_user_question`
+  dressed with markdown, `detail` and `intent` gets no plan tab, no link and no card.
 
 **Isolation.** Every check starts its server with the fixture's own `HEDDLE_HOME`, never the operator's: the workspace
 registry, the schedule store and the instructions are read from there. `check-model-switcher.mjs` set none, so every

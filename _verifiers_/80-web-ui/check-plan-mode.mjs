@@ -281,7 +281,9 @@ test("exit_plan_mode puts the plan to the person as DSH's Plan review question, 
       ['plan-review', 'Plan review', ['Approve', 'Keep planning']],
       "DSH's plan-review question, header and options",
     )
-    assert.match(review.question, /^Approve this plan and leave plan mode\?\n\n# Ship the menu\n\n1\. Registry/, 'the plan is under the question')
+    assert.equal(review.question, 'Approve this plan and leave plan mode?', "DSH's question; the plan rides beside it (#231)")
+    assert.equal(review.detail, '# Ship the menu\n\n1. Registry\n2. Menu', "the plan is the question's detail")
+    assert.deepEqual(review.intent, { kind: 'plan-review', approve: 'Approve', callId: 'call_plan_1' }, 'its intent names the approving option and the presenting call')
     const answered = await api(server.url, cookie, `/api/questions/${encodeURIComponent(open[0].id)}`, {
       method: 'POST',
       body: JSON.stringify({ session: id, answers: [{ id: 'plan-review', selected: ['Approve'] }] }),
