@@ -1670,6 +1670,11 @@ async fn steer_session(
 }
 
 async fn stop_session(State(state): State<AppState>, SessionPath(id): SessionPath) -> Response {
+    // A Stop keeps the session's queue and runs none of it on its own (#75, DSH keepInbox), until the person acts again.
+    held_queues()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(id.to_string());
     // Every turn of the session, not only the ones this server started (#93): a goal round, a reminder's turn and a
     // job notice's turn are registered with the agent runtime's live-turn registry, not with `runs`. A turn the
     // server started is in both and is counted once.
@@ -2502,6 +2507,14 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
     // A prompt the page queued (`queue: true`) for a session that is busy, or already has prompts waiting, goes into
     // the session's durable next-turn queue and is answered at once (#162), as DSH queues it on the host. A retry with
     // the same `requestId` answers the row it queued; on a free session the prompt runs now. web.ts does the same.
+    // A new send is the person acting again: a queue held by their Stop may drain once the session is free.
+    if held_queues()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&session)
+    {
+        kick_queue(&state, &session);
+    }
     if body.bool("queue") == Some(true) {
         let request_id = body.non_empty("requestId").map(str::to_owned);
         let sessions = state.harness().sessions.clone();
@@ -3248,6 +3261,21 @@ async fn queue_edit(
     }
 }
 
+/// Sessions a person stopped: their queue is kept and not drained on its own (#75), until they send again.
+fn held_queues() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static HELD: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    HELD.get_or_init(Default::default)
+}
+
+/// Whether a person's Stop holds the session's queue.
+fn queue_held(session: &str) -> bool {
+    held_queues()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains(session)
+}
+
 /// Sessions whose queue drain is running, so each has one drainer at most.
 fn draining() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     static DRAINING: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
@@ -3259,7 +3287,7 @@ fn draining() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
 /// already at it or nothing waits. The drainer waits for the session to go idle (the route's own turns and every turn
 /// the agent runtime holds, a `/compact` included), claims the first row and runs it as the next turn, and repeats.
 fn kick_queue(state: &AppState, session: &str) {
-    if state.harness().sessions.queued(session).is_empty() {
+    if queue_held(session) || state.harness().sessions.queued(session).is_empty() {
         return;
     }
     {
@@ -3284,7 +3312,7 @@ fn kick_queue(state: &AppState, session: &str) {
             if state.runs().is_running(&session) || state.harness().turns.is_live(&session) {
                 continue;
             }
-            if state.runs().is_closing() {
+            if state.runs().is_closing() || queue_held(&session) {
                 break;
             }
             let Some(row) = state.harness().sessions.claim_next_turn(&session) else {
