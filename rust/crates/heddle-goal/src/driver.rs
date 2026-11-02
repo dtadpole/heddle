@@ -128,9 +128,9 @@ pub trait RoundRunner: Send + Sync + 'static {
         source: GoalRoundSource,
     ) -> BoxFuture<'static, Result<(), String>>;
 
-    /// Whether a person's prompt waits in the session's next-turn queue (#162, #177): DSH's round driver yields to
-    /// queued input (`competingQueued`), so the queued turn runs first and its end asks for the next round. The default
-    /// has no queue.
+    /// Whether a queued next-turn prompt waits in the session (#162, #177) - a person's, a teammate's or a reminder's: DSH's
+    /// round driver yields to queued input (`competingQueued`), so the queued turn runs first and its end asks for the
+    /// next round. The default has no queue.
     fn competing(&self, session: &str) -> bool {
         let _ = session;
         false
@@ -512,7 +512,7 @@ impl GoalDriver {
                         revision,
                         round,
                     };
-                    // A person's queued prompt goes first (#177); its turn's end requests the next round.
+                    // A queued next-turn prompt goes first (#177); its turn's end requests the next round.
                     if self.runner.competing(session) {
                         return DriverOutcome {
                             rounds,
@@ -1020,6 +1020,44 @@ mod tests {
             "Goal reached its configured limit of 3 rounds."
         );
         assert_eq!(folded.goal.as_ref().unwrap().id, created.goal.id);
+    }
+
+    /// #162/#177: a runner that reports a queued next-turn prompt makes the chain yield before any round; one that does
+    /// not proceeds.
+    #[tokio::test]
+    async fn a_queued_prompt_makes_the_chain_yield_before_a_round() {
+        struct Competing(TestRunner, bool);
+        impl RoundRunner for Competing {
+            fn run(
+                &self,
+                session: &str,
+                prompt: String,
+                source: GoalRoundSource,
+            ) -> BoxFuture<'static, Result<(), String>> {
+                self.0.run(session, prompt, source)
+            }
+            fn competing(&self, _session: &str) -> bool {
+                self.1
+            }
+        }
+        let (log, goals) = setup();
+        create(&goals, 2.0);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let yielding = GoalDriver::new(
+            goals.clone(),
+            Arc::new(Competing(runner(&log, &calls), true)),
+        );
+        let outcome = yielding.advance("s1").await;
+        assert_eq!((outcome.rounds, outcome.stopped.as_str()), (0, "yielded"));
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "no round ran while a prompt was queued"
+        );
+        let proceeding = GoalDriver::new(
+            goals.clone(),
+            Arc::new(Competing(runner(&log, &calls), false)),
+        );
+        assert_eq!(proceeding.advance("s1").await.rounds, 2);
     }
 
     #[tokio::test]
