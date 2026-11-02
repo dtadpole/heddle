@@ -1701,6 +1701,14 @@ impl Component for GoalDriverComponent {
             .ok_or_else(|| "goal-driver: the goal service is not provided".to_owned())?;
         let sessions = session_service(services, "goal-driver")?;
         let runtime = crate::runtime::shared_runtime(services)?;
+        // A person's pause aborts the session's running turn, keeping queued input, as DSH's round driver does on a
+        // host-initiated pause (issue #190); the model's own pause and the driver's use `pause_in_turn`.
+        let weak = Arc::downgrade(&runtime);
+        goals.set_pause_interrupter(Arc::new(move |session: &str| {
+            if let Some(turns) = weak.upgrade().and_then(|runtime| runtime.turns.clone()) {
+                turns.abort(session, Some("goal paused by the user"));
+            }
+        }));
         let driver = heddle_goal::GoalDriver::new(
             goals,
             Arc::new(GoalRounds {
