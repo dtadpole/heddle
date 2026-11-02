@@ -28,6 +28,18 @@ const OPTIONAL = new Map([
   ],
   ['selectionForSeat', 'function selectionForSeat() { return selectionForTurn() }'],
 ])
+/** The page's English table (#80), so a lifted function that draws its words through t() shows them as the page does. */
+const ENGLISH: Record<string, string> = (() => {
+  const start = page.indexOf('  en: Object.freeze({')
+  const table: Record<string, string> = {}
+  if (start < 0) return table
+  const end = page.indexOf('\n  }),', start)
+  for (const match of page.slice(start, end).matchAll(/^\s+'([^']+)': '((?:[^'\\]|\\.)*)',$/gm)) table[match[1]!] = match[2]!.replace(/\\'/g, "'")
+  return table
+})()
+function englishT(key: string, vars: Record<string, unknown> = {}): string {
+  return (ENGLISH[key] ?? key).replace(/\{(\w+)\}/g, (whole, name: string) => (name in vars ? String(vars[name]) : whole))
+}
 function source(name: string): string {
   const start = page.search(new RegExp(`(?:async )?function ${name}\\(`))
   if (start < 0 && OPTIONAL.has(name)) return OPTIONAL.get(name) as string
@@ -130,7 +142,7 @@ function harness(): { page: Page; answer: (reply: Reply) => void } {
       records, sends, notes,
     })
   `,
-    { queueAnswer: (answer: (reply: Reply) => void) => waiting.push(answer) },
+    { queueAnswer: (answer: (reply: Reply) => void) => waiting.push(answer), t: englishT },
   ) as Page
   return {
     page,

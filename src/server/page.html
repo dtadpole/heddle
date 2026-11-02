@@ -4717,6 +4717,12 @@ const MESSAGES = Object.freeze({
     'composer.attachEmpty': 'nothing to insert here',
     'chat.turn.notSent': 'the message could not be sent: {reason}',
     'chat.turn.dropped': 'the connection dropped while the answer was arriving ({reason}); the message itself was delivered',
+    'tree.note.accessNoSession': 'open a session before changing its access mode',
+    'tree.note.accessRefused': 'could not change the access mode ({status})',
+    'tree.note.accessFailed': 'could not change the access mode: {reason}',
+    'tree.note.switchRefused': 'could not switch this session onto {endpoint}',
+    'tree.note.switchFailed': 'could not switch this session onto {endpoint}: {reason}',
+    'tree.note.endpointsAnswered': 'the endpoint list answered {status}',
     'header.thisSession': 'this session',
     'header.more': 'More actions',
     'header.download': 'Download session log',
@@ -5406,6 +5412,12 @@ const MESSAGES = Object.freeze({
     'composer.attachEmpty': '这里没有可插入的内容',
     'chat.turn.notSent': '消息未能发送：{reason}',
     'chat.turn.dropped': '回答传输时连接中断（{reason}）；消息本身已送达',
+    'tree.note.accessNoSession': '请先打开一个会话，再更改它的访问模式',
+    'tree.note.accessRefused': '无法更改访问模式（{status}）',
+    'tree.note.accessFailed': '无法更改访问模式：{reason}',
+    'tree.note.switchRefused': '无法将此会话切换到「{endpoint}」',
+    'tree.note.switchFailed': '无法将此会话切换到「{endpoint}」：{reason}',
+    'tree.note.endpointsAnswered': '端点列表返回了 {status}',
     'header.thisSession': '此会话',
     'header.more': '更多操作',
     'header.download': '下载会话日志',
@@ -14446,7 +14458,7 @@ function handleAccessGateTab(keyEvent) {
 async function changeAccessMode(mode, confirm) {
   if (accessPending) return
   if (current === null) {
-    setNote('open a session before changing its access mode')
+    setNote(t('tree.note.accessNoSession'))
     return
   }
   accessPending = true
@@ -14459,13 +14471,13 @@ async function changeAccessMode(mode, confirm) {
     })
     const body = await response.json().catch(() => ({}))
     if (!response.ok) {
-      setNote(body.error ?? `could not change the access mode (${response.status})`)
+      setNote(body.error ?? t('tree.note.accessRefused', { status: response.status }))
       return
     }
     accessMode = typeof body.mode === 'string' ? body.mode : mode
     setNote('')
   } catch (error) {
-    setNote(`could not change the access mode: ${(error && error.message) || error}`)
+    setNote(t('tree.note.accessFailed', { reason: (error && error.message) || error }))
   } finally {
     accessPending = false
     renderAccess()
@@ -15795,7 +15807,7 @@ async function recordSelection(selection) {
     })
     if (!response.ok) {
       const body = await response.json().catch(() => ({}))
-      if (current === recording) setNote(body.error ?? `could not switch this session onto ${selection.endpoint}`)
+      if (current === recording) setNote(body.error ?? t('tree.note.switchRefused', { endpoint: selection.endpoint }))
       restore()
       return false
     }
@@ -15804,7 +15816,7 @@ async function recordSelection(selection) {
     serverSeats.set(recording, { endpoint: selection.endpoint, model: selection.model ?? null, effort: selection.reasoningEffort ?? null })
     return true
   } catch (error) {
-    if (current === recording) setNote(`could not switch this session onto ${selection.endpoint}: ${(error && error.message) || error}`)
+    if (current === recording) setNote(t('tree.note.switchFailed', { endpoint: selection.endpoint, reason: (error && error.message) || error }))
     restore()
     return false
   } finally {
@@ -15867,7 +15879,7 @@ async function loadEndpoints() {
   try {
     const response = await fetch('/api/endpoints')
     if (!response.ok) {
-      setNote(`the endpoint list answered ${response.status}`)
+      setNote(t('tree.note.endpointsAnswered', { status: response.status }))
       renderModelSeat()
       return
     }
@@ -15888,7 +15900,7 @@ async function loadEndpoints() {
       chosenEffort = defaultSelection.effort
     }
   } catch (error) {
-    setNote(`could not read the endpoint list: ${(error && error.message) || error}`)
+    setNote(t('settings.endpointsFailed', { reason: (error && error.message) || error }))
   }
   renderModelSeat()
   paintSetupCard()
