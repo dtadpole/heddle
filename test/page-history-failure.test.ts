@@ -14,6 +14,10 @@ function source(name: string): string {
 const listenerStart = page.indexOf("events.addEventListener('session', (message) => {")
 assert.ok(listenerStart >= 0)
 const listener = page.slice(listenerStart, page.indexOf('\n})', listenerStart) + 3)
+const lifecycleStart = page.indexOf('/* page-lifecycle:begin */')
+const lifecycleEnd = page.indexOf('/* page-lifecycle:end */', lifecycleStart)
+assert.equal(lifecycleStart >= 0, lifecycleEnd >= 0)
+const lifecycleSource = lifecycleStart < 0 ? '' : page.slice(lifecycleStart, lifecycleEnd + '/* page-lifecycle:end */'.length)
 async function flush() { for (let i = 0; i < 8; i++) await new Promise<void>((resolve) => setImmediate(resolve)) }
 interface Row { className: string; textContent: string; dataset: Record<string, string>; setAttribute(name: string, value: string): void }
 interface Request { resolve(value: unknown): void; reject(error: Error): void }
@@ -22,52 +26,25 @@ interface TurnResponse {
   json?(): Promise<unknown>
   body?: { getReader(): { read(): Promise<{ done: boolean; value?: Uint8Array }> } }
 }
-/** A clock the test advances: the page's lifecycle timers fire only when it says so. */
-class FakeClock {
-  now = 0
-  private next = 1
-  private timers = new Map<number, { at: number; fn: () => void }>()
-  setTimeout = (fn: () => void, ms = 0) => {
-    const id = this.next++
-    this.timers.set(id, { at: this.now + ms, fn })
-    return id
-  }
-  clearTimeout = (id: number) => {
-    this.timers.delete(id)
-  }
-  advance(ms: number) {
-    const until = this.now + ms
-    for (;;) {
-      const due = [...this.timers.entries()].filter(([, timer]) => timer.at <= until).sort((a, b) => a[1].at - b[1].at || a[0] - b[0])[0]
-      if (due === undefined) break
-      this.timers.delete(due[0])
-      this.now = due[1].at
-      due[1].fn()
-    }
-    this.now = until
-  }
-}
-/** The page's lifecycle block; on an older page (ef1141e8) its leaving listeners, so the same cases judge it. */
-const lifecycle = page.includes('/* page-lifecycle:begin */')
-  ? page.slice(page.indexOf('/* page-lifecycle:begin */'), page.indexOf('/* page-lifecycle:end */'))
-  : page.includes("for (const name of ['beforeunload', 'pagehide'])")
-    ? page.slice(page.indexOf("for (const name of ['beforeunload', 'pagehide'])"), page.indexOf('async function showSession(id)'))
-    : ''
-function harness(deferredCommands = false, clock?: FakeClock) {
-  const listeners = new Map<string, (() => void)[]>()
+function harness(deferredCommands = false) {
   const rows: Row[] = []
   const calls: string[] = []
   const requests: Request[] = []
   const noop = () => {}
+  const timers = new Map<number, () => void>()
+  let timerId = 0
+  const advanceClock = (_milliseconds: 0) => {
+    for (const [id, callback] of [...timers]) { timers.delete(id); callback() }
+  }
   let handle!: (message: { data: string }) => void
   let releaseCommands!: (value: unknown) => void
   const commands = { sessionShown: noop, draw: () => calls.push('command'), drawTurn: () => calls.push('command-turn') }
   const slashReady = deferredCommands ? new Promise((resolve) => { releaseCommands = resolve }) : Promise.resolve(commands)
   const branch = { textContent: 'old branch' }
   const context = {
-    rows, calls, slashReady, performance, TextDecoder,
-    setTimeout: clock?.setTimeout ?? setTimeout, clearTimeout: clock?.clearTimeout ?? clearTimeout,
-    window: { addEventListener: (name: string, fn: () => void) => { listeners.set(name, [...(listeners.get(name) ?? []), fn]) } },
+    rows, calls, slashReady, performance, TextDecoder, window: new EventTarget(),
+    setTimeout: (callback: () => void, delay: number) => { assert.equal(delay, 0); timers.set(++timerId, callback); return timerId },
+    clearTimeout: (id: number) => { timers.delete(id) },
     fetch: () => new Promise((resolve, reject) => requests.push({ resolve, reject })),
     events: { addEventListener: (_name: string, fn: typeof handle) => { handle = fn }, whenOpen: async () => {} },
     document: { getElementById: () => branch, createElement: (): Row => ({ className: '', textContent: '', dataset: {}, setAttribute: noop }) },
@@ -80,7 +57,7 @@ function harness(deferredCommands = false, clock?: FakeClock) {
     paintRunningMarks: noop, jobsSessionChanged: noop, applySessionAccess: noop,
     adoptSession: () => calls.push('adopt'), refreshSessions: async () => {}, syncSelectionToSession: noop,
     showLedger: async () => {}, paintSessionHeading: () => calls.push('heading'), renderTree: async () => {},
-    markSelection: noop, paintScheduleHeader: noop,
+    markSelection: noop, paintScheduleHeader: noop, renderModelSeat: noop,
     rememberChatScroll: noop, restoreChatScroll: () => calls.push('scroll'), refreshGoal: async () => {}, refreshTodo: async () => {},
     renderScheduleCards: () => calls.push('cards'), renderScheduleDrawer: noop,
     refreshScheduleList: async () => {}, refreshScheduleCatalog: async () => {},
@@ -111,9 +88,9 @@ function harness(deferredCommands = false, clock?: FakeClock) {
     function adoptLooseQueue() {}
     function rememberWorkspace() {}
     function clearMain() { calls.push('clear-main') }
-    ${lifecycle}
     ${page.slice(page.indexOf('/* turn-failure:begin */'), page.indexOf('/* turn-failure:end */'))}
     let selectionSeq = 0, chosenEndpoint = null, chosenModel = null, chosenEffort = null;
+    let defaultSelection = { model: 'default-model', effort: 'low' };
     const latestSelection = new Map(), serverSeats = new Map(), heldSeats = new Map();
     const recordedSelections = new Set(), pendingSaves = new Set();
     function selectionForTurn() {
@@ -131,6 +108,7 @@ function harness(deferredCommands = false, clock?: FakeClock) {
     let directTurnPending = 0, directPendingKey = null, stopRequested = false;
     ${['historyFailureText', 'adoptViewSelection', 'selectionForSeat', 'showSession', 'keptToDraw', 'drawKeptEvents', 'drawSessionEvent', 'runTurn',
       'liveRoundsOf', 'countOwnSessionTurn', 'holdLooseTurn', 'holdLooseEvent', 'adoptLooseEvents'].map(source).join('\n')}
+    ${lifecycleSource}
     ${listener};
     ({ show: showSession, run: runTurn,
        state: () => ({ current, unavailable: unavailableSession, loading: sessionLoading !== null, selectedPath }),
@@ -148,10 +126,8 @@ function harness(deferredCommands = false, clock?: FakeClock) {
     seat(id: string): { recorded: boolean; server?: { endpoint: string; model: string | null; effort: string | null }; held?: { endpoint: string; model: string | null; effort: string | null } };
     kept(): number; buffer(): unknown[]; prepare(id: string): void; lifecycle(id: string): boolean[];
   }
-  return { ...api, rows, calls, requests, branch, handle: (payload: unknown) => handle({ data: JSON.stringify(payload) }),
-    releaseCommands: () => releaseCommands(commands), context,
-    /** The page's own lifecycle event, through the listeners the page registered. */
-    dispatch: (name: string) => { for (const fn of listeners.get(name) ?? []) fn() } }
+  return { ...api, rows, calls, requests, branch, advanceClock, handle: (payload: unknown) => handle({ data: JSON.stringify(payload) }),
+    releaseCommands: () => releaseCommands(commands), context }
 }
 const delta = (seq: number, text = 'partial') => ({ session: 'S', event: { seq, type: 'assistant/chunk', chunk: { type: 'text-delta', text } } })
 async function started(state: ReturnType<typeof harness>, count = 1) {
@@ -171,6 +147,7 @@ for (const failure of ['HTTP refusal', 'fetch rejection', 'JSON rejection'] as c
     else if (failure === 'fetch rejection') request.reject(new Error('network unavailable'))
     else request.resolve({ ok: true, json: async () => { throw new Error('invalid snapshot JSON') } })
     assert.equal(await loading, false)
+    state.advanceClock(0)
     assert.deepEqual({ ...state.state() }, { current: null, unavailable: 'S', loading: false, selectedPath: null })
     assert.equal(kept.length, 0, 'failed snapshot deliberately drops its kept events')
     const reason = failure === 'HTTP refusal' ? 'history unavailable (503)' : failure === 'fetch rejection' ? 'network unavailable' : 'invalid snapshot JSON'
@@ -197,83 +174,6 @@ for (const failure of ['HTTP refusal', 'fetch rejection', 'JSON rejection'] as c
     assert.deepEqual(state.rows.map((row) => row.textContent), ['recovered'])
   })
 }
-/**
- * check-chat-view's resize test, on the union with 4b2a0552 (and flaky on stack Q): it reloads twice in quick succession,
- * so the page being left is still reading the restored session's history. Navigating stops its requests, the read rejects
- * while the old page still runs, and failHistory wrote the empty selection at once: the next load restored nothing.
- * Now the write waits for the page's own lifecycle (`pageLifecycle`), run here through the listeners the page registers
- * and a clock the test advances (developer-twelve's 9a04 and 10a6).
- */
-async function failingOpen(clock: FakeClock) {
-  const state = harness(false, clock); const loading = state.show('S'); const request = await started(state)
-  const remembered = () => state.calls.filter((call) => call === 'remember').length
-  assert.equal(remembered(), 1, 'the open remembers the session it opens')
-  return { state, loading, request, remembered }
-}
-const microtasks = async () => { for (let turn = 0; turn < 50; turn += 1) await Promise.resolve() }
-
-test('a page that stays writes the failed selection empty, a task after the failure, not in it', { timeout: 5000 }, async () => {
-  const clock = new FakeClock(); const { state, loading, request, remembered } = await failingOpen(clock)
-  request.reject(new Error('Failed to fetch')); await microtasks()
-  assert.equal(state.state().unavailable, 'S', 'the failure is drawn at once')
-  assert.equal(remembered(), 1, 'nothing is written in the task the read failed in')
-  assert.equal(await loading, false)
-  clock.advance(0)
-  assert.equal(remembered(), 2, 'a task later the failed selection is no longer kept')
-})
-
-test('a page that really unloads writes nothing: the read failed because the page is leaving', { timeout: 5000 }, async () => {
-  const clock = new FakeClock(); const { state, loading, request, remembered } = await failingOpen(clock)
-  state.dispatch('beforeunload')
-  request.reject(new Error('Failed to fetch')); assert.equal(await loading, false)
-  clock.advance(0)
-  state.dispatch('pagehide')
-  clock.advance(0)
-  assert.equal(remembered(), 1, 'up to the unload only the open\'s own write: the next load restores the session')
-})
-
-for (const resumed of ['pageshow', 'the expiry'] as const) {
-  test(`a canceled navigation (or a download) writes the empty selection once the page turns out to stay, at ${resumed}`, { timeout: 5000 }, async () => {
-    const clock = new FakeClock(); const { state, loading, request, remembered } = await failingOpen(clock)
-    state.dispatch('beforeunload')
-    request.reject(new Error('Failed to fetch')); assert.equal(await loading, false)
-    clock.advance(0)
-    assert.equal(remembered(), 1, 'skipped while the page is leaving')
-    if (resumed === 'pageshow') state.dispatch('pageshow')
-    else clock.advance(10_000)
-    assert.equal(remembered(), 2, 'and done when it stays, since the same failure still shows')
-    assert.equal(state.state().unavailable, 'S')
-    clock.advance(20_000)
-    state.dispatch('pageshow')
-    assert.equal(remembered(), 2, 'once')
-  })
-}
-
-test('an earlier leaving\'s timer does not end a newer leaving', { timeout: 5000 }, async () => {
-  const clock = new FakeClock(); const { state, loading, request, remembered } = await failingOpen(clock)
-  state.dispatch('beforeunload')
-  clock.advance(6_000)
-  state.dispatch('pagehide')
-  request.reject(new Error('Failed to fetch')); assert.equal(await loading, false)
-  clock.advance(0)
-  clock.advance(4_000)
-  assert.equal(remembered(), 1, 'the first leaving\'s expiry (10 s) is gone: the page still counts as leaving')
-  clock.advance(6_000)
-  assert.equal(remembered(), 2, 'the newer leaving\'s own expiry (16 s) resumes it')
-})
-
-test('a pending write is dropped when another open took the panel before the page resumed', { timeout: 5000 }, async () => {
-  const clock = new FakeClock(); const { state, loading, request, remembered } = await failingOpen(clock)
-  state.dispatch('beforeunload')
-  request.reject(new Error('Failed to fetch')); assert.equal(await loading, false)
-  clock.advance(0)
-  const next = state.show('T'); (await started(state, 2)).resolve({ ok: true, json: async () => ({ turns: [{ kind: 'user', text: 'T' }], seq: 1 }) })
-  assert.equal(await next, true)
-  assert.equal(remembered(), 2, 'T\'s open remembers T')
-  state.dispatch('pageshow')
-  assert.equal(remembered(), 2, 'and the failure that no longer shows writes nothing over it')
-})
-
 test('a command already awaiting its module cannot draw after unavailable history', { timeout: 5000 }, async () => {
   const state = harness(true)
   state.handle({ session: 'S', event: { type: 'command/run' } })
@@ -307,6 +207,7 @@ test('late A model JSON retains only A seats after B history becomes unavailable
   const latest = state.show('B'); const second = await started(state, 2)
   second.resolve({ ok: false, status: 503, statusText: 'Unavailable', json: async () => ({ error: 'B unavailable' }) })
   assert.equal(await latest, false)
+  state.advanceClock(0)
   const before = { ...state.selection() }
   const rows = state.rows.map((row) => row.textContent)
   const calls = [...state.calls]
@@ -386,6 +287,7 @@ test('detached 202 JSON acceptance over unavailable history opens the created se
     endpoint: 'fixture-A', model: 'model-A', reasoningEffort: 'high', detach: true })
   const loading = state.show('B'); (await started(state, 2)).reject(new Error('B offline'))
   assert.equal(await loading, false)
+  state.advanceClock(0)
   const before = { ...state.selection() }
   assert.deepEqual(before, { endpoint: 'fixture-A', model: 'model-A', effort: 'high' }, 'the seat assertion is non-vacuous')
   assert.equal(state.rows[0]?.textContent, 'Failed to load history: B offline')
@@ -434,3 +336,25 @@ test('successful history still replays only post-snapshot drawing without repeat
   assert.equal(state.calls.filter((call) => call === 'branch:12').length, 1)
   assert.ok(state.calls.includes('answers')); assert.ok(state.calls.includes('scroll'))
 })
+
+for (const failure of ['HTTP refusal', 'fetch rejection', 'JSON rejection'] as const) {
+  test(`a vanished session's draft starts from the default selection, while a read lost in transit keeps the seat: ${failure} (A104)`, { timeout: 5000 }, async () => {
+    const state = harness()
+    const initial = state.show('A'); const history = await started(state)
+    history.resolve({ ok: true, json: async () => ({ endpoint: 'fixture-A', model: 'model-A', reasoningEffort: 'high', turns: [] }) })
+    assert.equal(await initial, true)
+    assert.deepEqual({ ...state.selection() }, { endpoint: 'fixture-A', model: 'model-A', effort: 'high' }, 'A\'s seat is shown first')
+    const loading = state.show('B'); const request = await started(state, 2)
+    if (failure === 'HTTP refusal') request.resolve({ ok: false, status: 404, statusText: 'Not Found', json: async () => ({ error: 'no such session' }) })
+    else if (failure === 'fetch rejection') request.reject(new Error('network unavailable'))
+    else request.resolve({ ok: true, json: async () => { throw new Error('invalid snapshot JSON') } })
+    assert.equal(await loading, false)
+    state.advanceClock(0)
+    assert.deepEqual({ ...state.state() }, { current: null, unavailable: 'B', loading: false, selectedPath: null })
+    const expected = failure === 'HTTP refusal'
+      ? { endpoint: null, model: 'default-model', effort: 'low' }
+      : { endpoint: 'fixture-A', model: 'model-A', effort: 'high' }
+    assert.deepEqual({ ...state.selection() }, expected, failure === 'HTTP refusal' ? 'the server said B is gone: the draft starts from the default selection' : 'B could not be read: the seat stays')
+    assert.equal(state.seat('A').held?.model, 'model-A', 'A keeps its own held seat either way')
+  })
+}

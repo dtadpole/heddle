@@ -1,4 +1,5 @@
 #!/bin/sh
 # Remove superseded heddle build artifacts from target/*/deps (newer one with the same name exists, older than
 # an hour, folder not in use). See deps-sweep.md; --all covers every worktree, --dry-run lists only.
+# --floor: under 18 GiB free, remove each worktree's idle, unheld rust/target/debug and list its owner.
 exec node "$(dirname "$0")/deps-sweep.mjs" "$@"

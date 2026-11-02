@@ -74,10 +74,26 @@ pub struct CommandServices {
     /// Whether a session has a running turn (the agent's turn registry). `/compact` answers DSH's `busy` while
     /// one does; `None` when the profile has no registry, and then only a compaction in flight is busy.
     pub turn_running: Option<TurnRunning>,
+    /// A manual compaction's hold on its session in the same registry (#140); `None` when the profile has none.
+    pub turn_hold: Option<TurnHold>,
 }
 
 /// Whether a session has a running turn, by session id.
 pub type TurnRunning = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
+/// Hold a session the way a running turn does, for a manual compaction (#140): the live-turn registry's
+/// `begin`, answering the registration's stop token and a guard whose drop settles it. A turn sent meanwhile
+/// queues behind the hold (`begin_queued` waits until the session is idle), as DSH's `runMaintenance` latch holds
+/// a prompt until its compaction ends; the session's Stop reaches the summary call through the token (#154).
+pub type TurnHold = Arc<
+    dyn Fn(
+            &str,
+        ) -> (
+            tokio_util::sync::CancellationToken,
+            Box<dyn std::any::Any + Send>,
+        ) + Send
+        + Sync,
+>;
 
 /// The commands host the routes read: the registry, the session service its runs write through, the upload
 /// directory a line's attachments are read from, and the contributed commands the registry refused.
@@ -118,6 +134,7 @@ impl Commands {
                 context: services.context.clone(),
                 models: services.models.clone(),
                 turn_running: services.turn_running.clone(),
+                turn_hold: services.turn_hold.clone(),
                 compacting: Mutex::new(HashSet::new()),
             })),
             feedback_command(log, anonymous),
@@ -314,6 +331,7 @@ struct ServiceCompaction {
     context: Option<Arc<ContextService<SessionStore>>>,
     models: Option<Arc<ModelService>>,
     turn_running: Option<TurnRunning>,
+    turn_hold: Option<TurnHold>,
     /// Sessions with a manual compaction in flight in this process.
     compacting: Mutex<HashSet<String>>,
 }
@@ -373,6 +391,13 @@ impl CompactionHost for ServiceCompaction {
             let Some(_compacting) = Compacting::claim(&self.compacting, &session.id) else {
                 return Ok(busy);
             };
+            // The compaction holds the session the way a turn does (#140): a turn sent while it runs queues
+            // behind it instead of starting beside it, as DSH's `runMaintenance` latch holds a prompt. The session
+            // reads as running meanwhile, and its Stop reaches the summary call through the token (#154). The
+            // guard settles the hold when it drops, however this returns. Nothing awaits between the running check
+            // above and this hold, so a queued turn cannot pass the registry's idle wait in between.
+            let held = self.turn_hold.as_ref().map(|hold| hold(&session.id));
+            let cancel = held.as_ref().map(|(token, _)| token);
             let Some(context) = self.context.as_ref() else {
                 return Err(NO_CONTEXT_SERVICE.to_owned());
             };
@@ -418,11 +443,18 @@ impl CompactionHost for ServiceCompaction {
                         system: None,
                         summarizer: None,
                         force: true,
+                        cancel,
                     },
                 )
                 .await
                 .map_err(|error| error.to_string())?;
             if !report.compacted {
+                if cancel.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
+                    return Ok(CompactionOutcome {
+                        cancelled: true,
+                        ..CompactionOutcome::default()
+                    });
+                }
                 // A summary the engine refused is recorded as `compaction/failed {refused: true}`; DSH reports it
                 // as an error (#132).
                 let events = self
@@ -538,6 +570,7 @@ mod tests {
     fn services(fixture: &Fixture) -> CommandServices {
         CommandServices {
             turn_running: None,
+            turn_hold: None,
             sessions: Arc::new(SessionService::from_store(fixture.store.clone())),
             goals: None,
             context: None,

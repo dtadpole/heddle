@@ -24,10 +24,32 @@ function harness() {
   const children: Array<{ textContent: string; hidden: boolean; attributes: Record<string, string>; [key: string]: unknown }> = []
   const body = { textContent: '', innerHTML: '', hidden: false, dataset: { renderer: '' }, replaceChildren(...nodes: typeof children) { children.splice(0, children.length, ...nodes) } }
   const head = { textContent: '' }
-  const frame = { srcdoc: '', attributes: {} as Record<string, string>, setAttribute(name: string, value: string) { this.attributes[name] = value } }
+  const shellStarted = deferred<void>()
+  let shellAutoLoad = true
+  let imported = ''
+  const makeFrame = (): any => ({
+    attributes: {} as Record<string, string>, onload: null, onerror: null,
+    setAttribute(name: string, value: string) { this.attributes[name] = value },
+    removeAttribute(name: string) { delete this.attributes[name] },
+    cloneNode() { return makeFrame() },
+    replaceWith(next: any) { frame = next },
+    contentDocument: {
+      URL: 'http://localhost/api/html/frame', contentType: 'text/html',
+      importNode(node: { html: string }, deep: boolean) { assert.equal(deep, true); return node },
+      documentElement: { replaceWith(node: { html: string }) { imported = node.html } },
+    },
+    set src(value: string) {
+      this.attributes.src = value
+      shellStarted.resolve()
+      if (shellAutoLoad) queueMicrotask(() => this.onload?.())
+    },
+  })
+  let frame = makeFrame()
   const pane = { hidden: true }
   const context = {
-    fileBody: body, fileHead: head, htmlView: frame, fileHtml: pane,
+    fileBody: body, fileHead: head, get htmlView() { return frame }, set htmlView(value) { frame = value }, fileHtml: pane,
+    location: { href: 'http://localhost/' }, URL, setTimeout, clearTimeout,
+    DOMParser: class { parseFromString(html: string, type: string) { assert.equal(type, 'text/html'); return { documentElement: { html } } } },
     PREVIEW_TAGS: [], PREVIEW_ATTRS: [],
     document: {
       getElementById: () => ({ setAttribute() {} }),
@@ -46,9 +68,9 @@ function harness() {
     } }
     },
   }
-  const api = runInNewContext(`let fileFetches = 0; ${fn('showFile')} ${fn('showHtml')}; ({showFile})`, context) as { showFile(node: { path: string }): Promise<void> }
-  const snapshot = () => JSON.stringify({ body, head, frame: frame.srcdoc, hidden: pane.hidden })
-  return { ...api, html, htmlStarted, purifier, purifierStarted, snapshot, body, frame, pane, children }
+  const api = runInNewContext(`let fileFetches = 0; let cancelHtmlFrame = null; ${fn('showFile')} ${fn('showHtml')}; ({showFile})`, context) as { showFile(node: { path: string }): Promise<void> }
+  const snapshot = () => JSON.stringify({ body, head, frame: imported, hidden: pane.hidden })
+  return { ...api, html, htmlStarted, purifier, purifierStarted, shellStarted, snapshot, body, get frame() { return frame }, get imported() { return imported }, get shellAutoLoad() { return shellAutoLoad }, set shellAutoLoad(value: boolean) { shellAutoLoad = value }, pane, children }
 }
 
 test('PNG uses authorized raw img with accessible loading, success and error states', async () => {
@@ -119,7 +141,7 @@ test('the active HTML selection still publishes its sanitized frame', async () =
   state.html.resolve({ html: '<head></head><body>CURRENT</body>' })
   state.purifier.resolve({ sanitize: (value) => value })
   await current
-  assert.match(state.frame.srcdoc, /CURRENT/)
+  assert.match(state.imported, /CURRENT/)
   assert.equal(state.pane.hidden, false)
   assert.equal(state.body.hidden, true)
 })
@@ -136,13 +158,84 @@ test('HTML publication honors base-none without injecting a base and preserves s
     return value.replace(/<base[^>]*>/gi, '')
   } })
   await current
-  assert.doesNotMatch(state.frame.srcdoc, /<base\b/i, 'no application base contradicts the CSP')
-  assert.match(state.frame.srcdoc, /<head><meta http-equiv="Content-Security-Policy" content="[^"]*base-uri 'none'/, 'policy is first in the head')
+  assert.doesNotMatch(state.imported, /<base\b/i, 'no application base contradicts the CSP')
+  assert.doesNotMatch(state.imported, /http-equiv/, 'parent injects no policy markup or JSON policy')
+  assert.equal(state.frame.attributes.src, '/api/html/frame')
+  assert.equal(state.frame.attributes.referrerpolicy, 'no-referrer')
   assert.equal(state.frame.attributes.sandbox, 'allow-same-origin', 'no scripts, forms or navigation permissions added')
   assert.ok(options?.FORBID_TAGS.includes('base'), 'source base remains forbidden by the actual sanitizer configuration')
   for (const tag of ['script', 'iframe', 'object', 'embed', 'form']) assert.ok(options?.FORBID_TAGS.includes(tag), tag)
   assert.ok(options?.FORBID_ATTR.includes('srcdoc'))
   assert.equal(options?.WHOLE_DOCUMENT, true)
+})
+
+test('shell waits for load, imports only sanitized output, and ignores response CSP text', async () => {
+  const state = harness()
+  state.shellAutoLoad = false
+  const current = state.showFile({ path: '/w/current.html' })
+  await state.htmlStarted.promise
+  state.html.resolve({ html: 'RAW SCRIPT SENTINEL', csp: 'UNTRUSTED POLICY' })
+  state.purifier.resolve({ sanitize: () => '<html><head></head><body>CLEAN ONLY</body></html>' })
+  await state.shellStarted.promise
+  assert.equal(state.imported, '', 'nothing is injected before shell load')
+  assert.equal(state.frame.attributes.src, '/api/html/frame', 'no file path reaches iframe URL')
+  state.frame.onload()
+  await current
+  assert.match(state.imported, /CLEAN ONLY/)
+  assert.doesNotMatch(state.imported, /RAW|UNTRUSTED/)
+})
+
+for (const failure of ['load-error', 'wrong-origin', 'initial-blank', 'non-html', 'denied-access'] as const) {
+  test(`shell ${failure} fails closed with visible text`, async () => {
+    const state = harness()
+    state.shellAutoLoad = false
+    const current = state.showFile({ path: '/w/current.html' })
+    await state.htmlStarted.promise
+    state.html.resolve({ html: '<head></head><body>CLEAN</body>' })
+    state.purifier.resolve({ sanitize: (value) => value })
+    await state.shellStarted.promise
+    if (failure === 'load-error') state.frame.onerror()
+    else {
+      if (failure === 'wrong-origin') state.frame.contentDocument.URL = 'https://example.invalid/api/html/frame'
+      if (failure === 'initial-blank') state.frame.contentDocument.URL = 'about:blank'
+      if (failure === 'non-html') state.frame.contentDocument.contentType = 'text/plain'
+      if (failure === 'denied-access') Object.defineProperty(state.frame, 'contentDocument', { get() { throw new Error('access denied') } })
+      state.frame.onload()
+    }
+    await current
+    assert.equal(state.imported, '')
+    assert.equal(state.pane.hidden, true)
+    assert.equal(state.body.hidden, false)
+    assert.match(state.body.textContent, /could not read this file/)
+  })
+}
+
+for (const outcome of ['load', 'error'] as const) {
+  test(`abandoned shell ${outcome} callback cannot touch a newer selection`, async () => {
+    const state = harness()
+    state.shellAutoLoad = false
+    const old = state.showFile({ path: '/w/old.html' })
+    await state.htmlStarted.promise
+    state.html.resolve({ html: '<head></head><body>OLD</body>' })
+    state.purifier.resolve({ sanitize: (value) => value })
+    await state.shellStarted.promise
+    const callback = outcome === 'load' ? state.frame.onload : state.frame.onerror
+    await state.showFile({ path: '/w/new.txt' })
+    await old
+    const latest = state.snapshot()
+    callback()
+    assert.equal(state.snapshot(), latest)
+    assert.equal(state.imported, '')
+  })
+}
+
+test('shared source cancels on leaving file view and never uses source-document writing', () => {
+  const source = fn('showHtml')
+  assert.doesNotMatch(source, /\.srcdoc\s*=|document\.write|body\.csp|parseFromString\(body\./)
+  assert.match(source, /parseFromString\(clean, 'text\/html'\)/)
+  assert.match(source, /documentElement\.replaceWith\(inner\.importNode/)
+  assert.match(source, /ticket !== fileFetches \|\| htmlView !== frame/)
+  assert.match(fn('showView'), /next !== 'file'[\s\S]*\+\+fileFetches[\s\S]*cancelHtmlFrame\(\)/)
 })
 
 for (const path of ['/w/invalid.bin', '/w/network-failure.txt']) {
