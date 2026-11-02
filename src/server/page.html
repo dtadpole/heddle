@@ -3831,7 +3831,7 @@
     once, before the one transition that removes the file boundary.
   -->
   <div id="access-menu" role="menu" aria-label="the access mode this session runs under" hidden></div>
-  <div id="access-dialog" role="dialog" aria-modal="true" aria-label="Enable Full access?" hidden>
+  <div id="access-dialog" role="dialog" aria-modal="true" aria-label="Enable Full access?" tabindex="-1" hidden>
     <div class="card">
       <div class="head">
         <h2 id="access-dialog-title">Enable Full access?</h2>
@@ -12720,6 +12720,25 @@ function closeAccessGate() {
 }
 
 /**
+ * The custom risk card needs the containment native dialogs already provide elsewhere on this page.
+ * After DSH's RiskConfirmation -> Modal focus hook: use the current enabled, visible controls on every Tab.
+ * This is only the risk gate's plain Tab cycle; Escape cancellation and native control activation stay unchanged.
+ */
+function handleAccessGateTab(keyEvent) {
+  if (accessDialog.hidden || keyEvent.key !== 'Tab' || keyEvent.defaultPrevented ||
+      keyEvent.ctrlKey || keyEvent.altKey || keyEvent.metaKey || keyEvent.isComposing || keyEvent.keyCode === 229) return
+  const focusables = [...accessDialog.querySelectorAll('button, input, select, textarea, a[href], [tabindex]')].filter((element) =>
+    element.tabIndex >= 0 && !element.matches(':disabled') && !element.closest('[hidden], [inert]') &&
+    element.getClientRects().length > 0 && !['hidden', 'collapse'].includes(getComputedStyle(element).visibility))
+  keyEvent.preventDefault()
+  const at = focusables.indexOf(document.activeElement)
+  const next = at < 0
+    ? (keyEvent.shiftKey ? focusables.length - 1 : 0)
+    : (at + (keyEvent.shiftKey ? -1 : 1) + focusables.length) % focusables.length
+  ;(focusables[next] ?? accessDialog).focus()
+}
+
+/**
  * Ask the server to change this session's mode, and **only** its answer changes the label.
  *
  * The confirmation token is sent only from the gate's Enable button, which is only enabled after the risk has
@@ -13216,6 +13235,7 @@ document.addEventListener('click', (clickEvent) => {
   if (!accessMenu.contains(clickEvent.target) && clickEvent.target !== accessButton) closeAccessMenu()
 })
 document.addEventListener('keydown', (keyEvent) => {
+  handleAccessGateTab(keyEvent)
   if (keyEvent.key !== 'Escape') return
   if (!accessDialog.hidden) {
     closeAccessGate()
