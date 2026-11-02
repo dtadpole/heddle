@@ -43,13 +43,14 @@ function modelFailure(
   }
 }
 
-/** The surface positions that hold a user message, which is what "new input" means to a running turn. */
+/**
+ * The surface positions that hold a user message, which is what "new input" means to a running turn.
+ *
+ * Asked of the session in one call (#159): it reads each position's own event with one index of the log. Deriving every
+ * node here indexed the whole log once per node, which held the event loop for seconds a step in a long session.
+ */
 function userInputSeqs(ctx: Context, session: SessionHandle): ReadonlySet<number> {
-  const held = new Set<number>()
-  for (const seq of ctx.session.surface(session).nodes) {
-    if (ctx.session.node(session, seq)?.role === 'user') held.add(seq)
-  }
-  return held
+  return ctx.session.userInputSeqs(session)
 }
 
 /**
