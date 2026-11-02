@@ -2954,6 +2954,30 @@ export function unknownTurnSession(
     }
   }
   /**
+   * A model the endpoint does not offer is refused before anything is opened or written (#239), as the switch route
+   * refuses it (`selectionProblem`) and as DSH's `requireModel` does (`session/model-unavailable`). Recording it made
+   * every following turn of the session fail with a name nobody could choose from the menu. The endpoint judged is the
+   * one this turn will use, as far as it is known before a session is opened: the request's, a resumed session's
+   * record, then the defaults. A folder's existing session is only known once opened, and is judged again below,
+   * before its record is written.
+   */
+  if (model !== undefined) {
+    const resumedRecord = typeof body.session === 'string' && body.session.length > 0 ? ctx.session.list().find((entry) => entry.id === body.session) : undefined
+    const nominatedEarly = ctx.model.defaultEndpoint()
+    const prospect = resolveTurnEndpoint({
+      ...(requested !== undefined ? { requested } : {}),
+      ...(resumedRecord?.endpoint !== undefined ? { recorded: resumedRecord.endpoint } : {}),
+      ...(state.defaultEndpoint !== undefined ? { serverDefault: state.defaultEndpoint } : {}),
+      ...(nominatedEarly !== undefined ? { serviceDefault: nominatedEarly } : {}),
+    })
+    const configured = prospect === undefined ? undefined : ctx.model.endpoint(prospect)
+    const problem = configured === undefined ? null : selectionProblem(configured, model)
+    if (problem !== null) {
+      respond(response, 400, 'text/plain', `${problem}\n`)
+      return
+    }
+  }
+  /**
    * A session this route opens is born **untitled**, as DSH's is (#68): its first message writes the fallback name and
    * the session layer's title coordinator asks the model for the title (`../session/title.ts`). A title given here would
    * read as a person's name, and no title would ever be generated.
@@ -3019,6 +3043,12 @@ export function unknownTurnSession(
   const sameEndpoint = requested === undefined || requested === record?.endpoint
   const runModel = model ?? (sameEndpoint ? record?.model : undefined)
   const runEndpoint = ctx.model.endpoint(endpoint)
+  /** The named model against the endpoint now known for certain (a folder's existing session), before its record is written. */
+  const modelProblem = model !== undefined && runEndpoint !== undefined ? selectionProblem(runEndpoint, model) : null
+  if (modelProblem !== null) {
+    respond(response, 400, 'text/plain', `${modelProblem}\n`)
+    return
+  }
   const wantedEffort = resolveTurnEffort({
     ...(requestedEffort !== undefined ? { requested: requestedEffort } : {}),
     ...(sameEndpoint && record?.reasoningEffort !== undefined ? { recorded: record.reasoningEffort } : {}),
