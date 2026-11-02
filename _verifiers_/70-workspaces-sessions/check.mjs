@@ -8136,3 +8136,115 @@ test("a session is Last updated by a person's latest prompt, not by the answer o
     removeDir(h.work)
   }
 })
+
+test('a step in a session of a hundred and fifty turns reaches its model request at once, and /healthz never waits (#159)', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  /**
+   * Issue #159 (both builds): each model step of a long session asked the steering check, did a user message arrive,
+   * two or three times, and the check derived every surface node, each derivation indexing the whole log again. So
+   * the wait before every model request grew with the square of the session's length: measured on main 40182eed with
+   * the session below, 2.4 s a step on the TS build, the server's event loop held for as long, so every other user of
+   * the server waited too. A long agentic session is where heddle is meant to be used.
+   *
+   * The session is 150 short turns, each a prompt and an answer of 166 streamed deltas (about 25,700 log records),
+   * written as the store writes them (one zstd frame per record) into a session the binary made, so the layout is
+   * the binary's own. The turn is three scripted bash steps and an answer. Judged from the log's own times: the wait
+   * from each tool result to the next model request must stay under 300 ms; and from a supervisor's seat, /healthz
+   * probed every 50 ms during the turn must answer every probe within 1 s.
+   */
+  const h = harness('step-index')
+  const TURNS = 150
+  const DELTAS = 166
+  const STEPS = 3
+  scriptedConfig({
+    home: h.home,
+    steps: [...Array.from({ length: STEPS }, () => ({ toolCall: { name: 'bash', arguments: { command: 'true' } } })), { text: 'three steps done' }],
+  })
+  const folder = join(h.work, 'long-session')
+  mkdirSync(folder, { recursive: true })
+  let live
+  try {
+    const made = await runCli(adminArgs(h, ['session', 'new', folder, '--json']), { env: h.env, cwd: h.work })
+    assert.equal(made.code, 0, `the session was created\n${made.stdout}${made.stderr}`)
+    const created = parseJson(made.stdout)
+    const log = transcriptFile(join(h.home, 'sessions', created.session))
+    const { encodeFrame } = await import('../../src/session/transcript.ts')
+    let seq = readTranscript(log).length
+    const at = '2026-11-01T12:00:00.000Z'
+    const frames = []
+    const put = (event) => frames.push(encodeFrame(`${JSON.stringify({ seq: seq++, at, ...event })}\n`))
+    for (let turn = 0; turn < TURNS; turn += 1) {
+      put({ type: 'message', message: { role: 'user', content: [{ type: 'text', text: `question ${turn}: explain the next part` }] } })
+      put({ type: 'model/request', endpoint: 'scripted', model: 'scripted', messages: turn * 2 + 1, tools: [] })
+      for (let index = 0; index < DELTAS; index += 1) put({ type: 'assistant/chunk', chunk: { type: 'text-delta', text: index % 8 === 7 ? `${index}\n` : ` word${index}` } })
+      put({ type: 'assistant/chunk', chunk: { type: 'done', finishReason: 'stop' } })
+      put({ type: 'assistant/completed', text: 'answer', reasoning: '', finishReason: 'stop', rounds: 1, denials: 0 })
+      put({ type: 'turn/completed', rounds: 1 })
+    }
+    writeFileSync(log, Buffer.concat(frames), { flag: 'a' })
+    const seeded = seq
+
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    assert.ok(cookie.length > 0, 'the server issued a cookie')
+
+    const probes = []
+    let probing = true
+    const prober = (async () => {
+      while (probing) {
+        const started = Date.now()
+        let ok = false
+        try {
+          ok = (await fetch(origin + '/healthz', { signal: AbortSignal.timeout(5000) })).ok
+        } catch {
+          ok = false
+        }
+        probes.push({ ms: Date.now() - started, ok })
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 50))
+      }
+    })()
+    let status
+    let stream
+    try {
+      const turn = await fetch(new URL('/api/turn', live.url), {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ session: created.session, prompt: 'run three quick commands' }),
+      })
+      status = turn.status
+      stream = await turn.text()
+    } finally {
+      probing = false
+      await prober
+    }
+    assert.equal(status, 200, `the turn ran through the server\n${String(stream).slice(-600)}`)
+
+    const events = readTranscript(log).filter((event) => event.seq >= seeded)
+    const waits = []
+    let toolAt
+    for (const event of events) {
+      if (event.type === 'message' && event.message?.role === 'tool') toolAt = Date.parse(event.at)
+      if (event.type === 'model/request' && toolAt !== undefined) {
+        waits.push(Date.parse(event.at) - toolAt)
+        toolAt = undefined
+      }
+    }
+    const slowest = Math.max(...probes.map((probe) => probe.ms))
+    const missed = probes.filter((probe) => !probe.ok || probe.ms > 1000).length
+    const shown = `tool result to next model request: ${waits.join(' / ')} ms; /healthz slowest ${slowest} ms over ${probes.length} probes`
+    context.diagnostic(shown)
+    assert.equal(waits.length, STEPS, `each of the ${STEPS} tool results was followed by a model request\n${shown}\n${events.map((event) => event.type).join(', ')}`)
+    assert.ok(Math.max(...waits) < 300, `a step in a ${TURNS}-turn session waited before its model request: ${shown}`)
+    assert.equal(missed, 0, `/healthz waited while the long session's steps ran: ${missed} of ${probes.length} probes missed 1 s; ${shown}`)
+    assert.ok(events.some((event) => event.type === 'turn/completed'), 'the turn completed')
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
