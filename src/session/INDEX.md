@@ -114,8 +114,13 @@ heddle runs one process per session.
 record and judges every log's head; the team panel's poll asked `list().find(id)` four times per request, every 2 s per
 open tab, and after a restart that stood the server still. `SessionStore.metaById` (and `SessionService.meta`) reads
 the one record from where it was last found, verified before use, and gives what `list().find` gives. `list()` keeps its
-answer for one second (`LIST_MEMO_MS`), so requests that list together share one read; any write to the records through
-a store over that root in the process ends it, and another process's write shows within the second.
+answer for one second at most (`LIST_MEMO_MS`), so requests that list together share one read, and it never serves a
+store that changed on disk in a way a list sees. Each use checks the inode and nanosecond modification time of the root
+and of every folder the scan read records from, about forty `stat` calls: a session added, or a record or log moved,
+renamed or deleted from outside the process (#56's check moves a session's files away, then reads the tree at once)
+shows in the next list. Any write to the records through a store over that root in the process ends it too, and so
+does a lookup by id that misses a session the memo holds. What a folder's time does not show is a file rewritten in
+place by another process, a record's title or flags, say: that shows within the second.
 
 **A turn its writer never finished is closed when the session is next opened for writing**
 ([`repair.ts`](repair.ts), issue #5). A server restarted while `bash` ran used to leave the log at the call:

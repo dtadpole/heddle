@@ -851,13 +851,34 @@ function releaseWriterLock(path: string): void {
 }
 
 /**
- * How long a {@link SessionStore.list} answer is kept (#257). Every open tab polls the server every 2 s, and a poll's
- * handlers listed the store several times each: hang 5 was those scans, back to back, on a cold file cache.
+ * How long a {@link SessionStore.list} answer is kept at most (#257), while the store does not change. Every open tab
+ * polls the server every 2 s, and a poll's handlers listed the store several times each: hang 5 was those scans, back
+ * to back, on a cold file cache.
  */
 export const LIST_MEMO_MS = 1_000
 
 /** Writes to each store root's records in this process, by root: a memo older than the last write is not used. */
 const recordWrites = new Map<string, number>()
+
+/**
+ * A folder as {@link SessionStore.list}'s memo checks it: its inode and its modification time in nanoseconds, or `null`
+ * when it is not there or is not a folder. A file added to a folder, removed from it or renamed in or out of it moves
+ * the folder's time (APFS and ext4 alike); a file rewritten in place does not.
+ */
+function folderStamp(path: string): string | null {
+  try {
+    const stat = statSync(path, { bigint: true })
+    return stat.isDirectory() ? `${stat.ino}:${stat.mtimeNs}` : null
+  } catch {
+    return null
+  }
+}
+
+/** Whether every folder a memo was read from is as it was then ({@link folderStamp}): one `stat` each. */
+function foldersUnchanged(folders: ReadonlyMap<string, string | null>): boolean {
+  for (const [path, stamp] of folders) if (folderStamp(path) !== stamp) return false
+  return true
+}
 
 export class SessionStore {
   readonly root: string
@@ -924,12 +945,43 @@ export class SessionStore {
   private readonly reportedLoads = new Set<string>()
 
   /**
-   * The last {@link list} answer, kept for {@link LIST_MEMO_MS} (#257): requests that list at once, or one right after
-   * another, share one read of the store. Any write to the records through a store over this root in this process ends
-   * it ({@link recordWrites}), so this process never lists from before its own write; another process's write shows
-   * within the memo's life.
+   * The last {@link list} answer, kept for at most {@link LIST_MEMO_MS} (#257): requests that list at once, or one right
+   * after another, share one read of the store. It is **never used for a store that changed on disk** in a way a list
+   * can see, and each use checks that for the price of one `stat` per folder, about forty, against the 1,700 records
+   * and logs a scan reads:
+   * - a write to the records through any store over this root in this process ends it ({@link recordWrites});
+   * - so does a change of the root or of any folder the scan read records from ({@link folderStamp}, the inode and
+   *   modification time each had before it was read): a session another process created, or a record or log moved,
+   *   renamed or deleted behind the store's back, shows in the next list, not a second later (#56's check moves a
+   *   session's files away and reads the tree at once);
+   * - so does a lookup by id that finds no readable session where the memo holds one ({@link missed}).
+   *
+   * What those do not see is a file **rewritten in place** by another process: the records are rewritten in place, not
+   * through a new file and a rename (`rename`, `flags`, `setModel`, `touch`), and so is a log a writer corrupts, and
+   * neither moves a folder's time. Such a change shows when the memo ends, within {@link LIST_MEMO_MS}, or at once
+   * when a lookup by id misses the session. The folder times are trusted to move on every change: on APFS they are in
+   * nanoseconds; a file system whose clock ticks more coarsely (ext4 on an older kernel, 1-10 ms) can leave a change in
+   * the scan's own tick unseen for the memo's life.
    */
-  private listed: { readonly at: number; readonly writes: number; readonly metas: readonly SessionMeta[] } | undefined
+  private listed:
+    | {
+        readonly at: number
+        readonly writes: number
+        /** Every folder the scan read, root included, with its {@link folderStamp} from before it was read. */
+        readonly folders: ReadonlyMap<string, string | null>
+        readonly metas: readonly SessionMeta[]
+      }
+    | undefined
+
+  /**
+   * Ids a fresh scan still listed right after a lookup by id missed them: a record filed under another id's name, say,
+   * which the scan lists by what it says and a lookup by id cannot find. A miss of one of these no longer ends the memo,
+   * so one odd file cannot make every list a scan.
+   */
+  private readonly disputed = new Set<string>()
+
+  /** Ids whose miss ended the memo, until the next scan tells whether it still lists them ({@link disputed}). */
+  private readonly rechecking = new Set<string>()
 
   /** How many times the whole store was read. */
   private scans = 0
@@ -1119,12 +1171,12 @@ export class SessionStore {
   /** One session's record, read from its own file; `null` for an unknown id or an unreadable record. */
   meta(id: SessionId): SessionMeta | null {
     const file = this.metaFile(id)
-    if (file === null) return null
+    if (file === null) return this.missed(id)
     try {
       const meta = JSON.parse(readFileSync(file, 'utf8')) as SessionMeta
-      return typeof meta?.id === 'string' ? meta : null
+      return typeof meta?.id === 'string' ? meta : this.missed(id)
     } catch {
-      return null
+      return this.missed(id)
     }
   }
 
@@ -1320,10 +1372,10 @@ export class SessionStore {
   open(id?: SessionId): SessionHandle | null {
     if (id !== undefined) {
       const meta = this.metaFile(id)
-      if (meta === null) return null
+      if (meta === null) return this.missed(id)
       const dir = dirname(meta)
       const transcript = this.transcriptFor(dir, id)
-      if (!this.logReadable(transcript)) return null
+      if (!this.logReadable(transcript)) return this.missed(id)
       return { id, dir, transcript, meta }
     }
     const newest = this.list()[0]
@@ -1362,13 +1414,29 @@ export class SessionStore {
    */
   list(): readonly SessionMeta[] {
     const writes = recordWrites.get(this.root) ?? 0
-    const kept = this.listed
-    if (kept === undefined || kept.writes !== writes || performance.now() - kept.at >= LIST_MEMO_MS) {
+    let kept = this.listed
+    if (kept === undefined || kept.writes !== writes || performance.now() - kept.at >= LIST_MEMO_MS || !foldersUnchanged(kept.folders)) {
       const at = performance.now()
-      this.listed = { at, writes, metas: this.scan() }
+      kept = { at, writes, ...this.scan() }
+      this.listed = kept
+      for (const id of this.rechecking) if (kept.metas.some((meta) => meta.id === id)) this.disputed.add(id)
+      this.rechecking.clear()
     }
     /** Copies, so a caller that changes what it was given changes nothing another caller reads. */
-    return (this.listed as { readonly metas: readonly SessionMeta[] }).metas.map((meta) => ({ ...meta }))
+    return kept.metas.map((meta) => ({ ...meta }))
+  }
+
+  /**
+   * A lookup by id found no readable session `id`: when the memo still lists it, the store changed in a way the folders'
+   * times did not show (a record or log rewritten in place), and the memo is not used again ({@link listed}). Answers
+   * `null`, the lookup's own answer, so a caller can return it.
+   */
+  private missed(id: SessionId): null {
+    if (this.listed !== undefined && !this.disputed.has(id) && this.listed.metas.some((meta) => meta.id === id)) {
+      this.listed = undefined
+      this.rechecking.add(id)
+    }
+    return null
   }
 
   /** How many times {@link list} has read the whole store, for a check that one did not (#257). */
@@ -1376,14 +1444,20 @@ export class SessionStore {
     return this.scans
   }
 
-  /** The whole store's records, read from disk: every folder walked, every record read, every log's head judged. */
-  private scan(): readonly SessionMeta[] {
+  /**
+   * The whole store's records, read from disk: every folder walked, every record read, every log's head judged. With
+   * them, each folder it read and that folder's {@link folderStamp}, taken before the folder was read, so a change made
+   * while the scan runs shows as a changed folder on the next {@link list}.
+   */
+  private scan(): { readonly metas: readonly SessionMeta[]; readonly folders: ReadonlyMap<string, string | null> } {
     this.scans += 1
+    /** The root is checked even when it is not there, so a store another process creates shows at once. */
+    const folders = new Map<string, string | null>([[this.root, folderStamp(this.root)]])
     let names: string[]
     try {
       names = readdirSync(this.root)
     } catch {
-      return []
+      return { metas: [], folders }
     }
     const metas = new Map<string, SessionMeta>()
     const remember = (text: string, dir: string, path: string): void => {
@@ -1399,6 +1473,9 @@ export class SessionStore {
     }
     for (const name of names) {
       const at = join(this.root, name)
+      /** A file beside the folders holds no records and is not checked; one that becomes a folder changes the root. */
+      const stamp = folderStamp(at)
+      if (stamp !== null) folders.set(at, stamp)
       if (name.startsWith('session-')) {
         try {
           remember(readFileSync(join(at, 'meta.json'), 'utf8'), at, join(at, 'meta.json'))
@@ -1422,7 +1499,7 @@ export class SessionStore {
         }
       }
     }
-    return [...metas.values()].sort((left, right) => (left.created < right.created ? 1 : -1))
+    return { metas: [...metas.values()].sort((left, right) => (left.created < right.created ? 1 : -1)), folders }
   }
 
   /**
@@ -1432,18 +1509,22 @@ export class SessionStore {
    * Hang 5 of #257 was a 2 s poll per open tab that asked `list().find(id)` four times per request: every call read
    * all 1,700 records and judged every log's head, on a cold file cache after a restart. This reads one record, from
    * where it was last found ({@link metaFile}), and judges one log. It always reads the file, so a writer that reads
-   * a record before it rewrites it reads the current one.
+   * a record before it rewrites it reads the current one. A miss of a session `list()`'s memo holds ends the memo
+   * ({@link missed}).
    */
   metaById(id: SessionId): SessionMeta | undefined {
     const path = this.metaFile(id)
-    if (path === null) return undefined
-    try {
-      const meta = JSON.parse(readFileSync(path, 'utf8')) as SessionMeta
-      if (typeof meta?.id !== 'string' || meta.id !== id) return undefined
-      return this.logReadable(this.transcriptFor(dirname(path), id)) ? meta : undefined
-    } catch {
-      return undefined
+    let found: SessionMeta | undefined
+    if (path !== null) {
+      try {
+        const meta = JSON.parse(readFileSync(path, 'utf8')) as SessionMeta
+        if (meta?.id === id && this.logReadable(this.transcriptFor(dirname(path), id))) found = meta
+      } catch {
+        // A record that does not parse is no record, as list() reads it.
+      }
     }
+    if (found === undefined) this.missed(id)
+    return found
   }
 
   /** A write to this store's records: no `list()` in this process answers from before it. */

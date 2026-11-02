@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
+import { createInterface } from 'node:readline'
 import { after, test } from 'node:test'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { boot, settle } from '../src/boot.ts'
 import { startWebServer } from '../src/server/web.ts'
@@ -180,4 +182,140 @@ test('one /api/team poll over 2,000 sessions does not list the store (#257, hang
     await server.close()
     await app.dispose()
   }
+})
+
+/** A pause longer than any file system clock's tick, so a change after it dates its folder anew wherever the test runs. */
+const tick = (): Promise<void> => new Promise((done) => setTimeout(done, 20))
+
+/**
+ * A store in **another process**, which this process's count of record writes never hears about. It waits for a line
+ * naming a working folder, creates a session there and answers with the session's id.
+ */
+function outsider(root: string): { ready: Promise<void>; create: (cwd: string) => Promise<string>; close: () => Promise<void> } {
+  const storeUrl = pathToFileURL(fileURLToPath(new URL('../src/session/store.ts', import.meta.url))).href
+  const script = `
+    import { createInterface } from 'node:readline'
+    const { SessionStore } = await import(${JSON.stringify(storeUrl)})
+    const store = new SessionStore(${JSON.stringify(root)}, { warn: () => {} })
+    process.stdout.write('ready\\n')
+    for await (const cwd of createInterface({ input: process.stdin })) {
+      const handle = store.create({ cwd, title: 'from another process' })
+      store.release(handle)
+      process.stdout.write(handle.id + '\\n')
+    }
+  `
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script], { stdio: ['pipe', 'pipe', 'inherit'] })
+  const exited = new Promise<void>((done) => child.once('exit', () => done()))
+  const lines = createInterface({ input: child.stdout })[Symbol.asyncIterator]()
+  const next = async (): Promise<string> => {
+    const line = await lines.next()
+    if (line.done === true) throw new Error('the other process ended')
+    return line.value
+  }
+  const ready = next().then((line) => assert.equal(line, 'ready', 'the other process loaded the store'))
+  return {
+    ready,
+    create: async (cwd) => {
+      await ready
+      child.stdin.write(`${cwd}\n`)
+      return next()
+    },
+    close: async () => {
+      child.stdin.end()
+      await exited
+    },
+  }
+}
+
+test('a session whose files leave the store behind its back is gone from the next list(), within the memo (#257)', async () => {
+  const root = join(scratch, 'moved-out')
+  const { store, ids } = seeded(root, 30, 3)
+  /** A session of the old layout too: its own directory, whose meta.json is what list() reads. */
+  const legacyId = `session-${randomUUID()}`
+  mkdirSync(join(root, legacyId), { recursive: true })
+  writeFileSync(join(root, legacyId, 'meta.json'), `${JSON.stringify({ id: legacyId, created: '2026-09-01T00:00:00.000Z', cwd: scratch, turns: 0 })}\n`)
+  const gone = join(scratch, 'moved-out-gone')
+  mkdirSync(gone, { recursive: true })
+  const before = scansOf(store)
+
+  for (const [what, doomed, files] of [
+    ['a session in a workspace folder', ids[11]!, () => [store.open(ids[11]!)!.meta, store.open(ids[11]!)!.transcript]],
+    ['a session of the old layout', legacyId, () => [join(root, legacyId, 'meta.json')]],
+  ] as const) {
+    await tick()
+    const primed = performance.now()
+    assert.ok(store.list().some((meta) => meta.id === doomed), `the memo holds ${what}`)
+    const scanned = scansOf(store)
+    /** As check-workspace-tree's #56 case does: the log and the record are moved out with fs, not through the store. */
+    for (const file of files()) renameSync(file, join(gone, `${randomUUID()}-${basename(file)}`))
+    const listed = store.list()
+    assert.ok(performance.now() - primed < LIST_MEMO_MS, `still within the memo (${what})`)
+    assert.equal(listed.some((meta) => meta.id === doomed), false, `${what}, moved out, is not listed`)
+    assert.equal(scansOf(store) - scanned, 1, `its folder changed, so the store was read again (${what})`)
+    assert.deepEqual(listed, new SessionStore(root, quiet).list(), `and the answer is a fresh scan's (${what})`)
+    store.list()
+    assert.equal(scansOf(store) - scanned, 1, `and the next list, with nothing changed, does not read it again (${what})`)
+  }
+  assert.equal(scansOf(store) - before, 3, 'three reads of the store in all: the first list and one after each move')
+})
+
+test('a session another process adds to the store shows in the next list(), within the memo (#257)', async () => {
+  const root = join(scratch, 'added')
+  const { store } = seeded(root, 30, 3)
+  const other = outsider(root)
+  try {
+    await other.ready
+    for (const [where, cwd] of [
+      ['a folder the store already has', join(scratch, 'work-1')],
+      ['a folder of its own', join(scratch, 'work-from-another-process')],
+    ] as const) {
+      await tick()
+      const primed = performance.now()
+      const known = store.list().length
+      const scanned = scansOf(store)
+      const id = await other.create(cwd)
+      const listed = store.list()
+      assert.ok(performance.now() - primed < LIST_MEMO_MS, `still within the memo (${where})`)
+      assert.ok(listed.some((meta) => meta.id === id), `the session another process wrote into ${where} is listed`)
+      assert.equal(listed.length, known + 1, `one session more (${where})`)
+      assert.equal(scansOf(store) - scanned, 1, `the store was read again once (${where})`)
+      assert.deepEqual(listed, new SessionStore(root, quiet).list(), `and the answer is a fresh scan's (${where})`)
+    }
+  } finally {
+    await other.close()
+  }
+})
+
+test('a lookup by id that misses a session the memo holds ends the memo (#257)', () => {
+  const root = join(scratch, 'missed')
+  const { store, ids } = seeded(root, 30, 3)
+  for (const [how, id, lookup] of [
+    ['metaById', ids[5]!, (one: string) => byId(store, one)],
+    ['open', ids[6]!, (one: string) => store.open(one) ?? undefined],
+  ] as const) {
+    assert.ok(store.list().some((meta) => meta.id === id), `the memo holds the session (${how})`)
+    /** Its log is rewritten in place by another writer: that does not date the folder, so only a lookup can tell. */
+    writeFileSync(store.open(id)!.transcript, '{"not":"zstd"}\n')
+    assert.ok(store.list().some((meta) => meta.id === id), `a rewrite in place leaves the memo standing (${how})`)
+    const scanned = scansOf(store)
+    assert.equal(lookup(id), undefined, `${how} finds no readable session`)
+    const listed = store.list()
+    assert.equal(listed.some((meta) => meta.id === id), false, `after ${how} missed it, list() leaves it out too`)
+    assert.equal(scansOf(store) - scanned, 1, `because the miss ended the memo (${how})`)
+    assert.deepEqual(listed, new SessionStore(root, quiet).list(), `and the answer is a fresh scan's (${how})`)
+  }
+
+  /** A record filed under another id's name is listed by what it says and missed by id: one odd file must not make every list a scan. */
+  const odd = `session-${randomUUID()}`
+  writeFileSync(join(dirname(store.open(ids[8]!)!.meta), metaName(`session-${randomUUID()}`)), `${JSON.stringify({ id: odd, created: '2026-09-02T00:00:00.000Z', cwd: scratch, turns: 0 })}\n`)
+  assert.ok(store.list().some((meta) => meta.id === odd), 'the odd record is listed')
+  const scanned = scansOf(store)
+  assert.equal(byId(store, odd), undefined, 'and has no record by its id')
+  assert.ok(store.list().some((meta) => meta.id === odd), 'a fresh scan lists it still')
+  assert.equal(scansOf(store) - scanned, 1, 'the first miss read the store again')
+  for (let round = 0; round < 5; round += 1) {
+    byId(store, odd)
+    store.list()
+  }
+  assert.equal(scansOf(store) - scanned, 1, 'the later misses of that id do not')
 })
