@@ -44,6 +44,7 @@ import { activitySessions, refusalSentence, rowActivity, sessionActivity, stopRo
 import { handleScheduleRoute } from '../schedule/http.ts'
 import type { ScheduleService } from '../schedule/service.ts'
 import { handleJobsRoute } from '../jobs/http.ts'
+import { handleQueueRoute, installQueue, queueRequest } from './queue.ts'
 import type { JobRegistry } from '../jobs/registry.ts'
 import {
   COOKIE_MAX_AGE,
@@ -214,6 +215,9 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
    */
   const log = new EventLog()
   const heartbeatMs = heartbeatInterval()
+
+  // The session queue's drain (#162): a prompt queued while its session was busy runs as the next turn.
+  installQueue(ctx, { maxRounds: options.maxRounds ?? DEFAULT_WEB_MAX_ROUNDS })
 
   // Every append is pushed to whoever is listening, from the one write path.
   ctx.on('session/event', (payload) => {
@@ -1179,6 +1183,8 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
   if (await handleScheduleRoute(ctx.schedule, url, request, response)) return
   // The background-job routes: DSH's job controller (list, follow, kill), answered by the jobs module.
   if (await handleJobsRoute(ctx.get('jobs') as JobRegistry | undefined, url, request, response)) return
+  // The session queue (#162): list, remove and edit the prompts waiting for the running turn.
+  if (await handleQueueRoute(ctx, url, request, response)) return
 
   if (url.pathname === '/api/goal' && request.method === 'GET') {
     const goals = ctx.goal
@@ -2867,6 +2873,10 @@ export function unknownTurnSession(
     preset?: string
     /** Answer `202 {session, turn}` at acceptance and push the verdict on `/api/events` (#128). */
     detach?: boolean
+    /** Queue the prompt behind a running turn, in the session's durable next-turn queue (#162). */
+    queue?: boolean
+    /** The page's id for this send, so a retry finds the row it queued (#162). */
+    requestId?: string
   }
   try {
     const parsed: unknown = JSON.parse(raw.length === 0 ? '{}' : raw)
@@ -3082,6 +3092,25 @@ export function unknownTurnSession(
   const activeTurns = state.running.get(handle.id) ?? 0
   state.running.set(handle.id, activeTurns + 1)
   if (activeTurns === 0) state.runningSince.set(handle.id, Date.now())
+  /**
+   * A prompt the page queued (`queue: true`) for a session that is busy, or already has prompts waiting, goes into the
+   * session's durable next-turn queue and is answered at once (#162): DSH queues it on the host, so a reload, another tab
+   * and another device see it, and the host runs it when the running turn ends. A retry with the same `requestId`
+   * answers the row it queued. On a free session it runs now, as any turn does.
+   */
+  if (body.queue === true) {
+    const requestId = typeof body.requestId === 'string' && body.requestId.length > 0 ? body.requestId : undefined
+    const queued = queueRequest(ctx, handle, [{ type: 'text', text: body.prompt }, ...attachments], requestId)
+    if (queued !== undefined) {
+      respond(
+        response,
+        202,
+        'application/json',
+        `${JSON.stringify({ session: handle.id, queued: true, id: queued.item.id, ...(queued.item.requestId !== undefined ? { requestId: queued.item.requestId } : {}), duplicate: queued.duplicate })}\n`,
+      )
+      return
+    }
+  }
   /**
    * The turn's abort handle, registered before the stream opens so a stop arriving immediately after the
    * request still finds it. The `finally` below removes it either way, which is what keeps a finished
