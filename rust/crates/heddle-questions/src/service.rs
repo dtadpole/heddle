@@ -497,7 +497,14 @@ impl QuestionService {
                 format!("question request '{id}' is already {kind}"),
             ));
         }
-        let waiting = self.waiters.lock().expect("waiters").contains_key(id);
+        // Only a turn of this session takes the answer: a fork copies `question/*` events with their request ids, so
+        // the id alone can name the source's waiter (#245).
+        let waiting = self
+            .waiters
+            .lock()
+            .expect("waiters")
+            .get(id)
+            .is_some_and(|waiter| waiter.session == session);
         if !waiting && !request.continuable {
             return Err(QuestionError::new(
                 codes::SETTLED,
@@ -511,7 +518,8 @@ impl QuestionService {
             "question/answered",
             json!({ "requestId": id, "answers": answers, "late": late }),
         )?;
-        if let Some(mut waiter) = self.release(id)
+        if waiting
+            && let Some(mut waiter) = self.release(id)
             && let Some(sender) = waiter.answer.take()
         {
             let _ = sender.send(answers.clone());
@@ -561,7 +569,10 @@ impl QuestionService {
     /// The request as a reader sees it, with the TypeScript build's key order.
     fn view(&self, session: &str, request: &FoldedRequest) -> Map<String, Value> {
         let waiters = self.waiters.lock().expect("waiters");
-        let waiter = waiters.get(&request.id);
+        // A fork's copy of a request is not waited on by the source's turn (#245); DSH keys its waits by the live agent.
+        let waiter = waiters
+            .get(&request.id)
+            .filter(|waiter| waiter.session == session);
         let mut view = Map::new();
         view.insert("id".into(), Value::String(request.id.clone()));
         view.insert("session".into(), Value::String(session.to_owned()));
