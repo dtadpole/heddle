@@ -289,6 +289,147 @@ test('Stop ends a turn that is waiting on a question', async (context) => {
   })
 })
 
+/**
+ * #243's setting. A question is left `continued` by a crash: it is asked on one server, the server is killed, and a
+ * second server starts over the same home. On the second server turn A asks a question of its own, so it keeps running
+ * while the first question is answered late. From then on a turn's first round answers REPLY SEEN, and turn A's second
+ * round ends it.
+ */
+async function lateWhileRunning(label, body) {
+  const home = isolatedHome(`questions-${label}`)
+  const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+  let first
+  try {
+    first = await startServer(`${label}-a`, [ask, { text: 'unused' }], { home, keepHome: true })
+    let session
+    try {
+      void request(first, '/api/turn', { method: 'POST', body: JSON.stringify({ prompt: 'ask me something', new: true }) }).then((response) => response.text()).catch(() => {})
+      for (let attempt = 0; attempt < 60 && session === undefined; attempt += 1) {
+        await pause(200)
+        const candidate = await onlySession(first)
+        if (candidate === undefined) continue
+        const open = await (await request(first, `/api/questions?session=${candidate}`)).json()
+        if ((open.requests ?? []).length > 0) session = candidate
+      }
+      assert.ok(session !== undefined, 'the question waits before the crash')
+    } finally {
+      /** Killed, not closed: the session's folder is the first server's work folder, and turn A needs it. */
+      await first.stop()
+    }
+    const server = await startServer(`${label}-b`, [ask, { text: 'turn A done' }], { home, keepHome: true })
+    const browser = await openBrowser({ width: 1280, height: 900 })
+    try {
+      void request(server, '/api/turn', { method: 'POST', body: JSON.stringify({ session, prompt: 'turn A', detach: true }) }).then((response) => response.text()).catch(() => {})
+      let requests = []
+      for (let attempt = 0; attempt < 60 && requests.length < 2; attempt += 1) {
+        await pause(200)
+        requests = (await (await request(server, `/api/questions?session=${session}`)).json()).requests ?? []
+      }
+      assert.deepEqual(requests.map((entry) => entry.state), ['continued', 'waiting'], 'the crashed question is continued, and turn A waits on its own')
+      writeFileSync(join(home, 'script.json'), JSON.stringify({ steps: [{ text: 'REPLY SEEN' }, { text: 'turn A done' }] }))
+      const open = async () => {
+        await browser.goto(server.url)
+        await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+        await browser.evaluate(`(async () => await showSession(${JSON.stringify(session)}))()`)
+      }
+      await open()
+      assert.ok(
+        await browser.waitFor(`document.getElementById("question-card").hidden === false && document.getElementById("question-card").dataset.id === ${JSON.stringify(requests[0].id)}`, 15_000),
+        'the page offers the continued question while turn A runs',
+      )
+      const answerInPage = async () => {
+        await click(browser, '#question-options .q-option[data-label="Red"]')
+        await click(browser, '#question-submit')
+        assert.ok(await browser.waitFor(`document.getElementById("question-card").dataset.id !== ${JSON.stringify(requests[0].id)} || document.getElementById("question-card").hidden === true`, 10_000), 'the card takes the answer')
+      }
+      const endTurnA = () =>
+        request(server, `/api/questions/${requests[1].id}`, { method: 'POST', body: JSON.stringify({ session, answers: [{ id: 'color', selected: ['Blue (Recommended)'] }, { id: 'note', selected: [] }] }) })
+      const transcript = async () => {
+        const record = await (await request(server, `/api/sessions/${session}`)).json()
+        return (record.turns ?? []).filter((turn) => ['user', 'assistant'].includes(turn.kind ?? turn.type)).map((turn) => `${turn.kind ?? turn.type}: ${turn.text ?? ''}`)
+      }
+      const until = async (test, ms = 20_000) => {
+        for (let waited = 0; waited < ms; waited += 250) {
+          const rows = await transcript()
+          if (test(rows)) return rows
+          await pause(250)
+        }
+        return transcript()
+      }
+      await body({ server, browser, session, late: requests[0], open, answerInPage, endTurnA, transcript, until, pause })
+    } finally {
+      await browser.close()
+      await server.close()
+    }
+  } finally {
+    await first?.close()
+    removeDir(home)
+  }
+}
+
+const isLateAnswer = (row) => row.startsWith('user: {"kind":"answer_to_pending_question"')
+
+test('a late answer given while another turn runs is queued by the server, so a reload does not lose it (#243)', async (context) => {
+  if (!(await capable(context))) return
+  /**
+   * Issue #243. The page put such an answer in its own dock, shown as raw JSON, and a reload or the row's ✕ dropped it.
+   * The question was already settled, so the answer never reached the model. DSH steers the reply into the agent's
+   * host-owned inbox (dsh-user-questions `answer`, `agent.steer`), so it survives the client.
+   */
+  await lateWhileRunning('late-reload', async ({ browser, open, answerInPage, endTurnA, until, pause }) => {
+    await answerInPage()
+    await pause(1_000)
+    await open()
+    await endTurnA()
+    const rows = await until((all) => all.some(isLateAnswer) && all.includes('assistant: REPLY SEEN'))
+    assert.ok(rows.some(isLateAnswer), `after the reload the answer still reaches the model as its user message\n${rows.join('\n')}`)
+    assert.ok(rows.indexOf('assistant: turn A done') < rows.findIndex(isLateAnswer), `after turn A ends\n${rows.join('\n')}`)
+    assert.ok(rows.includes('assistant: REPLY SEEN'), 'and the model answers it')
+    assert.ok(await browser.waitFor('/Which colour\\?\\n→ Red/.test(document.getElementById("log").innerText)', 10_000), 'the reloaded page draws it as the question and the answer, from the session\'s events')
+  })
+})
+
+test('a late answer goes before a message the page queued behind the same running turn, as DSH admits a reply first (#243)', async (context) => {
+  if (!(await capable(context))) return
+  await lateWhileRunning('late-order', async ({ browser, answerInPage, endTurnA, until }) => {
+    await sendMessage(browser, 'queued after')
+    assert.ok(await browser.waitFor('document.body.innerText.includes("queued after")', 5_000), 'the page queues its own message behind turn A')
+    await answerInPage()
+    await endTurnA()
+    const rows = await until((all) => all.some(isLateAnswer) && all.includes('user: queued after'), 30_000)
+    const reply = rows.findIndex(isLateAnswer)
+    const queued = rows.indexOf('user: queued after')
+    assert.ok(reply >= 0 && queued >= 0, `both reach the model\n${rows.join('\n')}`)
+    assert.ok(reply < queued, `the late answer first, then the page's queued message\n${rows.join('\n')}`)
+  })
+})
+
+test('a Stop of the running turn also stops the late answer queued behind it, but keeps it in the conversation for the next turn, as DSH keeps its inbox (#243)', async (context) => {
+  if (!(await capable(context))) return
+  /**
+   * DSH's cancel keeps its inbox (`keepInbox: true`): a steered reply is not run after a Stop, and it goes in with the
+   * person's next message. Here the Stop ends the queued reply turn too, but its user message is already written, so
+   * the answer is in the conversation and the next turn's request carries it. No turn runs on its own after the Stop.
+   * Before, the page's dock sent the answer as a fresh turn the moment the stopped turn ended.
+   */
+  await lateWhileRunning('late-stop', async ({ server, session, answerInPage, until, pause }) => {
+    await answerInPage()
+    await pause(1_000)
+    const stopped = await request(server, `/api/sessions/${session}/stop`, { method: 'POST', body: '{}' })
+    assert.equal(stopped.status, 200, 'turn A is stopped')
+    let rows = await until((all) => all.some(isLateAnswer))
+    await pause(1_500)
+    rows = await until(() => true)
+    assert.ok(rows.some(isLateAnswer), `the answer is kept in the conversation\n${rows.join('\n')}`)
+    assert.ok(!rows.includes('assistant: turn A done'), `turn A did not go on\n${rows.join('\n')}`)
+    assert.ok(!rows.includes('assistant: REPLY SEEN'), `and no turn ran on its own after the Stop\n${rows.join('\n')}`)
+    void request(server, '/api/turn', { method: 'POST', body: JSON.stringify({ session, prompt: 'next', detach: true }) }).then((response) => response.text()).catch(() => {})
+    rows = await until((all) => all.includes('user: next') && all.includes('assistant: REPLY SEEN'))
+    assert.ok(rows.includes('assistant: REPLY SEEN'), `the person's next message runs\n${rows.join('\n')}`)
+    assert.ok(rows.findIndex(isLateAnswer) < rows.indexOf('user: next'), `with the answer ahead of it in the conversation\n${rows.join('\n')}`)
+  })
+})
+
 test('a question asked before a restart is answerable after it, and the answer resumes the session', async (context) => {
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   const home = isolatedHome('questions-restart')

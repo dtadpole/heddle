@@ -25077,14 +25077,16 @@ async function questionSubmit() {
     questionDraftDrop(shown.request.id)
     hideQuestion()
     /**
-     * An answer the turn no longer waits for is the user message DSH sends. The composer delivers it: as a turn when
-     * nothing runs, and queued behind a turn that is still running - which is how a timed question's turn usually
-     * looks for a moment after its deadline. Steering it in was measured to lose it: a turn on its last step ends
-     * without another model call, so the answer sat in the log unanswered.
+     * An answer the turn no longer waits for is the user message DSH sends. When nothing runs, the composer sends it
+     * as a turn. Behind a running turn it goes to the server's own turn queue rather than this page's dock. A timed
+     * question's turn usually still runs for a moment after its deadline. Steering it in was measured to lose it: a
+     * turn on its last step ends without another model call, so the answer sat in the log unanswered.
      */
     if (body.late === true && typeof body.message === 'string') {
-      if (anyRunning()) enqueue(body.message, 'queue')
-      else void sendNow(body.message)
+      const session = shown.request.session
+      if (!anyRunning()) void sendNow(body.message)
+      else if (typeof session === 'string' && session.length > 0) void handOverLateAnswer(session, body.message)
+      else enqueue(body.message, 'queue')
     }
   } catch (error) {
     note.textContent = `could not send the answer: ${(error && error.message) || error}`
@@ -25093,6 +25095,30 @@ async function questionSubmit() {
   } finally {
     submit.disabled = false
   }
+}
+/**
+ * Hand a late answer to the server's turn queue, behind the turn that is running (#243).
+ *
+ * The answer has already settled its question, so this message is the only way it can reach the model. In the page's
+ * own dock, a reload or the row's ✕ lost it for good, and the row showed the raw JSON. The server queues a turn sent to
+ * a busy session in arrival order (#28), so the answer runs right after the running turn and before anything this page
+ * queues later. That is DSH's order: dsh-user-questions steers the reply into the agent's host-owned inbox, and it is
+ * admitted before any next-turn message. Every page draws the reply turn from the session's events.
+ *
+ * The caller hands over only a named session. A body without one would start a new session in the server's start
+ * folder (#134). If the hand-over fails, the answer falls back to its own session's dock, as before. That dock drains
+ * even when the reader has moved to another session (#72), so a switch during the hand-over loses nothing.
+ */
+async function handOverLateAnswer(session, message) {
+  try {
+    const response = await sendTurn({ session, prompt: message, detach: true })
+    if (response.ok) return
+  } catch {
+    // not handed over; its session's dock keeps it below
+  }
+  queueOf(session).push({ id: `queued-${++queueSeq}`, text: message, attachments: [], status: 'pending' })
+  renderQueue()
+  void pumpQueue(session)
 }
 async function questionHold() {
   const shown = questionShown
