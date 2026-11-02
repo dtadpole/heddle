@@ -1,8 +1,8 @@
 ---
 title: heddle-web-trajectory integration tests
 created: 2026-10-23T05:09:00Z
-modified: 2026-10-31T20:02:13Z
-version: 1.2.0
+modified: 2026-11-01T09:08:17Z
+version: 1.3.0
 description: Integration tests that judge the Trajectory verifiers' API expectations on session logs the TypeScript build recorded, and the projections both builds share on hand-written fixtures.
 grounded_in:
   - source: _verifiers_/85-trajectory-view/check.mjs; _verifiers_/80-web-ui/check-trajectory-view.mjs, check-runtime-context.mjs, check-composer.mjs
@@ -18,6 +18,7 @@ Cargo's integration tests for this crate. They use only its public API.
 | [`timeline_records.rs`](timeline_records.rs) | an answer's TTFT measured from its step request (#124) and the overview's per-record timeline, on the shared fixture `test/ledger.test.ts` also reads |
 | [`between_turns.rs`](between_turns.rs) | records outside every turn placed where they happened, in Between turns sections (S151), on the shared fixture `test/ledger.test.ts` also reads |
 | [`attachments.rs`](attachments.rs) | a user record's images and files in content order (S151), on the shared fixture `test/ledger.test.ts` also reads |
+| [`pruned_result.rs`](pruned_result.rs) | a tool result pruned under context pressure keeps one row holding the original, with no row for its replacement copy (#186), on the shared fixture `test/ledger.test.ts`, `test/web.test.ts` and `heddle-server`'s transcript fold also read |
 | [`fixtures/`](fixtures/INDEX.md) | the logs those tests read, with their provenance |
 
 Unit tests live beside the code in [`../src/`](../src/INDEX.md).

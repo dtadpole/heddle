@@ -14,6 +14,9 @@ pub mod code {
     /// The provider refused the request because it did not fit the window — the one HTTP failure the harness
     /// recovers from (the loop offers it on `agent/request-error`, compaction answers with a reduction and a retry).
     pub const CONTEXT_WINDOW_EXCEEDED: &str = "CONTEXT_WINDOW_EXCEEDED";
+    /// A refusal that says the account's quota or balance is spent, at any status (S31): DSH's `QUOTA_EXCEEDED_CODE`,
+    /// which its retry policy never repeats (a quota-worded 429 is not a rate limit).
+    pub const QUOTA_EXCEEDED: &str = "QUOTA";
     /// Any other non-2xx answer.
     pub const HTTP: &str = "HTTP";
     /// The socket was idle past the endpoint's `timeoutMs`.
@@ -58,6 +61,8 @@ pub struct ModelError {
     pub code: String,
     /// The HTTP status, when the provider answered with one.
     pub status: Option<u16>,
+    /// The provider's `Retry-After`, in milliseconds, when it sent a positive one (DSH's `providerRetryAfterMs`).
+    pub retry_after_ms: Option<f64>,
     source: Option<Box<dyn Error + Send + Sync + 'static>>,
 }
 
@@ -73,8 +78,16 @@ impl ModelError {
             endpoint: endpoint.into(),
             code: code.into(),
             status: None,
+            retry_after_ms: None,
             source: None,
         }
+    }
+
+    /// The same failure, carrying the provider's `Retry-After` in milliseconds, which a retry policy honours.
+    #[must_use]
+    pub fn with_retry_after_ms(mut self, delay: f64) -> Self {
+        self.retry_after_ms = Some(delay);
+        self
     }
 
     /// The same failure, carrying the HTTP status the provider answered with.

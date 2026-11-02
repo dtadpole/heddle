@@ -5,7 +5,7 @@ import { test } from 'node:test'
 
 import { connect, decodeFrame, encodeFrame } from '../../cdp.mjs'
 import { browserPath, chromeArgs, releaseChromeOutput, stateDir, stopChrome } from '../../chrome.mjs'
-import { keyDescription, parseKey } from '../../actions.mjs'
+import { keyDescription, keyEvents, macEditingCommand, parseKey, VISIBLE_CLIPBOARD_REASON } from '../../actions.mjs'
 import { parseGeolocation, parseHeaders, parseViewport } from '../../emulate.mjs'
 import {
   formatConsoleList,
@@ -116,6 +116,59 @@ test('the named Space key sends the DOM value a literal space, the same as press
   assert.deepEqual(keyDescription('Space'), keyDescription(' '), 'the name and the character are one key')
   assert.deepEqual(parseKey('Shift+Space'), { key: 'Space', modifiers: 8 })
   assert.equal(keyDescription(parseKey('Shift+Space').key).key, ' ', 'a chord keeps the DOM value')
+})
+
+/**
+ * On macOS the menu, not the page, makes Command+V a paste, and a protocol key event never reaches the
+ * menu: the editing command must travel with the event, or Meta+V reaches the page as a bare keydown.
+ */
+test('on macOS an editing chord carries its command, so Meta+V pastes in a headless browser', () => {
+  const mac = { platform: 'darwin', headless: true }
+  const paste = keyEvents('Meta+V', mac)
+  assert.deepEqual(paste.down, {
+    type: 'rawKeyDown',
+    key: 'V',
+    code: 'KeyV',
+    windowsVirtualKeyCode: 86,
+    nativeVirtualKeyCode: 86,
+    modifiers: 4,
+    commands: ['paste'],
+  })
+  assert.equal(paste.command, 'paste')
+  assert.equal(paste.up.commands, undefined, 'the command rides the keydown only, or it would run twice')
+  assert.deepEqual(keyEvents('Meta+v', mac).down.commands, ['paste'], 'the letter case is not the chord')
+  for (const [chord, command] of [['Meta+A', 'selectAll'], ['Meta+C', 'copy'], ['Meta+X', 'cut'], ['Meta+Z', 'undo'], ['Shift+Meta+Z', 'redo'], ['Meta+Shift+Z', 'redo']]) {
+    assert.deepEqual(keyEvents(chord, mac).down.commands, [command], `${chord} is ${command}`)
+  }
+})
+
+/** Only the exact chord is a command, and only on macOS, where the page cannot bind it itself. */
+test('a chord that is not a macOS editing command carries none, and plain keys are unchanged', () => {
+  const mac = { platform: 'darwin', headless: true }
+  for (const chord of ['Control+V', 'Meta+Alt+V', 'Control+Meta+V', 'Shift+Meta+V', 'Meta+B', 'Meta+Enter']) {
+    const events = keyEvents(chord, mac)
+    assert.equal(events.down.commands, undefined, `${chord} is no editing command`)
+    assert.equal(events.command, undefined)
+  }
+  assert.equal(macEditingCommand('KeyV', 2), undefined, 'Control+V is the page binding elsewhere, not a mac command')
+  assert.equal(keyEvents('Meta+V', { platform: 'linux', headless: true }).down.commands, undefined, 'Linux pages bind their own')
+  assert.deepEqual(keyEvents('v', mac).down, { type: 'keyDown', key: 'v', code: 'KeyV', windowsVirtualKeyCode: 86, nativeVirtualKeyCode: 86, modifiers: 0, text: 'v', unmodifiedText: 'v' })
+  assert.equal(keyEvents('Control+A', mac).down.type, 'rawKeyDown', 'a chord still inserts no text')
+})
+
+/** A visible browser shares the owner's clipboard, so a paste there could put private text on a page. */
+test('a visible browser gets the key events but no clipboard command, and is told why', () => {
+  const visible = { platform: 'darwin', headless: false }
+  for (const [chord, command] of [['Meta+V', 'paste'], ['Meta+C', 'copy'], ['Meta+X', 'cut']]) {
+    const events = keyEvents(chord, visible)
+    assert.equal(events.down.commands, undefined, `${chord} must not touch the owner's clipboard`)
+    assert.equal(events.withheld, command)
+    assert.equal(events.down.type, 'rawKeyDown', 'the page still sees the chord')
+  }
+  assert.deepEqual(keyEvents('Meta+A', visible).down.commands, ['selectAll'], 'select-all touches no clipboard')
+  assert.deepEqual(keyEvents('Meta+Z', visible).down.commands, ['undo'])
+  assert.equal(keyEvents('Meta+V', {}).withheld, process.platform === 'darwin' ? 'paste' : undefined, 'the default is the cautious one')
+  assert.match(VISIBLE_CLIPBOARD_REASON, /headless/)
 })
 
 /** The snapshot's text form: indentation, uid first, role rules, quoted values, collapsed text. */

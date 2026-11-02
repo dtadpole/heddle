@@ -166,12 +166,21 @@ impl TeamStore for SessionTeamStore {
         Ok(events.iter().map(|event| event.to_value()).collect())
     }
 
+    fn surface_nodes(&self, session: &str) -> Option<Vec<u64>> {
+        let handle = self.store.open(session)?;
+        self.store
+            .surface(&handle)
+            .ok()
+            .map(|surface| surface.nodes.clone())
+    }
+
     fn meta(&self, session: &str) -> Option<SessionMetaView> {
         self.store.meta(session).map(|meta| SessionMetaView {
             id: meta.id().to_owned(),
             cwd: Some(meta.cwd().to_owned()),
             endpoint: meta.endpoint().map(str::to_owned),
             model: meta.model().map(str::to_owned),
+            reasoning_effort: meta.reasoning_effort().map(str::to_owned),
             team_id: meta.team_id().map(str::to_owned),
             preset: meta.preset().map(str::to_owned),
         })
@@ -192,6 +201,7 @@ impl TeamStore for SessionTeamStore {
                 cwd: child.cwd.clone(),
                 endpoint: child.endpoint.clone(),
                 model: child.model.clone(),
+                reasoning_effort: child.reasoning_effort.clone(),
                 title: Some(child.title.clone()),
                 parent_session: Some(child.parent_session.clone()),
                 origin: Some(SessionOrigin::Subagent),
