@@ -550,6 +550,7 @@ mod tests {
                 system: None,
                 summarizer: None,
                 force: false,
+                cancel: None,
             },
         ))
         .expect("the round prepares");
@@ -622,6 +623,7 @@ mod tests {
                 system: None,
                 summarizer: None,
                 force: false,
+                cancel: None,
             },
         ))
         .expect("the round prepares");
@@ -746,6 +748,7 @@ mod tests {
                     system: Some("be brief"),
                     summarizer: None,
                     force: false,
+                    cancel: None,
                 },
             ))
             .expect("the round prepares");

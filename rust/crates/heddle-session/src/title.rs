@@ -696,6 +696,7 @@ mod tests {
                     endpoint: "scripted".to_string(),
                     model: model.map(str::to_string),
                     reasoning_effort: None,
+                    reasoning_effort_default: None,
                     messages: 1,
                     tools: Vec::new(),
                     estimated_tokens: None,

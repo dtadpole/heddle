@@ -33,6 +33,18 @@ test('an attribute that is not on the list is dropped, including handlers', () =
   assert.equal(sanitizeHtml('<p style="position:fixed">x</p>'), '<p>x</p>')
 })
 
+test('unknown Unicode attribute names preserve content', () => {
+  // TypeScript control for the Rust scanner's UTF-8 cursor; no product or attribute grammar change.
+  for (const name of ['é', '文字', '😀', 'unknowné', 'unknown文字', 'unknown😀']) {
+    assert.equal(sanitizeHtml(`<p ${name}="x">ok</p>`), '<p>ok</p>')
+    assert.equal(
+      sanitizeHtml(`<p ${name}="x" title="文字 😀" width="12">ok</p>`),
+      '<p title="文字 😀" width="12">ok</p>',
+      `allowed attributes after ${name} still retain their values`,
+    )
+  }
+})
+
 test('a URL attribute is decided by the caller', () => {
   const url = (value: string) => (value.startsWith('https://') ? value : null)
   assert.equal(sanitizeHtml('<a href="https://ok.example">x</a>', { url }), '<a href="https://ok.example">x</a>')

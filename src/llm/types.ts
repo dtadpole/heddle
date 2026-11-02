@@ -446,6 +446,13 @@ export interface Adapter {
  */
 export const CONTEXT_WINDOW_EXCEEDED = 'CONTEXT_WINDOW_EXCEEDED'
 
+/**
+ * The code a refusal that says the account's quota or balance is spent is normalized to, at any status (S31). DSH's
+ * `QUOTA_EXCEEDED_CODE` (`dsh-llm`), which its retry policy never repeats: a quota-worded 429 is not a rate limit, and
+ * the provider-retry decision keeps any code that is not `HTTP` (`retryFailureCode`).
+ */
+export const QUOTA_EXCEEDED = 'QUOTA'
+
 /** A failure with the endpoint and status attached, so a caller can diagnose it. */
 export class ModelError extends Error {  readonly endpoint: string
   readonly status?: number

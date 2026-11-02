@@ -17,7 +17,7 @@ The Rust port of the agentic loop, turns and subagents.
 | | |
 |---|---|
 | Ported from | `src/agent/loop.ts`, `src/agent/turns.ts`, `src/agent/subagent.ts`, `src/tools/subagent.ts`, `src/plugins/turns.ts`, `src/plugins/subagent-tool.ts` |
-| Judged by | `_verifiers_/50-agentic-loop` (`check.mjs`, `check-subagents.mjs`), through the `heddle` binary |
+| Judged by | `_verifiers_/50-agentic-loop` (`check.mjs`, `check-subagents.mjs`, `check-subagent-restart.mjs`), through the `heddle` binary |
 | Sources | [`src/`](src/INDEX.md) |
 | Unit tests | `cargo test --manifest-path rust/Cargo.toml -p heddle-agent` |
 
@@ -32,6 +32,7 @@ The Rust port of the agentic loop, turns and subagents.
 | `TurnResult`, `ToolCallRecord`, `Denial`, `ContextSummary`, `TurnError` | the turn's outcome, serialized in the TypeScript JSON shape | `heddle` (`--json`), `heddle-server` |
 | `TurnRegistry`, `LiveTurn` | live turns per session: `begin(session, caller_token)`, `is_running`, `running`, `abort` | `heddle-team` (`list_agents`, `interrupt_agent`), `heddle-server` (Stop) |
 | `delegate_subagent`, `subagent_tools`, `subagent_runner`, `SubagentConfig`, `SubagentLimits`, `SubagentError(Code)`, `final_assistant_text`, `parent_facts` | delegation to a child agent in its own session; the `delegate` tool; the `subagent-tool` row (`maxDepth` 2, `maxActive` 1) | `heddle` (boot), `heddle-team` |
+| `SubagentService::report_interrupted` (`_at`), `SubagentStopReason::Interrupted`, `INTERRUPTED_DIAGNOSTIC`, `INTERRUPTED_REPORT_WINDOW_MS` | the start sweep for background children a previous process left mid-turn (#170): each is closed in its log (`SubagentStore::close_interrupted`) and its parent gets the interrupted notice, once; a child cut more than a day before is left as it is | `heddle web` (boot notes) |
 | `ModelPort`, `SessionPort`, `ContextPort`, `TurnHooks`, `SubagentStore`, `SubagentRun` | what a turn and a delegation ask of other crates | implemented over `heddle-llm`, `heddle-session`, `heddle-context`, `heddle-events` |
 | `adapters::LlmModel` | the `ModelPort` over `heddle-llm`'s `ModelService`: a Stop drops the provider stream, an unknown endpoint is one `NO_ENDPOINT` error item, the error keeps its code | the binary (boot) |
 | `adapters::Sessions`, `adapters::SessionSubagents` | the `SessionPort` and the `SubagentStore` over `heddle-session`'s `SessionService`; `model/request` written through the session crate's record in the TypeScript field order | the binary (boot) |
