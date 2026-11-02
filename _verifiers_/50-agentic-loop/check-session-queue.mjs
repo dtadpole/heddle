@@ -89,6 +89,7 @@ const sleep = (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise,
 async function double() {
   const requests = []
   const held = []
+  const seen = new Set()
   const send = (response, text) => {
     response.writeHead(200, { 'content-type': 'text/event-stream' })
     for (const frame of [{ choices: [{ index: 0, delta: { content: text }, finish_reason: null }] }, { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }]) response.write(`data: ${JSON.stringify(frame)}\n\n`)
@@ -108,10 +109,13 @@ async function double() {
       requests.push(raw)
       if (raw.includes('Create a concise title')) return send(response, 'A title')
       const body = JSON.parse(raw)
-      // Held: a prompt that says HOLD and has no answer after it yet (context notes may follow it as user messages).
+      // Held: the first request for each prompt that says HOLD (context notes may follow it as user messages; a stopped
+      // turn leaves its prompt unanswered, so a later request carries it again and must not be held a second time).
       const messages = body.messages ?? []
       const at = messages.findLastIndex((message) => JSON.stringify(message.content ?? '').includes('HOLD'))
-      if (at !== -1 && !messages.slice(at + 1).some((message) => message.role === 'assistant')) {
+      const key = at === -1 ? undefined : JSON.stringify(messages[at].content)
+      if (key !== undefined && !seen.has(key)) {
+        seen.add(key)
         held.push(() => send(response, 'held answer'))
         return
       }
@@ -245,6 +249,55 @@ test('#177: a prompt queued during a goal round runs before the next round', asy
     assert.ok(queuedAt !== -1 && round2At !== -1 && queuedAt < round2At, `the queued prompt ran before round 2\n${JSON.stringify(texts.map((text) => text.slice(0, 40)))}`)
     h.provider.release()
     await h.post('/api/goal', { session, action: 'clear' })
+  } finally {
+    h.close()
+  }
+})
+
+test('#162: a Stop keeps the queue and starts nothing; the next send runs the held rows first, then itself', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  const h = await harness('session-queue-stop')
+  try {
+    const first = await h.post('/api/turn', { prompt: 'HOLD the first turn', folder: h.work, new: true, detach: true })
+    const session = first.body.session
+    await until(() => h.provider.held() === 1, 10_000, 'the first turn to reach the model')
+    const queued = await h.post('/api/turn', { session, prompt: 'HELD-1', queue: true, requestId: 'request-held-1', detach: true })
+    assert.equal(queued.body.queued, true, JSON.stringify(queued.body))
+    const stop = await h.post(`/api/sessions/${session}/stop`, {})
+    assert.equal(stop.status, 200, JSON.stringify(stop.body))
+    await until(() => h.log(session).some((event) => event.type === 'turn/completed'), 10_000, 'the stopped turn to end')
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 2_000))
+    assert.ok(!userTexts(h.log(session)).includes('HELD-1'), 'nothing started on its own after the Stop (DSH keepInbox)')
+    assert.deepEqual((await h.get(`/api/sessions/${session}/queue`)).body.items.map((item) => item.text), ['HELD-1'], 'the queue was kept')
+    h.provider.release()
+    const next = await h.post('/api/turn', { session, prompt: 'AFTER-STOP', detach: true })
+    assert.equal(next.status, 202, JSON.stringify(next.body))
+    await until(() => userTexts(h.log(session)).includes('AFTER-STOP'), 20_000, 'the new send to run')
+    const texts = userTexts(h.log(session))
+    assert.ok(texts.indexOf('HELD-1') !== -1 && texts.indexOf('HELD-1') < texts.indexOf('AFTER-STOP'), `the held row ran first, then the new send\n${JSON.stringify(texts)}`)
+  } finally {
+    h.close()
+  }
+})
+
+test('#162: Steer moves a queued row into the running turn in one step, and is refused with nothing running', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  const h = await harness('session-queue-steer')
+  try {
+    const first = await h.post('/api/turn', { prompt: 'HOLD the first turn', folder: h.work, new: true, detach: true })
+    const session = first.body.session
+    await until(() => h.provider.held() === 1, 10_000, 'the first turn to reach the model')
+    const queued = await h.post('/api/turn', { session, prompt: 'STEERED-162', queue: true, requestId: 'request-steer', detach: true })
+    const steered = await h.post(`/api/sessions/${session}/queue/steer`, { id: queued.body.id })
+    assert.deepEqual([steered.status, steered.body.outcome], [200, 'steered'], JSON.stringify(steered.body))
+    assert.deepEqual((await h.get(`/api/sessions/${session}/queue`)).body.items, [], 'the row left the queue')
+    h.provider.release()
+    await until(() => userTexts(h.log(session)).includes('STEERED-162') && h.log(session).some((event) => event.type === 'turn/completed'), 20_000, 'the steer to land')
+    assert.equal(h.log(session).filter((event) => event.type === 'turn/completed').length, 1, 'it landed in the running turn, not a turn of its own')
+    const idle = await h.post('/api/turn', { session, prompt: 'never', queue: true, requestId: 'request-idle', detach: true })
+    await until(() => h.log(session).filter((event) => event.type === 'turn/completed').length >= 2, 10_000, 'the idle send to run')
+    const refused = await h.post(`/api/sessions/${session}/queue/steer`, { id: idle.body.id ?? 'inbox-none' })
+    assert.equal(refused.status, 409, JSON.stringify(refused.body))
   } finally {
     h.close()
   }

@@ -84,6 +84,7 @@ const sleep = (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise,
 async function double() {
   const requests = []
   const held = []
+  const seen = new Set()
   const send = (response, text) => {
     response.writeHead(200, { 'content-type': 'text/event-stream' })
     for (const frame of [{ choices: [{ index: 0, delta: { content: text }, finish_reason: null }] }, { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }]) response.write(`data: ${JSON.stringify(frame)}\n\n`)
@@ -103,10 +104,13 @@ async function double() {
       requests.push(raw)
       if (raw.includes('Create a concise title')) return send(response, 'A title')
       const body = JSON.parse(raw)
-      // Held: a prompt that says HOLD and has no answer after it yet (context notes may follow it as user messages).
+      // Held: the first request for each prompt that says HOLD (context notes may follow it as user messages; a stopped
+      // turn leaves its prompt unanswered, so a later request carries it again and must not be held a second time).
       const messages = body.messages ?? []
       const at = messages.findLastIndex((message) => JSON.stringify(message.content ?? '').includes('HOLD'))
-      if (at !== -1 && !messages.slice(at + 1).some((message) => message.role === 'assistant')) {
+      const key = at === -1 ? undefined : JSON.stringify(messages[at].content)
+      if (key !== undefined && !seen.has(key)) {
+        seen.add(key)
         held.push(() => send(response, 'held answer'))
         return
       }
