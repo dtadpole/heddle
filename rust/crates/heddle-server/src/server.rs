@@ -1654,7 +1654,17 @@ async fn steer_session(
         },
         None => Vec::new(),
     };
-    if !state.runs().is_running(id.as_str()) {
+    // A one-shot delegate child takes no steer from here, as it takes no turn (the turn route's rule): DSH answers
+    // `session/agent-busy` for a session subagent routing owns, before any steer gate. A teammate passes.
+    if let Some(refusal) =
+        subagent_turn_refusal(state.harness().sessions.meta(id.as_str()).as_ref())
+    {
+        return respond::json_compact(StatusCode::CONFLICT, &refusal);
+    }
+    // Any running turn takes a steer, not only one this server started (issue #176): a goal round, a teammate's or a
+    // child's turn runs on the agent runtime and reads the session's appended messages at its next step, as DSH's
+    // agent takes a steer into whatever turn is running.
+    if !state.runs().is_running(id.as_str()) && !state.harness().turns.is_live(id.as_str()) {
         return respond::error_with_code(
             StatusCode::CONFLICT,
             "the current turn no longer accepts steering",
@@ -6201,6 +6211,94 @@ mod tests {
         };
         assert_eq!(running(child), Some(Value::Bool(true)), "{body}");
         assert_eq!(running(parent), Some(Value::Bool(false)), "{body}");
+    }
+
+    /// Issue #176: a turn the agent runtime holds (a goal round, a teammate's turn) takes a steer; an idle session is
+    /// still refused with `session/steer-unavailable`; and a running one-shot delegate child is refused with
+    /// `session/agent-busy` first, byte for byte the turn route's refusal, as DSH's ownership check comes before the steer.
+    #[tokio::test]
+    async fn a_turn_the_agent_runtime_holds_takes_a_steer_but_a_delegate_child_and_an_idle_session_do_not()
+     {
+        let live = "session-00000000-0000-0000-0000-000000000001";
+        let child = "session-33333333-3333-3333-3333-333333333333";
+        let mate = "session-44444444-4444-4444-4444-444444444444";
+        let meta = |id: &str, rest: Value| SessionMeta {
+            id: id.into(),
+            cwd: Some("/work".into()),
+            endpoint: Some("double".into()),
+            turns: 1,
+            rest: rest.as_object().cloned().unwrap_or_default(),
+            ..SessionMeta::default()
+        };
+        let sessions = Sessions {
+            metas: vec![
+                meta(live, json!({})),
+                meta(
+                    child,
+                    json!({"parentSession": "session-p", "origin": "subagent", "delegationDepth": 1}),
+                ),
+                meta(
+                    mate,
+                    json!({"parentSession": "session-l", "origin": "subagent", "delegationDepth": 1, "teamId": "session-l"}),
+                ),
+            ],
+            events: HashMap::new(),
+            modes: std::sync::Mutex::new(Vec::new()),
+            recorded: std::sync::Mutex::new(Vec::new()),
+            flags: FlagsAnswer::Written,
+        };
+        let runner = Arc::new(LiveTurns {
+            live: vec![live.to_owned(), child.to_owned(), mate.to_owned()],
+            interrupted: std::sync::Mutex::new(Vec::new()),
+        });
+        let (router, _) = ServerBuilder::new(
+            Harness::new(
+                Arc::new(sessions),
+                Arc::new(Models),
+                runner,
+                Arc::new(Sandbox),
+                PathBuf::from("/work"),
+            ),
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("steer-live-turn")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let steer = |id: &str| format!("/api/sessions/{id}/steer");
+        let body = r#"{"prompt":"look at the tests too"}"#;
+
+        for id in [live, mate] {
+            let (status, bytes) = post_json(&router, &steer(id), &cookie, body).await;
+            assert_eq!(status, StatusCode::OK, "{id}: {}", body_text(&bytes));
+            let answer: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(answer["accepted"], true);
+        }
+
+        let (status, bytes) = post_json(&router, &steer(child), &cookie, body).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{}", body_text(&bytes));
+        assert_eq!(
+            body_text(&bytes),
+            format!(
+                "{{\"error\":\"session \\\"{child}\\\" is owned by subagent routing\",\"code\":\"session/agent-busy\",\"reason\":\"use subagent delivery for this child session\"}}\n"
+            )
+        );
+
+        let idle = "session-00000000-0000-0000-0000-000000000009";
+        let (status, bytes) = post_json(
+            &router,
+            &steer(idle),
+            &cookie,
+            r#"{"prompt":"anyone there"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{}", body_text(&bytes));
+        let answer: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(answer["code"], "session/steer-unavailable");
     }
 
     #[tokio::test]
