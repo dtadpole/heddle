@@ -535,8 +535,6 @@ test('N4: a one-column list that could not read the sessions still lets go of th
     'env',
     `const { notes, painted, body, place } = env
     let heldTreeFocus = null
-    let treeGeneration = 0
-    let treeLanded = 0
     let archiveMode = 'hide'
     let current = null
     const document = { activeElement: body, body }

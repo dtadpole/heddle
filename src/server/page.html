@@ -21283,6 +21283,34 @@ async function reopenChildGroups(node) {
 }
 
 /**
+ * How many folder reads a drawing off the page keeps out at once (the Page.navigate hangs of 1 Nov): every open folder is
+ * read at once (#143), and a browser opens six connections to one server, one of them the event stream, so three
+ * workspaces with a folder open each asked for six at once and left a navigation waiting. The rest wait their turn.
+ */
+const TREE_FOLDER_READS = 3
+let treeFolderReads = 0
+const treeFolderQueue = []
+
+/**
+ * One folder read of a drawing off the page, as a stand-in for its answer (`ok`, `status`, `json()`), holding one of the
+ * `TREE_FOLDER_READS` places until its body is read.
+ */
+async function readFolderOffPage(url) {
+  if (treeFolderReads < TREE_FOLDER_READS) treeFolderReads += 1
+  else await new Promise((resolve) => treeFolderQueue.push(resolve))
+  try {
+    const response = await fetch(url)
+    const body = await response.json().catch(() => null)
+    return { ok: response.ok, status: response.status, json: async () => body }
+  } finally {
+    /** The place passes to the next read waiting, or is given back. */
+    const next = treeFolderQueue.shift()
+    if (next !== undefined) next()
+    else treeFolderReads -= 1
+  }
+}
+
+/**
  * Draw a node's children, fetching them when they were not part of the answer that drew the node.
  *
  * `offPage` is a redraw's tree drawn off the page (#143): its levels are not on the page while they are read, the drawing
@@ -21309,7 +21337,8 @@ async function loadChildren(node, li, offPage = false) {
       /** Its folder was deleted or moved (#141): said in DSH's words under the Files heading, without a read. */
       if (WorkspaceFolder.gone(node.group)) return paintGoneFolder(group, depth)
       try {
-        const response = await fetch('/api/tree?path=' + encodeURIComponent(node.path) + archiveQuery('&'))
+        const url = '/api/tree?path=' + encodeURIComponent(node.path) + archiveQuery('&')
+        const response = await (offPage ? readFolderOffPage(url) : fetch(url))
         if (!response.ok) {
           /** A folder the server may not read (#106), or one gone since `/api/workspaces` called it there (N1). */
           failed = await failedLevel(response)
@@ -21354,7 +21383,8 @@ async function loadChildren(node, li, offPage = false) {
        * archived flag, so after toggling `Show archived` the roots came back with the archived session and
        * every reopened branch replaced it with the unfiltered list — the row existed and could not be seen.
        */
-      const response = await fetch('/api/tree?path=' + encodeURIComponent(node.path) + archiveQuery('&'))
+      const url = '/api/tree?path=' + encodeURIComponent(node.path) + archiveQuery('&')
+      const response = await (offPage ? readFolderOffPage(url) : fetch(url))
       if (!response.ok) {
         /**
          * A folder the server may not read (#106), or one deleted or moved since its level was drawn (N1): DSH's one failed
@@ -21493,14 +21523,41 @@ function treeIndex() {
  */
 let searchIndexRead = null
 
+/**
+ * A list read (`/api/workspaces`, `/api/sessions`) shared while it is out: `url → { epoch, answer }`, `answer` a promise of
+ * `{ ok, status, body }` (an answer that is not 2xx keeps the body it has, or `null`). The tree's drawing reads fresh
+ * (`fresh`), and the search index takes a read still out from the same list (`searchEpoch`) rather than asking again, so a
+ * search following a list change on the tree's debounce asks the server once for each list, not twice (the Page.navigate
+ * hangs of 1 Nov: six requests at once). A read started before the list last changed is never shared.
+ */
+const listReads = new Map()
+function readList(url, fresh = false) {
+  const out = listReads.get(url)
+  if (!fresh && out !== undefined && out.epoch === searchEpoch) return out.answer
+  const entry = { epoch: searchEpoch, answer: null }
+  entry.answer = fetch(url).then(async (response) => ({
+    ok: response.ok,
+    status: response.status,
+    body: response.ok ? await response.json() : await response.json().catch(() => null),
+  }))
+  listReads.set(url, entry)
+  const done = () => {
+    if (listReads.get(url) === entry) listReads.delete(url)
+  }
+  entry.answer.then(done, done)
+  return entry.answer
+}
+
 async function loadSearchIndex() {
   if (searchIndex !== null) return searchIndex
   if (searchIndexRead !== null && searchIndexRead.epoch === searchEpoch) return searchIndexRead.promise
   const epoch = searchEpoch
   /** A body, `null` for an answer that is not 2xx, `undefined` for a request that got no answer. */
   const read = (url) => fetch(url).then((response) => (response.ok ? response.json() : null)).catch(() => undefined)
+  /** The two lists the tree's drawing may be reading already for this list (`readList`). */
+  const list = (url) => readList(url).then((answer) => (answer.ok ? answer.body : null)).catch(() => undefined)
   const reading = (async () => {
-    const [sessions, treeBody, workspaceBody] = await Promise.all([read('/api/sessions'), read('/api/tree'), read('/api/workspaces')])
+    const [sessions, treeBody, workspaceBody] = await Promise.all([list('/api/sessions'), read('/api/tree'), list('/api/workspaces')])
     /**
      * A refresh came while this read was out: it keeps nothing, and answers the newer index — or shares the newer read
      * still in flight (M1), else reads again.
@@ -21932,12 +21989,10 @@ document.getElementById('session-search').addEventListener('keydown', (event) =>
 async function renderFlatList() {
   /**
    * The rows on screen stay while the index is read and are replaced in one step once it is in (#143): the list was
-   * emptied first, so for a read's round trip it showed no row and no selection. A drawing draws nothing once a newer one
-   * has landed (`treeLanded`; `renderTree` counts the drawings in `treeGeneration`).
+   * emptied first, so for a read's round trip it showed no row and no selection. One drawing runs at a time
+   * (`renderTree`), so no older one lands over it.
    */
-  const generation = treeGeneration
   const index = await loadSearchIndex()
-  if (generation < treeLanded) return
   const focus = treeFocus()
   heldTreeFocus = focus
   rowIndex.clear()
@@ -22036,44 +22091,47 @@ async function renderFlatList() {
 }
 
 /**
- * The tree's drawings, counted (#143). Every `renderTree` call is one; `treeRead` is the newest whose two list reads were
- * taken in, `treeLanded` the newest the page shows. A drawing lands unless a newer one already has, so its caller waits
- * for its own drawing at most, however fast refreshes come (developer-ten's N1: when a drawing gave way to any newer one
- * that had merely started, refreshes 400 ms apart over slow folder reads let none land, and every awaiting caller and the
- * tree waited with them). A drawing whose reads answered after a newer one's were taken in draws nothing either, since
- * its answers are older than those; its caller goes on once that newer one lands (`treeLandedAt`).
+ * One tree drawing at a time (#143). A drawing reads both lists and then every open folder, so two at once asked for
+ * every folder twice; with refreshes coming faster than a drawing takes (a refresh after every message, answer and turn
+ * end, any session's, and a page's own action redrawing as well), the page kept more requests in flight than a browser
+ * opens to one server (six), and a navigation in the same browser waited behind them (the Page.navigate hangs of 1 Nov,
+ * five connections held for 20 s). A drawing asked for while one runs is drawn once that one is done, one for every
+ * caller that asked meanwhile (`treeFollowUp`), as `reacquireBaselines` does with its reads; so a caller waits for at
+ * most the drawing in flight and one more (developer-ten's N1), and the page draws the newest answer last.
  */
-let treeGeneration = 0
-let treeRead = 0
-let treeLanded = 0
-/** Callers waiting for a drawing to land: `{ generation, resolve }`, let go once one at least that new has. */
-let treeWaiters = []
-
-/** Resolves once a drawing at least as new as `generation` has landed: at once when one has. */
-function treeLandedAt(generation) {
-  if (treeLanded >= generation) return Promise.resolve()
-  return new Promise((resolve) => treeWaiters.push({ generation, resolve }))
-}
-
-/** A drawing landed (or failed, which leaves the page as it was): the newest the page shows, and its waiters go on. */
-function treeDrawn(generation) {
-  if (generation > treeLanded) treeLanded = generation
-  const waiting = treeWaiters
-  treeWaiters = []
-  for (const waiter of waiting) {
-    if (waiter.generation <= treeLanded) waiter.resolve()
-    else treeWaiters.push(waiter)
-  }
-  return undefined
-}
+let treeDrawing = false
+/** The drawing asked for while one runs: `{ promise, resolve }`, drawn once that one is done, shared by everyone who asked. */
+let treeFollowUp = null
 
 async function renderTree() {
+  if (treeDrawing) {
+    if (treeFollowUp === null) {
+      let resolve
+      const promise = new Promise((done) => {
+        resolve = done
+      })
+      treeFollowUp = { promise, resolve }
+    }
+    return treeFollowUp.promise
+  }
+  treeDrawing = true
+  try {
+    await drawTree()
+  } finally {
+    treeDrawing = false
+    const next = treeFollowUp
+    treeFollowUp = null
+    if (next !== null) void renderTree().then(next.resolve, next.resolve)
+  }
+}
+
+/** One drawing of the tree, or of the one-column list; `renderTree` runs one at a time. */
+async function drawTree() {
   /** The redraw replaces every row; the keyboard's place in the tree is given back once it is drawn (#92). */
   let focus = treeFocus()
-  const generation = ++treeGeneration
   if (groupingMode === 'list') {
     await renderFlatList()
-    return treeDrawn(generation)
+    return
   }
   /**
    * The workspace tree (G2): DSH's workspace browser drawn from two answers — `/api/workspaces` (each workspace with its
@@ -22083,34 +22141,30 @@ async function renderTree() {
   let workspaces
   let sessions
   try {
-    const [workspaceResponse, sessionResponse] = await Promise.all([fetch('/api/workspaces'), fetch('/api/sessions')])
-    /** A newer drawing landed while these were read: the page already shows newer answers (#143). */
-    if (generation < treeLanded) return treeLandedAt(generation)
-    if (workspaceResponse.status === 503) {
+    /** Fresh reads, which the search index shares while they are out (`readList`). */
+    const [workspaceAnswer, sessionAnswer] = await Promise.all([readList('/api/workspaces', true), readList('/api/sessions', true)])
+    if (workspaceAnswer.status === 503) {
       workspaceRoutes = 'absent'
       treeList.replaceChildren()
       rowIndex.clear()
       setNote('this profile does not load the workspace plugin')
       paintConversationTarget()
-      return treeDrawn(generation)
+      return
     }
-    if (!workspaceResponse.ok) {
+    if (!workspaceAnswer.ok) {
       workspaceRoutes = 'absent'
       /** A server older than the route still lists every session, so the page says so and shows them flat. */
       await renderFlatList()
-      if (generation > treeLanded) setNote('this server predates the workspace tree, so sessions are listed in one column')
-      return treeDrawn(generation)
+      setNote('this server predates the workspace tree, so sessions are listed in one column')
+      return
     }
     workspaceRoutes = 'served'
-    workspaces = (await workspaceResponse.json()).workspaces ?? []
-    sessions = sessionResponse.ok ? await sessionResponse.json() : []
+    workspaces = workspaceAnswer.body.workspaces ?? []
+    sessions = sessionAnswer.ok ? sessionAnswer.body : []
   } catch (error) {
-    if (generation > treeLanded) setNote('could not read the workspaces: ' + (error && error.message))
-    return treeDrawn(generation)
+    setNote('could not read the workspaces: ' + (error && error.message))
+    return
   }
-  /** A newer drawing's answers were taken in first: these are older, and that one lands on its own (#143). */
-  if (generation < treeRead || generation < treeLanded) return treeLandedAt(generation)
-  treeRead = generation
   /** The whole answer, before the archive filter draws from it: New session's lookup reads this one (#119). */
   if (Array.isArray(workspaces)) {
     knownWorkspaces = workspaces
@@ -22192,14 +22246,12 @@ async function renderTree() {
   /** The watermarks the open groups' sessions were just drawn with: Show more pressed while the levels are read moves one. */
   const marks = watermarkState()
   const opened = await drawing
-  /** Only a newer drawing that has landed stops this one: one that has merely started does not (N1). */
-  if (generation < treeLanded) return treeLandedAt(generation)
   /**
    * A group opened or folded while the levels were read — by a person, a reveal, or a session opened from elsewhere — and
    * the drawing would undo it: the tree is drawn again from the shape as it is now, and the page keeps the person's act
    * until then.
    */
-  if (!sameMembers(opening, treeOpening())) return renderTree()
+  if (!sameMembers(opening, treeOpening())) return drawTree()
   if (watermarkState() !== marks) repaintSessionRowsOffPage(built)
   /** The selection is marked in the new tree, from its own rows, so the open session's row goes in selected (#143, N2). */
   const drawn = rowsIn(built)
@@ -22216,7 +22268,6 @@ async function renderTree() {
   indexDrawnRows()
   /** A standing search follows the redraw, as each `toggle` that reopened a group used to make it. */
   if (opened > 0) applySearch()
-  treeDrawn(generation)
   /** The rows just drawn are what the new conversation's place is read from (#134). */
   paintConversationTarget()
   /**

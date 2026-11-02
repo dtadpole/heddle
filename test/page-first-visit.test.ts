@@ -238,6 +238,6 @@ test('the memory of a workspace that is no longer registered is forgotten when t
   assert.deepEqual(reconcile(shared, A), { last: A, stored: JSON.stringify({ path: A }) }, 'a registered workspace is kept')
   assert.deepEqual(reconcile([shared[1]], A), { last: null, stored: '{}' }, 'a deleted one is forgotten, in memory and in storage')
   assert.deepEqual(reconcile([{ ...shared[0], origin: 'auto' }], A), { last: null, stored: '{}' }, 'an adopted root at that path is no registered workspace')
-  const tree = source('renderTree')
+  const tree = source('drawTree')
   assert.match(tree, /if \(Array\.isArray\(workspaces\)\) \{\s*knownWorkspaces = workspaces\s*forgetRemovedWorkspace\(workspaces\)/, 'the tree forgets it where it keeps the registry')
 })
