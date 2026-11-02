@@ -2849,8 +2849,12 @@
   }
   #timeline:empty { display: none; }
   .tr-lanes { position: relative; }
-  /** An overview tick's details, 500 ms into a hover (DSH's overview): its turn and kinds, then its clock and duration. */
-  #timeline-tip { position: absolute; top: calc(100% + .25rem); z-index: 5; display: flex; flex-direction: column; gap: .1rem; max-width: 220px; padding: .3rem .5rem; font-size: .72rem; white-space: nowrap; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); pointer-events: none; }
+  /**
+   * An overview tick's details, 500 ms into a hover (DSH's overview): its turn and kinds, then its clock and duration.
+   * Fixed, as DSH's tooltip floats in its own layer: placed under the strip inside it, the strip's clip hid it whole,
+   * and a 220 px box cut the TTFT line (developer-ten's N5). The script places it by the tick, inside the window.
+   */
+  #timeline-tip { position: fixed; top: 0; left: 0; z-index: 40; display: flex; flex-direction: column; gap: .1rem; max-width: calc(100vw - 16px); padding: .3rem .5rem; font-size: .72rem; white-space: nowrap; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); pointer-events: none; }
   #timeline-tip[hidden] { display: none; }
   #timeline-tip span { font-family: var(--mono); opacity: .75; }
   .tr-lane { position: relative; height: 15px; }
@@ -3336,6 +3340,14 @@
   .sched-zone-heading { padding: 6px 10px 2px; font-size: 11px; color: var(--text-3); }
   .sched-zone-empty { padding: 8px 10px; font-size: 12px; color: var(--text-3); }
   #schedules-detail #schedule-drawer { position: static; flex: 1; width: auto; min-height: 0; border-left: 0; box-shadow: none; }
+
+  /* Sent-human credential presentation (#84). Mask is actual text, not concealed raw glyphs. */
+  .user-secret { display: inline; font-family: var(--font-mono, monospace); font-size: .875em; }
+  .user-secret-value { overflow-wrap: anywhere; }
+  .user-secret-toggle { display: inline-flex; vertical-align: -.12em; padding: 0; margin: 0 2px;
+    border: 0; background: none; color: inherit; cursor: pointer; }
+  .user-secret-toggle svg { width: 1em; height: 1em; }
+  .user-secret-toggle:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; border-radius: 2px; }
 </style>
 </head>
 <body>
@@ -3622,7 +3634,7 @@
       through this server; every capability that could act is left out, so no script runs and no form submits. The
       frame's own sanitising happens before anything is put inside it.
     -->
-    <div id="file-html" hidden><iframe id="html-view" title="the document" sandbox="allow-same-origin"></iframe></div>
+    <div id="file-html" hidden><iframe id="html-view" title="the document" sandbox="allow-same-origin" referrerpolicy="no-referrer"></iframe></div>
   </div>
   <!--
     The queue dock: messages that have been submitted and are waiting for their own turn.
@@ -3824,7 +3836,7 @@
     once, before the one transition that removes the file boundary.
   -->
   <div id="access-menu" role="menu" aria-label="the access mode this session runs under" hidden></div>
-  <div id="access-dialog" role="dialog" aria-modal="true" aria-label="Enable Full access?" hidden>
+  <div id="access-dialog" role="dialog" aria-modal="true" aria-label="Enable Full access?" tabindex="-1" hidden>
     <div class="card">
       <div class="head">
         <h2 id="access-dialog-title">Enable Full access?</h2>
@@ -4213,6 +4225,668 @@ function triggerNotice(trigger, text) {
   return notice
 }
 
+/* user-secrets:begin */
+/**
+ * #84 UI presentation only: published credential formats in sent human/admitted steering text.
+ * No message/model/copy/log rewriting; arbitrary password prose and assignments are not guessed.
+ * Queue previews/titles and /goal input/argument displays use the same full-text noninteractive projection.
+ * Composer drafts, goal results/bar, triggers, tools and assistant text remain outside this scope.
+ * Scanner/mask tables adapted without semantic changes from installed
+ * @deepseek-ai/dsh-client-ui-secret-mask 0.2.1-rc.2 (lib/client.js). MIT attribution follows.
+ * The original scanner uses UTF16 offsets, code-point masks, bounded checks and memoized sticky runs.
+ */
+/*
+MIT License
+
+Copyright (c) 2026 DeepSeek
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
+const { scanUserCredentials, maskUserText, renderSentUserText } = (() => {
+const prefixed = (literal, shape, run, min, max = 0) => ({
+	literal,
+	kind: 2,
+	shape,
+	run,
+	min,
+	max
+});
+/** Every prefixed format matches more than the 8 characters a mask leaves readable. */
+const CREDENTIAL_FORMATS = [
+	{
+		literal: "-----BEGIN ",
+		kind: 0,
+		shape: 0,
+		run: 0,
+		min: 0,
+		max: 0
+	},
+	{
+		literal: "://",
+		kind: 1,
+		shape: 0,
+		run: 0,
+		min: 0,
+		max: 0
+	},
+	prefixed("sk-", 2, 1, 20),
+	prefixed("AIza", 3, 1, 35),
+	prefixed("ghp_", 0, 2, 36),
+	prefixed("gho_", 0, 2, 36),
+	prefixed("ghu_", 0, 2, 36),
+	prefixed("ghs_", 0, 2, 36),
+	prefixed("ghr_", 0, 2, 36),
+	prefixed("github_pat_", 0, 4, 22),
+	prefixed("glpat-", 0, 1, 20),
+	prefixed("npm_", 0, 2, 36),
+	prefixed("hf_", 0, 2, 30),
+	prefixed("AKIA", 1, 16, 16, 16),
+	prefixed("ASIA", 1, 16, 16, 16),
+	prefixed("LTAI", 1, 2, 12, 20),
+	prefixed("AKID", 1, 2, 28, 36),
+	prefixed("xoxa-", 0, 8, 10),
+	prefixed("xoxb-", 0, 8, 10),
+	prefixed("xoxp-", 0, 8, 10),
+	prefixed("xoxr-", 0, 8, 10),
+	prefixed("xoxs-", 0, 8, 10),
+	prefixed("sk_live_", 0, 2, 16),
+	prefixed("sk_test_", 0, 2, 16),
+	prefixed("rk_live_", 0, 2, 16),
+	prefixed("rk_test_", 0, 2, 16),
+	prefixed("whsec_", 0, 2, 24),
+	prefixed("eyJ", 4, 1, 8, 2048)
+];
+/** Leading characters of a prefixed key left readable: the provider prefix and little else. */
+const VISIBLE_PREFIX = 8;
+const SHARED_MARKS = 4096;
+/** Builds masks; owns the shared mark strings and its sticky run pattern. */
+var CredentialMasks = class {
+	marksOnly = "*".repeat(SHARED_MARKS);
+	marksLf = `${this.marksOnly}\n`;
+	marksCr = `${this.marksOnly}\r`;
+	/** Code units that `lines` counts without inspection: neither line breaks nor surrogates. Set `lastIndex` before each test. */
+	ordinary = /[^\r\n\ud800-\udfff]*/y;
+	/**
+	* The display form of `text[start, end)`, whose earliest candidate has `kind`.
+	* @param text - the queried text.
+	* @param kind - the literal kind of the range's earliest candidate.
+	* @param plain - the range holds only prefixed-format characters: ASCII without line breaks.
+	* @param start - first offset of the range.
+	* @param end - offset after the range.
+	* @returns the mask; line breaks stay in place, one mark per code point.
+	*/
+	masked(text, kind, plain, start, end) {
+		if (kind === 1) return this.range(text, start, end);
+		if (kind === 2) return text.slice(start, start + VISIBLE_PREFIX) + (plain ? this.marks(end - start - VISIBLE_PREFIX) : this.range(text, start + VISIBLE_PREFIX, end));
+		return this.keyBlock(text, start, end);
+	}
+	/** `count` marks: up to the shared string's length, one slice of it. */
+	marks(count) {
+		return count <= SHARED_MARKS ? this.marksOnly.slice(0, count) : "*".repeat(count);
+	}
+	/** `count` marks and then the line break `code`, 10 or 13: one slice where `marks` would be one. */
+	marksThen(count, code) {
+		return count <= SHARED_MARKS ? (code === 10 ? this.marksLf : this.marksCr).slice(SHARED_MARKS - count) : "*".repeat(count) + (code === 10 ? "\n" : "\r");
+	}
+	/**
+	* Keep the `BEGIN` line, the `END` line when present, and every line break; a block written on
+	* one line is masked whole. Both searches stay inside the range, so they cost what the mask costs.
+	*/
+	keyBlock(text, start, end) {
+		let bodyStart = start;
+		for (let index = start; index < end; index++) if (text.charCodeAt(index) === 10) {
+			bodyStart = index + 1;
+			break;
+		}
+		let bodyEnd = end;
+		for (let index = end - 9; index >= bodyStart; index--) if (text.charCodeAt(index) === 10 && text.startsWith("-----END", index + 1)) {
+			bodyEnd = index;
+			break;
+		}
+		const body = bodyEnd === text.length || text.charCodeAt(bodyEnd) === 10 || text.charCodeAt(bodyEnd) === 13 ? this.lines(text, bodyStart, bodyEnd) : this.range(text, bodyStart, bodyEnd);
+		return text.slice(start, bodyStart) + body + text.slice(bodyEnd, end);
+	}
+	/**
+	* `text[start, end)` with every character except line breaks replaced; a surrogate pair is one
+	* character, as `[^\r\n]` with the `u` flag counts it. A character loop: a native run could read far past `end`.
+	*/
+	range(text, start, end) {
+		let masked = "";
+		let count = 0;
+		for (let index = start; index < end; index++) {
+			const code = text.charCodeAt(index);
+			if (code === 10 || code === 13) {
+				masked += this.marksThen(count, code);
+				count = 0;
+				continue;
+			}
+			if (code >= 55296 && code <= 56319 && index + 1 < end) {
+				const next = text.charCodeAt(index + 1);
+				if (next >= 56320 && next <= 57343) index++;
+			}
+			count++;
+		}
+		return masked + this.marks(count);
+	}
+	/** `range` for a body that ends at a line break or the end of the text, where native runs stop. */
+	lines(text, start, end) {
+		const ordinary = this.ordinary;
+		let masked = "";
+		let count = 0;
+		let index = start;
+		while (index < end) {
+			ordinary.lastIndex = index;
+			ordinary.test(text);
+			const stop = Math.min(ordinary.lastIndex, end);
+			count += stop - index;
+			if (stop === end) break;
+			const code = text.charCodeAt(stop);
+			index = stop + 1;
+			if (code === 10 || code === 13) {
+				masked += this.marksThen(count, code);
+				count = 0;
+				continue;
+			}
+			if (code <= 56319 && index < end) {
+				const next = text.charCodeAt(index);
+				if (next >= 56320 && next <= 57343) index++;
+			}
+			count++;
+		}
+		return masked + this.marks(count);
+	}
+};
+const KEY_SLOTS = 0;
+const KEY_NEXT = 8;
+const ALNUM_SLOT = 9;
+const WORD_SLOT = 11;
+const ALNUM_DASH_SLOT = 13;
+const UPPER_ALNUM_SLOT = 15;
+const USER_SLOT = 17;
+const PASSWORD_SLOT = 19;
+const DIGIT_FROM = 21;
+const DIGIT_AT = 22;
+const BLOCK_FROM = 23;
+const BLOCK_END_START = 24;
+const BLOCK_END = 25;
+/** Start of the password that the last address check accepted. */
+const CANDIDATE_START = 26;
+const MEMO_SIZE = 27;
+/** `\s` above ASCII. */
+function isWideSpace(code) {
+	return code === 160 || code === 5760 || code >= 8192 && code <= 8202 || code === 8232 || code === 8233 || code === 8239 || code === 8287 || code === 12288 || code === 65279;
+}
+/** Offset after the run that sticky `pattern` matches at `start`. */
+function runEnd(pattern, text, start) {
+	pattern.lastIndex = start;
+	pattern.test(text);
+	return pattern.lastIndex;
+}
+/**
+* One matcher's scanning state: the tables, its own patterns, and a memo of the
+* last queried text, which it keeps until a query for another text. Queries are
+* synchronous and never re-enter, so the patterns' cursors are never shared.
+*/
+var CredentialScanner = class {
+	classes;
+	literals;
+	literalLength;
+	literalKind;
+	literalShape;
+	literalMin;
+	literalMax;
+	literalOverlap;
+	ending;
+	sharedEndings;
+	/** Memo slot of each prefixed format's run class; 0 for `[A-Za-z0-9_-]`, which has four. */
+	literalSlot;
+	literalPattern;
+	prefixes;
+	keyRun = /[A-Za-z0-9_-]*/y;
+	userRun = /[^\s/:@?#]*/y;
+	passwordRun = /[^\s/@?#]*/y;
+	nonDigits = /\D*/y;
+	masks = new CredentialMasks();
+	memo = new Int32Array(MEMO_SIZE).fill(-1);
+	text = "";
+	constructor(tables) {
+		this.classes = tables.classes;
+		this.literals = tables.literals;
+		this.literalLength = tables.literalLength;
+		this.literalKind = tables.literalKind;
+		this.literalShape = tables.literalShape;
+		this.literalMin = tables.literalMin;
+		this.literalMax = tables.literalMax;
+		this.literalOverlap = tables.literalOverlap;
+		this.ending = tables.ending;
+		this.sharedEndings = tables.sharedEndings;
+		this.prefixes = new RegExp(tables.prefixSource, "g");
+		const patterns = new Map([
+			[2, [ALNUM_SLOT, /[A-Za-z0-9]*/y]],
+			[4, [WORD_SLOT, /\w*/y]],
+			[8, [ALNUM_DASH_SLOT, /[A-Za-z0-9-]*/y]],
+			[16, [UPPER_ALNUM_SLOT, /[A-Z0-9]*/y]]
+		]);
+		this.literalSlot = Uint8Array.from(tables.literalRun, (run) => patterns.get(run)?.[0] ?? 0);
+		this.literalPattern = Array.from(tables.literalRun, (run) => patterns.get(run)?.[1] ?? this.keyRun);
+	}
+	/**
+	* The nearest credential at or after `from`. Overlapping candidates of any format join the earliest
+	* one and take its mask, so no credential is drawn half masked. Candidates arrive in start order;
+	* an address password waits until the scan passes its start, and no other `://` can occur before
+	* then, because a user name and a password exclude `/`. A password that starts inside a range also
+	* ends inside it: the range holds the `:` before the password, so it is a key block, whose `END`
+	* line has spaces, or one that runs to the end of the text.
+	* @param text - the complete original text.
+	* @param from - the query offset.
+	* @returns the `secret` node, or undefined when no credential starts at or after `from`.
+	*/
+	match(text, from) {
+		if (text !== this.text) {
+			this.memo.fill(-1);
+			this.text = text;
+		}
+		const prefixes = this.prefixes;
+		const length = text.length;
+		let start = -1;
+		let end = -1;
+		let kind = 2;
+		let plain = true;
+		let deferredEnd = this.addressBefore(from);
+		let deferredStart = deferredEnd < 0 ? -1 : this.slot(CANDIDATE_START);
+		prefixes.lastIndex = from;
+		while (prefixes.test(text)) {
+			const literalEnd = prefixes.lastIndex;
+			const literal = this.literalEndingAt(literalEnd);
+			const at = literalEnd - this.literalLength[literal];
+			prefixes.lastIndex = literalEnd - this.literalOverlap[literal];
+			if (deferredStart >= 0 && deferredStart <= at) {
+				if (start < 0) {
+					start = deferredStart;
+					end = deferredEnd;
+					kind = 1;
+				} else if (deferredStart >= end) break;
+				deferredStart = -1;
+			}
+			if (start >= 0 && (at >= end || end === length)) break;
+			const literalKind = this.literalKind[literal];
+			if (literalKind === 1) {
+				deferredEnd = this.addressPassword(at);
+				deferredStart = deferredEnd < 0 ? -1 : this.slot(CANDIDATE_START);
+				continue;
+			}
+			const candidateEnd = literalKind === 0 ? this.keyBlockEnd(at) : this.prefixedEnd(literal, at);
+			if (candidateEnd < 0) continue;
+			if (start < 0) {
+				start = at;
+				end = candidateEnd;
+				kind = literalKind;
+				plain = literalKind === 2;
+			} else if (candidateEnd > end) {
+				end = candidateEnd;
+				if (literalKind !== 2) plain = false;
+			}
+		}
+		if (start < 0 && deferredStart >= 0) {
+			start = deferredStart;
+			end = deferredEnd;
+			kind = 1;
+		}
+		if (start < 0) return void 0;
+		return {
+			id: "secret",
+			start,
+			end,
+			data: { masked: this.masks.masked(text, kind, plain, start, end) }
+		};
+	}
+	/** Memo entry at `index`; the layout keeps every index inside the array. */
+	slot(index) {
+		return this.memo[index];
+	}
+	/** `\w` at `index`; out of range is not a word character. */
+	isWordAt(index) {
+		const code = this.text.charCodeAt(index);
+		return code < 128 && (this.classes[code] & 4) !== 0;
+	}
+	/** `[^\s/:@?#]` for one UTF-16 code unit; NaN, read out of range, is not one. */
+	isUserCode(code) {
+		return code < 128 ? (this.classes[code] & 256) !== 0 : code === code && !isWideSpace(code);
+	}
+	/** Index of the literal the prefix scan matched ending at `end`; one literal sharing the ending matches, so the last needs no check. */
+	literalEndingAt(end) {
+		const text = this.text;
+		const key = text.charCodeAt(end - 2) * 128 + text.charCodeAt(end - 1);
+		const literal = this.ending[key];
+		if (literal > 0) return literal - 1;
+		const shared = this.sharedEndings[key];
+		let index = 0;
+		for (; index < shared.length - 1; index++) {
+			const candidate = shared[index];
+			if (text.startsWith(this.literals[candidate], end - this.literalLength[candidate])) break;
+		}
+		return shared[index];
+	}
+	/** End of the `[A-Za-z0-9_-]*` run at `start`, through four memo pairs replaced in turn. */
+	keyRunEnd(start) {
+		for (let slot = KEY_SLOTS; slot < KEY_NEXT; slot += 2) if (this.slot(slot) <= start && start <= this.slot(slot + 1)) return this.slot(slot + 1);
+		const end = runEnd(this.keyRun, this.text, start);
+		const next = this.slot(KEY_NEXT) + 1 & 3;
+		this.memo[KEY_NEXT] = next;
+		this.memo[KEY_SLOTS + 2 * next] = start;
+		this.memo[KEY_SLOTS + 2 * next + 1] = end;
+		return end;
+	}
+	/** End of the run `pattern` matches at `start`, through the memo pair at `slot`. */
+	memoRunEnd(pattern, start, slot) {
+		if (this.slot(slot) <= start && start <= this.slot(slot + 1)) return this.slot(slot + 1);
+		const end = runEnd(pattern, this.text, start);
+		this.memo[slot] = start;
+		this.memo[slot + 1] = end;
+		return end;
+	}
+	/** Offset of the first digit at or after `start`, or the text length. */
+	nextDigit(start) {
+		if (this.slot(DIGIT_FROM) <= start && start <= this.slot(DIGIT_AT)) return this.slot(DIGIT_AT);
+		this.memo[DIGIT_FROM] = start;
+		this.memo[DIGIT_AT] = runEnd(this.nonDigits, this.text, start);
+		return this.slot(DIGIT_AT);
+	}
+	/** Offset after `[A-Z0-9 ]{0,40}PRIVATE KEY-----` at `start`, or -1; reads at most 52 characters. */
+	labelEnd(start) {
+		const text = this.text;
+		const limit = Math.min(text.length, start + 52);
+		let index = start;
+		while (index < limit) {
+			const code = text.charCodeAt(index);
+			if (code > 127 || (this.classes[code] & 32) === 0) break;
+			index++;
+		}
+		const tail = index - 11;
+		return index < start + 52 && tail >= start && text.startsWith("PRIVATE KEY-----", tail) ? tail + 16 : -1;
+	}
+	/**
+	* End of the `-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----` block at `at`: after its first complete
+	* `END` line, or the end of the text; -1 for an invalid header.
+	*/
+	keyBlockEnd(at) {
+		const header = this.labelEnd(at + 11);
+		if (header < 0) return -1;
+		if (this.slot(BLOCK_FROM) <= header && header <= this.slot(BLOCK_END_START)) return this.slot(BLOCK_END);
+		const text = this.text;
+		this.memo[BLOCK_FROM] = header;
+		this.memo[BLOCK_END_START] = text.length;
+		this.memo[BLOCK_END] = text.length;
+		for (let line = text.indexOf("-----END ", header); line >= 0; line = text.indexOf("-----END ", line + 1)) {
+			const end = this.labelEnd(line + 9);
+			if (end < 0) continue;
+			this.memo[BLOCK_END_START] = line;
+			this.memo[BLOCK_END] = end;
+			break;
+		}
+		return this.slot(BLOCK_END);
+	}
+	/** Whether `\b[a-z][a-z0-9+.-]{1,15}` ends at `at`; reads at most 17 characters back. */
+	schemeBefore(at) {
+		const text = this.text;
+		for (let start = at - 1; start >= 0 && start >= at - 16; start--) {
+			const code = text.charCodeAt(start);
+			const bits = code < 128 ? this.classes[code] : 0;
+			if ((bits & 64) === 0) return false;
+			if ((bits & 128) !== 0 && at - start >= 2 && !this.isWordAt(start - 1)) return true;
+		}
+		return false;
+	}
+	/**
+	* The password in `\b[a-z][a-z0-9+.-]{1,15}://[^\s/:@?#]{0,256}:[^\s/@?#]+@` for the `://` at
+	* `at`; neither part crosses `?` or `#`, where the authority ends. Callers pass a `://` at or after
+	* the query offset, or one whose user name reaches it, so the password never starts before it.
+	* @returns the password end with its start in the memo, or -1.
+	*/
+	addressPassword(at) {
+		if (!this.schemeBefore(at)) return -1;
+		const text = this.text;
+		const userStart = at + 3;
+		const userEnd = this.memoRunEnd(this.userRun, userStart, USER_SLOT);
+		if (userEnd - userStart > 256 || text.charCodeAt(userEnd) !== 58) return -1;
+		const start = userEnd + 1;
+		const end = this.memoRunEnd(this.passwordRun, start, PASSWORD_SLOT);
+		if (end === start || text.charCodeAt(end) !== 64) return -1;
+		this.memo[CANDIDATE_START] = start;
+		return end;
+	}
+	/**
+	* The address password at or after `from` whose `://` starts before `from`, as `addressPassword`
+	* returns it. The walk back over the user name runs only when a `:`, a password, and `@` follow.
+	*/
+	addressBefore(from) {
+		const text = this.text;
+		if (from < 3) return -1;
+		if (text.startsWith("://", from - 1)) return this.addressPassword(from - 1);
+		if (text.startsWith("://", from - 2)) return this.addressPassword(from - 2);
+		let index = from - 1;
+		const before = text.charCodeAt(index);
+		let passwordStart;
+		if (before === 58) {
+			passwordStart = from;
+			index--;
+		} else if (this.isUserCode(before)) {
+			const userEnd = this.memoRunEnd(this.userRun, from, USER_SLOT);
+			if (text.charCodeAt(userEnd) !== 58) return -1;
+			passwordStart = userEnd + 1;
+		} else return text.startsWith("://", from - 3) ? this.addressPassword(from - 3) : -1;
+		const passwordEnd = this.memoRunEnd(this.passwordRun, passwordStart, PASSWORD_SLOT);
+		if (passwordEnd === passwordStart || text.charCodeAt(passwordEnd) !== 64) return -1;
+		const lowest = Math.max(0, passwordStart - 258);
+		while (index >= lowest && this.isUserCode(text.charCodeAt(index))) index--;
+		return index >= 2 && text.startsWith("://", index - 2) ? this.addressPassword(index - 2) : -1;
+	}
+	/** End of the prefixed credential whose literal starts at `at`, or -1. */
+	prefixedEnd(literal, at) {
+		if (this.isWordAt(at - 1)) return -1;
+		const text = this.text;
+		const start = at + this.literalLength[literal];
+		const shape = this.literalShape[literal];
+		const min = this.literalMin[literal];
+		if (shape === 2) {
+			const digit = this.nextDigit(start);
+			if (digit - start > 255) return -1;
+			const end = this.keyRunEnd(start);
+			return end - start >= min && digit < end ? end : -1;
+		}
+		const slot = this.literalSlot[literal];
+		const end = slot === 0 ? this.keyRunEnd(start) : this.memoRunEnd(this.literalPattern[literal], start, slot);
+		const length = end - start;
+		if (length < min) return -1;
+		if (shape === 0) return end;
+		if (shape === 3) return start + min;
+		if (shape === 1) return length <= this.literalMax[literal] && !this.isWordAt(end) ? end : -1;
+		if (length > this.literalMax[literal] || !text.startsWith(".eyJ", end)) return -1;
+		const payloadStart = end + 4;
+		const payloadEnd = this.keyRunEnd(payloadStart);
+		if (payloadEnd - payloadStart < min || text.charCodeAt(payloadEnd) !== 46) return -1;
+		const signatureEnd = this.keyRunEnd(payloadEnd + 1);
+		return signatureEnd - (payloadEnd + 1) >= min ? signatureEnd : -1;
+	}
+};
+//#endregion
+//#region lib/types/client/format-tables.js
+/** Lookup tables derived from the credential formats, built once on first use. */
+let tables;
+/**
+* The tables for `CREDENTIAL_FORMATS`; the first call builds them.
+* @returns the shared, read-only tables.
+*/
+function formatTables() {
+	tables ??= buildTables();
+	return tables;
+}
+function buildTables() {
+	const formats = CREDENTIAL_FORMATS;
+	const literals = formats.map((f) => f.literal);
+	const { ending, sharedEndings } = endingTables(literals);
+	return {
+		classes: charClasses(),
+		literals,
+		literalLength: Uint8Array.from(literals, (literal) => literal.length),
+		literalKind: Uint8Array.from(formats, (f) => f.kind),
+		literalShape: Uint8Array.from(formats, (f) => f.shape),
+		literalRun: Uint16Array.from(formats, (f) => f.run),
+		literalMin: Int32Array.from(formats, (f) => f.min),
+		literalMax: Int32Array.from(formats, (f) => f.max),
+		literalOverlap: Uint8Array.from(literals, (literal) => overlap(literal, literals)),
+		prefixSource: alternation(literals),
+		ending,
+		sharedEndings
+	};
+}
+function charClasses() {
+	const classes = new Uint16Array(128);
+	for (let code = 0; code < 128; code++) {
+		const upper = code >= 65 && code <= 90;
+		const lower = code >= 97 && code <= 122;
+		const digit = code >= 48 && code <= 57;
+		const alnum = upper || lower || digit;
+		const authority = !(code >= 9 && code <= 13 || code === 32 || code === 47 || code === 64 || code === 63 || code === 35);
+		classes[code] = (alnum || code === 95 || code === 45 ? 1 : 0) | (alnum ? 2 : 0) | (alnum || code === 95 ? 4 : 0) | (alnum || code === 45 ? 8 : 0) | (upper || digit ? 16 : 0) | (upper || digit || code === 32 ? 32 : 0) | (lower || digit || code === 43 || code === 46 || code === 45 ? 64 : 0) | (lower ? 128 : 0) | (authority && code !== 58 ? 256 : 0) | (authority ? 512 : 0);
+	}
+	return classes;
+}
+function overlap(literal, literals) {
+	for (let size = literal.length - 1; size > 0; size--) {
+		const suffix = literal.slice(-size);
+		if (literals.some((other) => other.startsWith(suffix))) return size;
+	}
+	return 0;
+}
+function endingTables(literals) {
+	const ending = new Int8Array(16384);
+	const sharedEndings = [];
+	literals.forEach((literal, index) => {
+		const key = literal.charCodeAt(literal.length - 2) * 128 + literal.charCodeAt(literal.length - 1);
+		const existing = ending[key];
+		if (existing === 0) {
+			ending[key] = index + 1;
+			return;
+		}
+		if (existing > 0) {
+			sharedEndings[key] = [existing - 1];
+			ending[key] = -1;
+		}
+		sharedEndings[key].push(index);
+	});
+	return {
+		ending,
+		sharedEndings
+	};
+}
+const escape = (literal) => literal.replace(/[.*+?^${}()|[\]\\/]/gu, "\\$&");
+/** Literal alternatives grouped by shared leading characters; groups only factor literals and add no quantifier. */
+function alternation(literals) {
+	const groups = /* @__PURE__ */ new Map();
+	for (const literal of literals) groups.set(literal.charAt(0), [...groups.get(literal.charAt(0)) ?? [], literal.slice(1)]);
+	return [...groups].map(([head, tails]) => tails.length === 1 ? escape(head + tails.join("")) : `${escape(head)}(?:${alternation(tails)})`).join("|");
+}
+
+/** All occurrences share one scanner's bounded run memo; raw values never enter node attributes. */
+function scanUserCredentials(text) {
+  const scanner = new CredentialScanner(formatTables())
+  const spans = []
+  let from = 0
+  while (from < text.length) {
+    const node = scanner.match(text, from)
+    if (node === undefined) break
+    spans.push(node)
+    from = node.end
+  }
+  return spans
+}
+
+/** Noninteractive projection: scan the full original before any caller truncates, flattens or sets a title. */
+function maskUserText(text) {
+  const parts = []
+  let from = 0
+  for (const node of scanUserCredentials(text)) {
+    parts.push(text.slice(from, node.start), node.data.masked)
+    from = node.end
+  }
+  parts.push(text.slice(from))
+  return parts.join('')
+}
+
+/** Sent human/admitted steering only. Every render and each occurrence starts hidden; no persistence or timeout. */
+function renderSentUserText(target, text, interactive = true) {
+  const parts = []
+  let from = 0
+  const language = typeof document.documentElement?.lang === 'string' ? document.documentElement.lang : 'en'
+  const chinese = language.startsWith('zh')
+  for (const node of scanUserCredentials(text)) {
+    if (node.start > from) parts.push(document.createTextNode(text.slice(from, node.start)))
+    const raw = text.slice(node.start, node.end)
+    const run = document.createElement('span')
+    run.className = 'user-secret'
+    run.dataset.secret = ''
+    const value = document.createElement('span')
+    value.className = 'user-secret-value'
+    value.textContent = node.data.masked
+    run.append(value)
+    if (interactive) {
+      let revealed = false
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.className = 'user-secret-toggle'
+      // Static SVG glyphs: build with DOM methods; user text never goes through an HTML parser.
+      function paint() {
+        value.textContent = revealed ? raw : node.data.masked
+        button.setAttribute('aria-pressed', String(revealed))
+        button.setAttribute('aria-label', chinese ? (revealed ? '隐藏密钥' : '显示密钥') : (revealed ? 'Hide secret' : 'Show secret'))
+        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+        svg.setAttribute('viewBox', '0 0 16 16')
+        svg.setAttribute('fill', 'none')
+        svg.setAttribute('stroke', 'currentColor')
+        svg.setAttribute('stroke-width', '1.3')
+        svg.setAttribute('stroke-linecap', 'round')
+        svg.setAttribute('stroke-linejoin', 'round')
+        svg.setAttribute('aria-hidden', 'true')
+        svg.setAttribute('focusable', 'false')
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+        const contour = 'M1.5 8C2.9 5.25 5.25 3.5 8 3.5C10.75 3.5 13.1 5.25 14.5 8C13.1 10.75 10.75 12.5 8 12.5C5.25 12.5 2.9 10.75 1.5 8Z'
+        path.setAttribute('d', contour + (revealed ? 'M2.5 2.5L13.5 13.5' : 'M10 8C10 9.1 9.1 10 8 10C6.9 10 6 9.1 6 8C6 6.9 6.9 6 8 6C9.1 6 10 6.9 10 8Z'))
+        svg.append(path)
+        button.replaceChildren(svg)
+      }
+      button.onclick = () => { revealed = !revealed; paint() }
+      paint()
+      run.append(button)
+    }
+    parts.push(run)
+    from = node.end
+  }
+  if (from < text.length) parts.push(document.createTextNode(text.slice(from)))
+  target.replaceChildren()
+  for (const part of parts) target.append(part)
+}
+
+return { scanUserCredentials, maskUserText, renderSentUserText }
+})()
+/* user-secrets:end */
+
 function add(kind, text, merge = true, label, tool) {
   /**
    * An empty answer is normally nothing to draw — except when it carries something a reader must see: the stop
@@ -4311,7 +4985,7 @@ function add(kind, text, merge = true, label, tool) {
         /** A late answer to a question arrives as DSH's JSON record; it is drawn as the questions and their answers. */
         const answered = questionAnswerText(text)
         if (answered !== null) bubble.classList.add('question-answer')
-        bubble.textContent = answered ?? text
+        renderSentUserText(bubble, answered ?? text)
         node.append(bubble)
       }
       node.dataset.copyText = text
@@ -5475,6 +6149,14 @@ function settleLiveToolCall(chunk) {
 }
 
 /**
+ * Whether a logged event replaced a span of the model's surface (`surfaceOp: { op: 'replace', … }`) instead of appending
+ * to it. The server's transcript and ledger folds read the marker the same way.
+ */
+function isReplacementCopy(event) {
+  return typeof event.surfaceOp === 'object' && event.surfaceOp !== null && event.surfaceOp.op === 'replace'
+}
+
+/**
  * Put a tool's result into the element of the call it answers.
  *
  * The live stream delivers the call and its result as two events, which is the transport's shape rather
@@ -6162,6 +6844,10 @@ function paintEmptyState() {
 paintEmptyState()
 
 async function showView(next) {
+  if (next !== 'file') {
+    ++fileFetches
+    if (cancelHtmlFrame !== null) cancelHtmlFrame()
+  }
   view = next
   for (const button of document.querySelectorAll('#views button')) {
     button.setAttribute('aria-selected', String(button.dataset.view === view))
@@ -6189,7 +6875,13 @@ async function showView(next) {
 /** Read the ledger projection for one session and draw it. */
 let ledgerFetches = 0
 async function showLedger(id) {
-  ledger.replaceChildren()
+  /**
+   * Another session's ledger is taken down at once, so it is never read as this one's. The same session's drawn ledger
+   * stays until the new read draws over it (renderLedger replaces the pane): a live refetch, or entering the view again,
+   * used to blank the pane first, and a read the server refused (`!response.ok`) then left it blank for good. Under load,
+   * 80's stale-ledger check caught that pane empty for 20 s on both builds.
+   */
+  if (trajectory.data?.id !== id) ledger.replaceChildren()
   /**
    * Only the newest request draws. Without this, two overlapping reads can land out of order and the older
    * one paints last, which is the other half of the stacked-draw bug.
@@ -6207,8 +6899,10 @@ async function showLedger(id) {
      * drawn would otherwise append its error under the new ledger (developer-two, reproduced in a component run).
      */
     if (ticket !== ledgerFetches) return
+    /** The drawn ledger now stays under a failed read, so an earlier failure's note gives way: one note, not a stack. */
+    ledger.querySelector('.tr-read-failed')?.remove()
     const note = document.createElement('div')
-    note.className = 'turn denied'
+    note.className = 'turn denied tr-read-failed'
     note.textContent = 'could not read the ledger: ' + (error && error.message)
     ledger.append(note)
   }
@@ -6331,8 +7025,18 @@ const trajectory = {
   focus: null,
   /** The overview's zoom (`zoomViewport`): null for the whole domain; kept across a live refetch of the same session. */
   viewport: null,
-  domainStart: undefined,
-  domainEnd: undefined,
+  /**
+   * The overview's one Tab stop, `{ id, turn, lane, rank, x0 }`: the record it stands on (its rank among its turn's
+   * records in the lane) and where that was drawn, kept across a redraw of the same session, merged or split.
+   */
+  barStop: null,
+  /**
+   * The overview's focus window and the gestures under way, kept across a redraw of the same session in the same unit:
+   * `{ id, unit, size, focus, drag, pan }`, where `unit` is the domain's (ms, records or turns) and `size` its size
+   * (`overviewDomainSize`), `focus` the window and `drag` the drag's start in its fractions, and `pan` a right-button
+   * drag. renderTimeline owns it.
+   */
+  overview: null,
 }
 
 /** DSH's kind vocabulary, which the table's tags speak. */
@@ -6487,13 +7191,6 @@ function renderLedger(data, timeline_ = { spans: [], durationMs: 0 }) {
   trajectory.selected = -1
   trajectory.expanded.clear()
   trajectory.focus = null
-  const times = trajectory.rows
-    .map((row) => row.record?.startedAt)
-    .filter((at) => typeof at === 'string')
-    .map((at) => Date.parse(at))
-    .filter((at) => !Number.isNaN(at))
-  trajectory.domainStart = times.length > 0 ? Math.min(...times) : undefined
-  trajectory.domainEnd = times.length > 0 ? Math.max(...times) : undefined
 
   /** DSH's shape: a scroll pane holding one table, and a details pane on the right. */
   const split = document.createElement('div')
@@ -7020,16 +7717,20 @@ function timelineTickText(span, totalMs, startsAtMs) {
 /* overview-bars:begin */
 /**
  * The overview's bars, as DSH's overview draws them: one per timed record, in its lane (S151, R-developer-eleven-21).
- * A turn's records in one lane are drawn one by one when they are few and none is narrower than a pixel; otherwise they
- * merge into one bar for that turn and lane, so a long session stays a few hundred nodes, not thousands. A bar carries
- * the TTFT split only when the record does (the projections give it only when 0 <= ttftMs <= durationMs). Pure, and
- * fenced so test/page-overview-bars.test.ts judges it.
+ * DSH merges nothing; the page merges a turn's records in one lane into one bar for that turn and lane only where they
+ * are too dense to tell apart at the width they are drawn at, `trackPx` (the track's width over the zoom's span, so a
+ * zoom splits what the whole strip merged): when one of them is narrower than a pixel, or when they average under 3 px
+ * each over their extent (developer-ten's zoom N6; a count cap of 12 kept a busy turn merged at any zoom). A long
+ * session thus stays near a bar per 3 px per lane in view. A bar carries the TTFT split only when the record does (the
+ * projections give it only when 0 <= ttftMs <= durationMs). Pure, and fenced so test/page-overview-bars.test.ts judges it.
  *
  * Layout and time are kept apart (developer-ten's review): `x0`/`x1` are where a record is drawn (its time in actual
  * mode, its equal slot in the default mode) and decide the pixel test and the drawn extent; `start`/`end` stay its
  * recorded time, which the tip's clock and duration read, so a bar says the same in both modes. A record without
  * `x0`/`x1` is drawn at its time. A record with no measured width (instantaneous, or still running) is drawn at the
- * floor width and does not force a merge, and a group of one never merges.
+ * floor width and does not force a merge, nor does a group with no extent; a group of one never merges. `rank0` and
+ * `rank1` are the first and last of a bar's records among its turn's records in its lane, which name a record across a
+ * redraw whether it is drawn on its own or merged.
  */
 function overviewBars(records, trackPx) {
   const width = trackPx > 0 ? trackPx : 1000
@@ -7037,13 +7738,15 @@ function overviewBars(records, trackPx) {
   for (const record of records) {
     const key = record.turn + '|' + record.lane
     if (!groups.has(key)) groups.set(key, [])
-    groups.get(key).push({ ...record, x0: record.x0 ?? record.start, x1: record.x1 ?? record.end })
+    const group = groups.get(key)
+    group.push({ ...record, x0: record.x0 ?? record.start, x1: record.x1 ?? record.end, rank0: group.length, rank1: group.length })
   }
   const bars = []
   for (const group of groups.values()) {
     const subPixel = (record) => record.x1 > record.x0 && (record.x1 - record.x0) * width < 1
-    const drawable = group.length === 1 || (group.length <= 12 && !group.some(subPixel))
-    if (drawable) {
+    const extent = (Math.max(...group.map((record) => record.x1)) - Math.min(...group.map((record) => record.x0))) * width
+    const dense = group.some(subPixel) || (extent > 0 && extent / group.length < 3)
+    if (group.length === 1 || !dense) {
       for (const record of group) bars.push({ ...record, kinds: [record.kind], merged: 1 })
       continue
     }
@@ -7058,9 +7761,35 @@ function overviewBars(records, trackPx) {
       x1: Math.max(...group.map((record) => record.x1)),
       running: group.some((record) => record.running),
       merged: group.length,
+      rank0: 0,
+      rank1: group.length - 1,
     })
   }
   return bars
+}
+
+/**
+ * The stretch of the domain the strip draws bars for: the zoom's viewport and half a viewport either side, so a pan
+ * shows drawn bars, or the whole domain unzoomed. `span` is the viewport's, which the bars were merged at.
+ */
+function overviewDrawRange(viewport) {
+  if (viewport === null || viewport === undefined) return { from: 0, to: 1, span: 1 }
+  const span = viewport.to - viewport.from
+  return { from: Math.max(0, viewport.from - span / 2), to: Math.min(1, viewport.to + span / 2), span }
+}
+
+/**
+ * Whether the bars drawn for `drawn` (an `overviewDrawRange`, or null for none) must be drawn again for `viewport`:
+ * when the zoom has changed the span by a quarter or more (the merges were made at the old width), or the view has
+ * left the drawn stretch. A smaller zoom or a pan inside the margin keeps them, so a wheel or a drag does not redraw at
+ * every step.
+ */
+function overviewNeedsRedraw(drawn, viewport) {
+  if (drawn === null || drawn === undefined) return true
+  const from = viewport?.from ?? 0
+  const to = viewport?.to ?? 1
+  const ratio = (to - from) / drawn.span
+  return ratio >= 1.25 || ratio <= 0.8 || from < drawn.from - 1e-9 || to > drawn.to + 1e-9
 }
 
 /** A bar's words: the tick's label and clock, then the TTFT split when it has one, or how many records it merges. */
@@ -7108,11 +7837,163 @@ function viewportDomain(viewport, screenFraction) {
   if (viewport === null || viewport === undefined) return screenFraction
   return viewport.from + screenFraction * (viewport.to - viewport.from)
 }
+
+/**
+ * A viewport that shows the stretch `[x0, x1]`, by DSH's rule for its selected span: unchanged when the stretch is in
+ * view (touching an edge counts, as for a tab stop), else moved at the same zoom just far enough to bring it in, from
+ * the side it lies on. The whole domain shows everything.
+ */
+function viewportShowing(viewport, x0, x1) {
+  if (viewport === null || viewport === undefined) return null
+  if (x1 >= viewport.from && x0 <= viewport.to) return viewport
+  const span = viewport.to - viewport.from
+  const start = Math.min(Math.max(x1 < viewport.from ? x0 : x1 - span, 0), 1 - span)
+  return { from: start, to: start + span }
+}
 /* overview-viewport:end */
+
+/* overview-keys:begin */
+/**
+ * Where a key moves the overview's one tab stop. The strip is a single Tab stop, as DSH's overview is (developer-ten's
+ * N4: a stop per bar made Tab walk through hundreds), and the arrows move among its bars. `bars` are `{ x0, lane }` in
+ * reading order (by start, then lane: input, model, tools) and `at` is the focused bar's index. Left and Right step
+ * through that order, Home and End go to its ends, and Up and Down change lane, to the bar nearest in time in the next
+ * lane that has one. Returns the index to focus, or null for a key the strip leaves alone. Pure, and fenced so
+ * test/page-overview-keys.test.ts judges it.
+ */
+function overviewKeyTarget(bars, at, key) {
+  if (bars.length === 0 || at < 0 || at >= bars.length) return null
+  if (key === 'Home') return 0
+  if (key === 'End') return bars.length - 1
+  if (key === 'ArrowLeft') return Math.max(0, at - 1)
+  if (key === 'ArrowRight') return Math.min(bars.length - 1, at + 1)
+  if (key !== 'ArrowUp' && key !== 'ArrowDown') return null
+  const lanes = ['input', 'model', 'tools']
+  const step = key === 'ArrowUp' ? -1 : 1
+  const here = bars[at]
+  for (let lane = lanes.indexOf(here.lane) + step; lane >= 0 && lane < lanes.length; lane += step) {
+    let best = -1
+    bars.forEach((bar, index) => {
+      if (bar.lane !== lanes[lane]) return
+      if (best === -1 || Math.abs(bar.x0 - here.x0) < Math.abs(bars[best].x0 - here.x0)) best = index
+    })
+    if (best !== -1) return best
+  }
+  return at
+}
+/* overview-keys:end */
+
+/* overview-focus:begin */
+/**
+ * The recorded time a focus window lights (developer-ten's zoom N7). A window is a stretch `[from, to]` of the strip's
+ * domain, and the rows are lit by when they started. In the actual mode the domain is the timeline's own clock, which
+ * starts at `startsAtMs` and lasts `totalMs` (to the latest end, not to the rows' latest start). In the equal mode the
+ * domain is record slots, not time: the window lights the items whose slots it touches, from the first of them to start
+ * to the last moment one of them can hold a row (`last`, a fraction like `start`; a record's own start, a turn's end).
+ * A window that touches no slot lights nothing. `items` are `{ x0, x1, start, last? }`. Returns `{ from, to }` in epoch
+ * milliseconds, or null when there is no clock to judge rows by. Pure, and fenced so test/page-overview-focus.test.ts
+ * judges it.
+ */
+function focusWindowTime(from, to, items, durationActual, startsAtMs, totalMs) {
+  if (!Number.isFinite(startsAtMs) || !(totalMs > 0)) return null
+  if (durationActual) return { from: startsAtMs + from * totalMs, to: startsAtMs + to * totalMs }
+  const touched = items.filter((item) => item.x1 >= from && item.x0 <= to)
+  if (touched.length === 0) return { from: Infinity, to: -Infinity }
+  /** Half a millisecond either side: a row's time is whole milliseconds, and the fractions come back through floats. */
+  return {
+    from: startsAtMs + Math.min(...touched.map((item) => item.start)) * totalMs - 0.5,
+    to: startsAtMs + Math.max(...touched.map((item) => item.last ?? item.start)) * totalMs + 0.5,
+  }
+}
+/* overview-focus:end */
+
+/* overview-keep:begin */
+/**
+ * What the overview keeps across a live redraw of the same session, in the domain's own units, as DSH keeps its range
+ * and viewport. The domain is recorded milliseconds in the actual mode and record slots in the equal mode (turn slots
+ * for an older server's ticks): `overviewDomainSize`. It starts at the session's first record whatever is added, so a
+ * running turn moves only its end, and a stretch `{ from, to }` of fractions drawn over a domain `scale` times the new
+ * one's size (old size over new) is the same records at `rescaleStretch`: each end times `scale`, kept inside the
+ * domain at its width. Null stays null. Pure, and fenced so test/page-overview-keep.test.ts judges it.
+ */
+function overviewDomainSize(durationActual, totalMs, records, spans) {
+  if (durationActual) return totalMs > 0 ? totalMs : 0
+  return records > 0 ? records : spans
+}
+
+function rescaleStretch(stretch, scale) {
+  if (stretch === null || stretch === undefined) return null
+  if (!(scale > 0) || scale === 1) return stretch
+  const span = Math.min(1, (stretch.to - stretch.from) * scale)
+  const from = Math.min(Math.max(stretch.from * scale, 0), 1 - span)
+  return { from, to: from + span }
+}
+/* overview-keep:end */
+
+/* overview-pick:begin */
+/**
+ * What a pick on the overview reaches (developer-ten's N8, DSH's TrajectoryTimeline clicks). Pure, and fenced so
+ * test/page-overview-pick.test.ts judges it.
+ *
+ * `overviewRecordRow`: the ledger row of a timeline record, named as the bars name it, by its turn, its lane and its
+ * rank among that turn's records in the lane. Both projections list a turn's timed records by start, ledger order
+ * breaking ties, and give a record its lane by kind (`laneOfKind`, ledger.ts laneOf, rows.rs lane_of); a row outside
+ * every turn is on no timeline. Returns the row's index, or -1.
+ */
+function laneOfKind(kind) {
+  if (kind === 'user' || kind === 'context' || kind === 'system') return 'input'
+  if (kind === 'tool') return 'tools'
+  return 'model'
+}
+
+function overviewRecordRow(rows, turn, lane, rank) {
+  const timed = []
+  rows.forEach((row, index) => {
+    if (row.loose || row.turn !== turn || laneOfKind(row.kind) !== lane) return
+    const at = Date.parse(row.record?.startedAt ?? '')
+    if (!Number.isNaN(at)) timed.push({ index, at })
+  })
+  timed.sort((left, right) => left.at - right.at)
+  return timed[rank]?.index ?? -1
+}
+
+/**
+ * DSH's narrowest window, `width` wide (one record's share of the domain, or the view if narrower) and centred on
+ * `center`, kept inside the domain.
+ */
+function centredWindow(center, width) {
+  const span = Math.min(1, Math.max(0, width))
+  const from = Math.min(Math.max(center - span / 2, 0), 1 - span)
+  return { from, to: from + span }
+}
+
+/** The item `{ x0, x1 }` nearest to the point `x`, as DSH's empty-track click finds it: 0 inside, else to its nearer edge. */
+function nearestItem(items, x) {
+  let best = -1
+  let distance = Infinity
+  items.forEach((item, index) => {
+    const away = x < item.x0 ? item.x0 - x : x > item.x1 ? x - item.x1 : 0
+    if (away < distance) {
+      best = index
+      distance = away
+    }
+  })
+  return best
+}
+/* overview-pick:end */
 
 /** The lane strip: Input / Model / Tools, with drag-to-focus like DSH's overview. */
 function renderTimeline(timeline_, data = {}) {
+  /** A redraw (a live refetch, every 500 ms while a turn runs) keeps the keyboard where it was: on its bar, focused. */
+  const refocus = timeline.contains(document.activeElement)
+  /** The bar that has the focus is the strip's stop, whichever way it got the focus (zoom N6, condition 1). */
+  const focusedTick = refocus ? document.activeElement.closest?.('.tr-tick') ?? null : null
+  if (focusedTick !== null && focusedTick.tabIndex !== 0 && trajectory.overview !== null) {
+    trajectory.barStop = { id: trajectory.overview.id, turn: focusedTick.dataset.turn, lane: focusedTick.dataset.lane, rank: Number(focusedTick.dataset.rank0), x0: Number(focusedTick.dataset.x0) }
+  }
   timeline.replaceChildren()
+  timeline.dataset.window = 'false'
+  if (trajectory.barStop?.id !== data.id) trajectory.barStop = null
   const spans = timeline_?.spans ?? []
   if (spans.length === 0) return
   const total = timeline_?.durationMs ?? 0
@@ -7129,6 +8010,9 @@ function renderTimeline(timeline_, data = {}) {
     : records.map((record, index) => ({ ...record, x0: index / records.length, x1: (index + 0.9) / records.length }))
   const wrapper = document.createElement('div')
   wrapper.className = 'tr-lanes'
+  /** The lanes are one control, entered by one Tab stop and moved in with the arrows (a toolbar's roving tabindex). */
+  wrapper.setAttribute('role', 'toolbar')
+  wrapper.setAttribute('aria-label', 'Timeline overview')
   const focusBox = document.createElement('div')
   focusBox.className = 'tr-focus'
   wrapper.append(focusBox)
@@ -7152,40 +8036,40 @@ function renderTimeline(timeline_, data = {}) {
    * strip is `display: none` (`#timeline:empty`) and measured 0, which always fell back to 1000 px (developer-ten's N1).
    */
   timeline.append(wrapper)
-  const bars = records.length > 0 ? overviewBars(placed, tracks.get('input')?.clientWidth ?? 0) : null
-  for (const lane of lanes) {
-    const track = tracks.get(lane)
-    /**
-     * With per-record data, the lane draws DSH's per-record bars; an answer from a server without records keeps one tick
-     * per turn. Bars are buttons like ticks, so Tab reaches them and Enter picks their turn; their listeners are the
-     * strip's own, below. A bar is placed by its layout (`x0`/`x1`) and speaks its recorded time.
-     */
-    if (bars !== null) {
-      for (const bar of bars) {
-        if (bar.lane !== lane) continue
-        const element = document.createElement('button')
-        element.type = 'button'
-        element.className = 'tr-tick tr-bar'
-        element.dataset.lane = lane
-        element.dataset.turn = String(bar.turn)
-        element.dataset.kind = bar.kinds.join(' ')
-        element.dataset.x0 = String(bar.x0)
-        element.dataset.x1 = String(bar.x1)
-        element.style.left = (bar.x0 * 100).toFixed(3) + '%'
-        element.style.width = (Math.max(bar.x1 - bar.x0, 0.004) * 100).toFixed(3) + '%'
-        if (bar.running) element.dataset.running = 'true'
-        if (Number.isFinite(bar.ttftMs) && Number.isFinite(bar.decodingMs) && bar.ttftMs + bar.decodingMs > 0) {
-          element.dataset.split = 'true'
-          element.style.setProperty('--ttft', ((bar.ttftMs / (bar.ttftMs + bar.decodingMs)) * 100).toFixed(1) + '%')
-        }
-        const text = timelineRecordText(bar, total, startsAtMs)
-        element.dataset.tipLabel = text.label
-        element.dataset.tipWhen = text.when
-        element.setAttribute('aria-label', text.label + ' · ' + text.when)
-        track.append(element)
-      }
-      continue
+  const trackPx = tracks.get('input')?.clientWidth ?? 0
+  /**
+   * With per-record data, the lanes draw DSH's per-record bars (`drawBars`, below, once the zoom is known); an answer from
+   * a server without records keeps one tick per turn, drawn here. Bars are buttons like ticks, so the keyboard reaches
+   * them (the strip's one Tab stop, then the arrows) and Enter or Space picks them (`pickBar`); their listeners are the
+   * strip's own, below. A bar is placed by its layout (`x0`/`x1`) and speaks its recorded time. Its records' ranks among
+   * its turn's records in the lane (`rank0`..`rank1`, a tick's are 0) name it across a redraw, merged or not.
+   */
+  const makeBar = (bar) => {
+    const element = document.createElement('button')
+    element.type = 'button'
+    element.className = 'tr-tick tr-bar'
+    element.dataset.lane = bar.lane
+    element.dataset.turn = String(bar.turn)
+    element.dataset.rank0 = String(bar.rank0)
+    element.dataset.rank1 = String(bar.rank1)
+    element.dataset.kind = bar.kinds.join(' ')
+    element.dataset.x0 = String(bar.x0)
+    element.dataset.x1 = String(bar.x1)
+    element.style.left = (bar.x0 * 100).toFixed(3) + '%'
+    element.style.width = (Math.max(bar.x1 - bar.x0, 0.004) * 100).toFixed(3) + '%'
+    if (bar.running) element.dataset.running = 'true'
+    if (Number.isFinite(bar.ttftMs) && Number.isFinite(bar.decodingMs) && bar.ttftMs + bar.decodingMs > 0) {
+      element.dataset.split = 'true'
+      element.style.setProperty('--ttft', ((bar.ttftMs / (bar.ttftMs + bar.decodingMs)) * 100).toFixed(1) + '%')
     }
+    const text = timelineRecordText(bar, total, startsAtMs)
+    element.dataset.tipLabel = text.label
+    element.dataset.tipWhen = text.when
+    element.setAttribute('aria-label', text.label + ' · ' + text.when)
+    return element
+  }
+  for (const lane of records.length > 0 ? [] : lanes) {
+    const track = tracks.get(lane)
     spans.forEach((span, index) => {
       if (!(span.lanes ?? []).includes(lane)) return
       const tick = document.createElement('button')
@@ -7196,6 +8080,11 @@ function renderTimeline(timeline_, data = {}) {
       const width = trajectory.durationActual ? Math.max(span.end - span.start, 0.004) : equal * 0.9
       tick.style.left = (left * 100).toFixed(3) + '%'
       tick.style.width = (width * 100).toFixed(3) + '%'
+      /** A tick has a layout like a bar's, so the zoom's tab stop and the arrows treat both alike (developer-ten's note). */
+      tick.dataset.x0 = String(left)
+      tick.dataset.x1 = String(left + width)
+      tick.dataset.rank0 = '0'
+      tick.dataset.rank1 = '0'
       if (span.running) tick.dataset.running = 'true'
       /**
        * The details wait for a 500 ms hover, as DSH's do, in the strip's own tip rather than a native title (which the
@@ -7215,16 +8104,60 @@ function renderTimeline(timeline_, data = {}) {
    * DSH's: 20 ms of recorded time, or four records in the equal mode.
    */
   const minSpan = viewportMinSpan(trajectory.durationActual, total, records.length)
-  let focusDomain = null
+  /**
+   * A live refetch (500 ms after a running turn's events pause) draws the strip again, and its zoom, its focus window and
+   * a drag or pan under way keep their records, as DSH's viewport and range do. They were dropped, or the zoom was kept
+   * as fractions of a domain that had grown since, so it slid off what it showed (developer-ten's note on the overview's
+   * keys). The domain grows only at its end, so each is rescaled by the old size over the new (`rescaleStretch`).
+   */
+  const size = overviewDomainSize(trajectory.durationActual, total, records.length, spans.length)
+  /** The domain's unit: a session's first record turns turn slots into record slots, which no scale carries across. */
+  const unit = trajectory.durationActual ? 'ms' : records.length > 0 ? 'records' : 'turns'
+  const before = trajectory.overview
+  const state = { id: data.id, unit, size, focus: null, drag: null, press: null, pan: null }
+  if (before !== null && before.id === data.id && before.unit === unit && before.size > 0 && size > 0) {
+    const scale = before.size / size
+    state.focus = rescaleStretch(before.focus, scale)
+    state.drag = before.drag === null ? null : Math.min(before.drag * scale, 1)
+    state.press = before.press
+    if (before.pan !== null) {
+      const viewport = rescaleStretch(before.pan.viewport, scale)
+      state.pan = { ...before.pan, viewport, from: viewport?.from ?? 0 }
+    }
+    const viewport = rescaleStretch(trajectory.viewport, scale)
+    trajectory.viewport = viewport !== null && viewport.to - viewport.from >= 0.999 ? null : viewport
+    if (trajectory.barStop !== null) trajectory.barStop = { ...trajectory.barStop, x0: trajectory.barStop.x0 * scale }
+  } else if (before !== null && before.id === data.id && trajectory.barStop !== null) {
+    /**
+     * Another unit: the stop's record is still found by its rank, but where it was drawn means nothing now, so no bar is
+     * nearer than the first in view (developer-ten's N2).
+     */
+    trajectory.barStop = { ...trajectory.barStop, x0: Number.NaN }
+  }
+  trajectory.overview = state
+  /**
+   * The window's stretch is the strip's domain: the timeline's clock in the actual mode, record slots in the equal one
+   * (`focusWindowTime`). It was read as the rows' first to last start in both, which lit the wrong rows in the default
+   * mode wherever time was not spread evenly (developer-ten's zoom N7). A drag under 1% of the view is no window
+   * (`isWindow`), so a kept stretch of some width is a window, however narrow the domain's growth has made it since; a
+   * stretch of none is where a drag began, kept while the drag is under way.
+   */
+  const slots = records.length > 0 ? placed : spans.map((span, index) => ({ x0: index * equal, x1: index * equal + equal * 0.9, start: span.start, last: span.end }))
+  const isWindow = (from, to) => to - from >= 0.01 * (trajectory.viewport === null ? 1 : trajectory.viewport.to - trajectory.viewport.from)
+  if (state.focus !== null && state.focus.from === state.focus.to && state.drag === null) state.focus = null
+  if (state.focus !== null && state.focus.from < state.focus.to) {
+    trajectory.focus = focusWindowTime(state.focus.from, state.focus.to, slots, trajectory.durationActual, startsAtMs, total)
+    timeline.dataset.window = 'true'
+  }
   const drawFocus = () => {
     const viewport = trajectory.viewport
     const span = viewport === null ? 1 : viewport.to - viewport.from
-    if (focusDomain === null) {
+    if (state.focus === null) {
       focusBox.style.display = 'none'
       return
     }
-    const left = (focusDomain.from - (viewport?.from ?? 0)) / span
-    const right = (focusDomain.to - (viewport?.from ?? 0)) / span
+    const left = (state.focus.from - (viewport?.from ?? 0)) / span
+    const right = (state.focus.to - (viewport?.from ?? 0)) / span
     if (right <= 0 || left >= 1) {
       focusBox.style.display = 'none'
       return
@@ -7233,7 +8166,55 @@ function renderTimeline(timeline_, data = {}) {
     focusBox.style.left = (Math.max(left, 0) * 100).toFixed(2) + '%'
     focusBox.style.width = (Math.max(Math.min(right, 1) - Math.max(left, 0), 0) * 100).toFixed(2) + '%'
   }
-  const applyViewport = () => {
+  /**
+   * The strip's one Tab stop (developer-ten's N4; DSH's overview is one stop too): the bar that holds the record the
+   * keyboard last stood on (drawn on its own, or merged into its group's bar), while it is in view; else the drawn bar
+   * in view nearest to that record; else the first in view; so Tab never lands on a bar the strip does not show, and a
+   * redraw never resets it to the first bar. The arrows move it (`overviewKeyTarget`), in reading order: by start, then
+   * lane, among the drawn bars.
+   */
+  const inOrder = () => [...wrapper.querySelectorAll('.tr-tick')].sort((left, right) => Number(left.dataset.x0) - Number(right.dataset.x0) || lanes.indexOf(left.dataset.lane) - lanes.indexOf(right.dataset.lane))
+  const inView = (tick) => {
+    const viewport = trajectory.viewport
+    /** A hair either side: a pan that brings a bar to an edge (`viewportShowing`) lands it there through floats. */
+    return viewport === null || viewport === undefined || (Number(tick.dataset.x1) >= viewport.from - 1e-9 && Number(tick.dataset.x0) <= viewport.to + 1e-9)
+  }
+  const holds = (tick, stop) => stop !== null && tick.dataset.turn === stop.turn && tick.dataset.lane === stop.lane && Number(tick.dataset.rank0) <= stop.rank && stop.rank <= Number(tick.dataset.rank1)
+  /**
+   * A stop names a record (turn, lane, rank) and where it was drawn; a bar that holds the last stop's record keeps it,
+   * and gives it a place again when another unit had taken its place away (developer-ten's note on N2).
+   */
+  const makeStop = (stop, previous = trajectory.barStop) => {
+    for (const tick of wrapper.querySelectorAll('.tr-tick')) tick.tabIndex = tick === stop ? 0 : -1
+    const kept = stop !== null && previous !== null && holds(stop, previous)
+    trajectory.barStop = stop === null
+      ? null
+      : {
+          id: data.id,
+          turn: stop.dataset.turn,
+          lane: stop.dataset.lane,
+          rank: kept ? previous.rank : Number(stop.dataset.rank0),
+          x0: kept && Number.isFinite(previous.x0) ? previous.x0 : Number(stop.dataset.x0),
+        }
+  }
+  /**
+   * The bars for the viewport (developer-ten's zoom N6): merged at the width they are drawn at, the track's over the
+   * zoom's span, so a zoom splits a turn that the whole strip merged; and only those over the viewport and half a
+   * viewport either side (`overviewDrawRange`; DSH draws the spans in its domain), so a long session stays a bar per
+   * 3 px or so per lane. They are drawn again when the zoom or a pan calls for it (`overviewNeedsRedraw`).
+   */
+  let drawn = null
+  const drawBars = () => {
+    const range = overviewDrawRange(trajectory.viewport)
+    drawn = range
+    const out = new Map(lanes.map((lane) => [lane, document.createDocumentFragment()]))
+    for (const bar of overviewBars(placed, trackPx / range.span)) {
+      if (bar.x1 >= range.from && bar.x0 <= range.to) out.get(bar.lane)?.append(makeBar(bar))
+    }
+    for (const lane of lanes) tracks.get(lane).replaceChildren(out.get(lane))
+  }
+  /** The zoom itself, cheap enough for every wheel step: the lanes' tracks drawn wider than the strip and shifted. */
+  const placeTracks = () => {
     const viewport = trajectory.viewport
     const span = viewport === null ? 1 : viewport.to - viewport.from
     for (const track of tracks.values()) {
@@ -7242,14 +8223,44 @@ function renderTimeline(timeline_, data = {}) {
       track.style.right = viewport === null ? '' : 'auto'
     }
     wrapper.dataset.zoomed = viewport === null ? 'false' : 'true'
-    /** Only a bar inside the viewport is a tab stop, so Tab never lands on a bar the strip does not show. */
-    for (const bar of wrapper.querySelectorAll('.tr-bar')) {
-      const inside = viewport === null || (Number(bar.dataset.x1) >= viewport.from && Number(bar.dataset.x0) <= viewport.to)
-      bar.tabIndex = inside ? 0 : -1
-    }
     drawFocus()
   }
+  /**
+   * The bars and the one Tab stop for the viewport. A redraw that takes away the focused bar hands the focus to the new
+   * stop, so the keyboard is never dropped to the page. `force` draws again whatever the zoom (a keyboard step that
+   * panned, so the bars past the margin come within reach of the next step).
+   */
+  const settleBars = (force = false) => {
+    const focused = wrapper.contains(document.activeElement)
+    /** The bar the keyboard is on is where it stands, whichever way it got there. */
+    const active = focused ? document.activeElement.closest?.('.tr-tick') ?? null : null
+    if (active !== null && active.tabIndex !== 0) makeStop(active)
+    if (records.length > 0 && (force || overviewNeedsRedraw(drawn, trajectory.viewport))) drawBars()
+    const stop = trajectory.barStop
+    const shown = inOrder().filter(inView)
+    const nearest = stop === null || shown.length === 0
+      ? undefined
+      : shown.reduce((best, tick) => (Math.abs(Number(tick.dataset.x0) - stop.x0) < Math.abs(Number(best.dataset.x0) - stop.x0) ? tick : best))
+    const next = shown.find((tick) => holds(tick, stop)) ?? nearest ?? shown[0] ?? null
+    makeStop(next)
+    if (focused && !wrapper.contains(document.activeElement)) next?.focus({ preventScroll: true })
+  }
+  const applyViewport = (force = false) => {
+    placeTracks()
+    settleBars(force)
+  }
+  /** A wheel or pan step moves the tracks at once and settles the bars at most once per animation frame. */
+  let frame = null
+  const scheduleViewport = () => {
+    placeTracks()
+    if (frame !== null) return
+    frame = requestAnimationFrame(() => {
+      frame = null
+      if (wrapper.isConnected) settleBars()
+    })
+  }
   applyViewport()
+  if (refocus) wrapper.querySelector('.tr-tick[tabindex="0"]')?.focus({ preventScroll: true })
   /** One tip for the strip: shown 500 ms into a hover over a tick, gone when the pointer leaves or presses. */
   const tip = document.createElement('div')
   tip.id = 'timeline-tip'
@@ -7262,23 +8273,83 @@ function renderTimeline(timeline_, data = {}) {
     tip.hidden = true
   }
   /**
-   * One set of listeners for the whole strip (developer-ten's condition 1): a bar or tick picks its turn, and 500 ms of
+   * One set of listeners for the whole strip (developer-ten's condition 1): a pick on a bar (`pickBar`), and 500 ms of
    * hovering one shows its tip. Delegated, so a session of hundreds of bars adds no listener per bar.
    */
   const tickOf = (target) => target?.closest?.('.tr-tick') ?? null
-  wrapper.addEventListener('click', (clickEvent) => {
-    const tick = tickOf(clickEvent.target)
-    if (tick === null) return
-    clickEvent.stopPropagation()
-    const turnIndex = Number(tick.dataset.turn)
-    /** A turn before the drawn window is drawn first: the overview covers the whole ledger, so its turns all reach a row. */
+  /** Take the reader to a turn's head, drawing it first if it is before the drawn window: an older server's tick pick. */
+  const showTurn = (turnIndex) => {
     if (!turnAnchors.has(turnIndex)) {
       const head = trajectory.rows.findIndex((row) => row.turn === turnIndex && row.turnStart && !row.loose)
       if (head !== -1) revealRows(head)
     }
-    const anchor = turnAnchors.get(turnIndex)
-    if (anchor !== undefined) anchor.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    turnAnchors.get(turnIndex)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  }
+  /**
+   * Take the reader to a timeline record's row (`overviewRecordRow`), drawn first if it is before the drawn window or
+   * folded into its turn, and selected with its inspector open when `select` is set. A record with no row of its own
+   * falls back to its turn.
+   */
+  const showRecord = (turn, lane, rank, select) => {
+    const index = overviewRecordRow(trajectory.rows, turn, lane, rank)
+    if (index === -1) {
+      showTurn(turn)
+      return
+    }
+    if (trajectory.window !== undefined && index < trajectory.window.start) revealRows(sectionHeadAt(trajectory.rows, index))
+    /**
+     * A folded turn opens to show the row, and stays open, by decision: a window's lit rows would otherwise be hidden in
+     * the fold, and the reader came for them (developer-ten's N2 on N8).
+     */
+    if (rowFolded(trajectory.rows[index], trajectory.collapsedTurns, trajectory.expanded)) {
+      trajectory.expanded.add(turn)
+      renderRows()
+    }
+    if (select) selectRow(index)
+    ledger.querySelector('#tr-table tbody tr[data-index="' + index + '"]')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  }
+  /**
+   * A pick on a bar, from a click, Enter or Space (developer-ten's N8). A bar of one record does what a click on DSH's
+   * span does (onRecordSelect): the window goes, and the record's row is selected, its inspector opened, and shown. A
+   * merged bar (heddle-only: DSH merges nothing) windows its records, so their rows are lit, and shows the first of them.
+   * An older server's tick, which names no record, takes the reader to its turn, as before.
+   */
+  const pickBar = (tick) => {
+    hideTip()
+    const turn = Number(tick.dataset.turn)
+    if (!tick.classList.contains('tr-bar')) {
+      showTurn(turn)
+      return
+    }
+    const rank0 = Number(tick.dataset.rank0)
+    if (rank0 === Number(tick.dataset.rank1)) {
+      setWindow(0, 0)
+      showRecord(turn, tick.dataset.lane, rank0, true)
+      return
+    }
+    commitWindow(Number(tick.dataset.x0), Number(tick.dataset.x1))
+    showRecord(turn, tick.dataset.lane, rank0, false)
+  }
+  /**
+   * A pointer's gesture is picked or committed at its release (`onpointerup`), which marks it here so the click that
+   * follows is not picked again; any other click is a pick: Enter or Space on the focused bar, which a button turns into
+   * a click, an assistive technology's press, or a script's (developer-ten's N1 on N8: a press need not come with a
+   * click count of 0). The mark is spent by that click wherever it lands, and a new press or key clears a stale one.
+   */
+  let pickedByPointer = false
+  wrapper.addEventListener('click', (clickEvent) => {
+    const tick = tickOf(clickEvent.target)
+    if (tick === null) return
+    clickEvent.stopPropagation()
+    if (pickedByPointer) {
+      pickedByPointer = false
+      return
+    }
+    pickBar(tick)
   })
+  timeline.onclick = () => {
+    pickedByPointer = false
+  }
   /** Capture-phase enter and leave: they do not bubble, but the strip's capturing listener still sees each tick's. */
   wrapper.addEventListener('pointerenter', (pointerEvent) => {
     const tick = pointerEvent.target?.classList?.contains('tr-tick') ? pointerEvent.target : null
@@ -7286,11 +8357,20 @@ function renderTimeline(timeline_, data = {}) {
     hideTip()
     tipTimer = setTimeout(() => {
       tipTimer = null
+      /** A bar a frame's redraw took away under a resting pointer has no place to show a tip at (developer-ten's N1). */
+      if (!tick.isConnected) return
       tip.replaceChildren(Object.assign(document.createElement('strong'), { textContent: tick.dataset.tipLabel ?? '' }), Object.assign(document.createElement('span'), { textContent: tick.dataset.tipWhen ?? '' }))
+      tip.hidden = false
+      /**
+       * Under the strip at the tick, as DSH's tip sits below its span, kept inside the window: shifted left when it would
+       * pass the right edge, and above the strip when there is no room below. Measured once shown, at its own width.
+       */
       const strip = timeline.getBoundingClientRect()
       const at = tick.getBoundingClientRect()
-      tip.style.left = Math.max(0, Math.min(at.left - strip.left, strip.width - 220)) + 'px'
-      tip.hidden = false
+      const width = tip.offsetWidth
+      const height = tip.offsetHeight
+      tip.style.left = Math.max(8, Math.min(at.left, window.innerWidth - width - 8)) + 'px'
+      tip.style.top = (strip.bottom + 4 + height <= window.innerHeight - 4 ? strip.bottom + 4 : Math.max(4, strip.top - height - 4)) + 'px'
     }, 500)
   }, true)
   wrapper.addEventListener('pointerleave', (pointerEvent) => {
@@ -7304,23 +8384,15 @@ function renderTimeline(timeline_, data = {}) {
    * fractions, so a zoom or a pan redraws it where its time is. The right button is DSH's other gesture: a click clears
    * the window, and a drag pans a zoomed strip (dragging right shows earlier time). The wheel zooms about the pointer.
    */
-  let dragging = false
-  let startX = 0
-  let pan = null
+  /** The gestures under way live in `state`, so a redraw in the middle of one does not end it. */
   const fractionAt = (clientX) => {
     const bounds = timeline.getBoundingClientRect()
     return Math.min(Math.max((clientX - bounds.left) / Math.max(bounds.width, 1), 0), 1)
   }
-  const setWindow = (from, to) => {
-    if (to - from < 0.01 * (trajectory.viewport === null ? 1 : trajectory.viewport.to - trajectory.viewport.from)) {
-      focusDomain = null
-      trajectory.focus = null
-    } else {
-      focusDomain = { from, to }
-      const start = trajectory.domainStart
-      const end = trajectory.domainEnd
-      trajectory.focus = start !== undefined && end !== undefined && end > start ? { from: start + from * (end - start), to: start + to * (end - start) } : null
-    }
+  const applyWindow = (next) => {
+    state.focus = next
+    trajectory.focus = next === null ? null : focusWindowTime(next.from, next.to, slots, trajectory.durationActual, startsAtMs, total)
+    timeline.dataset.window = state.focus === null ? 'false' : 'true'
     drawFocus()
     /** A focus window that reaches rows before the drawn window draws them first, so they can be lit or dimmed. */
     const focus = trajectory.focus
@@ -7331,13 +8403,32 @@ function renderTimeline(timeline_, data = {}) {
     if (reach !== -1 && trajectory.window !== undefined && reach < trajectory.window.start) revealRows(sectionHeadAt(trajectory.rows, reach))
     else renderRows()
   }
+  /** A drag's window as it is drawn; one under 1% of the view is none yet. */
+  const setWindow = (from, to) => applyWindow(isWindow(from, to) ? { from, to } : null)
+  /**
+   * A window as it is let go, as DSH commits one: no narrower than one record's share of the domain (or the view, if
+   * that is narrower), else that width centred on it.
+   */
+  const commitWindow = (from, to) => {
+    const view = trajectory.viewport === null ? 1 : trajectory.viewport.to - trajectory.viewport.from
+    const least = Math.min(view, 1 / Math.max(records.length > 0 ? records.length : spans.length, 1))
+    applyWindow(to - from < least ? centredWindow((from + to) / 2, least) : { from, to })
+  }
+  /** Each record's rank among its turn's records in its lane, as the bars name them, so a point finds its row. */
+  const ranks = new Map()
+  const rankOf = placed.map((record) => {
+    const key = record.turn + '|' + record.lane
+    const rank = ranks.get(key) ?? 0
+    ranks.set(key, rank + 1)
+    return rank
+  })
   timeline.oncontextmenu = (menuEvent) => menuEvent.preventDefault()
   timeline.onwheel = (wheelEvent) => {
     /** A wheel that cannot zoom (no vertical delta, a pinch with Ctrl, a domain too short to zoom) is the page's. */
     if (wheelEvent.deltaY === 0 || wheelEvent.ctrlKey || minSpan >= 0.999) return
     wheelEvent.preventDefault()
     trajectory.viewport = zoomViewport(trajectory.viewport, fractionAt(wheelEvent.clientX), wheelEvent.deltaY, minSpan)
-    applyViewport()
+    scheduleViewport()
   }
   const capture = (pointerEvent) => {
     try {
@@ -7348,49 +8439,113 @@ function renderTimeline(timeline_, data = {}) {
   }
   timeline.onpointerdown = (pointerEvent) => {
     if (pointerEvent.button === 2) {
-      pan = { x: pointerEvent.clientX, from: trajectory.viewport?.from ?? 0, viewport: trajectory.viewport, moved: false }
+      state.pan = { x: pointerEvent.clientX, from: trajectory.viewport?.from ?? 0, viewport: trajectory.viewport, moved: false }
       capture(pointerEvent)
       return
     }
-    if (pointerEvent.button !== 0 || pointerEvent.target.closest('.tr-tick') !== null) return
-    dragging = true
-    startX = viewportDomain(trajectory.viewport, fractionAt(pointerEvent.clientX))
-    focusDomain = { from: startX, to: startX }
+    if (pointerEvent.button !== 0) return
+    /** A press anywhere starts a drag, on a bar too, as on DSH's track; a release within 3 px of it is a click. */
+    const tick = tickOf(pointerEvent.target)
+    pickedByPointer = false
+    state.press = { x: pointerEvent.clientX, bar: tick === null ? null : { turn: tick.dataset.turn, lane: tick.dataset.lane, rank: Number(tick.dataset.rank0) } }
+    state.drag = viewportDomain(trajectory.viewport, fractionAt(pointerEvent.clientX))
+    state.focus = { from: state.drag, to: state.drag }
     drawFocus()
     capture(pointerEvent)
   }
   const endGestures = () => {
-    pan = null
-    dragging = false
+    state.pan = null
+    state.drag = null
+    state.press = null
   }
   timeline.onpointercancel = endGestures
   timeline.onlostpointercapture = endGestures
   timeline.onpointermove = (pointerEvent) => {
-    if (pan !== null && (pointerEvent.buttons & 2) === 0) pan = null
+    if (state.pan !== null && (pointerEvent.buttons & 2) === 0) state.pan = null
+    const pan = state.pan
     if (pan !== null) {
       if (Math.abs(pointerEvent.clientX - pan.x) >= 3) pan.moved = true
       if (pan.viewport === null) return
       const width = Math.max(timeline.getBoundingClientRect().width, 1)
       trajectory.viewport = panViewport(pan.viewport, pan.from, (pointerEvent.clientX - pan.x) / width)
-      applyViewport()
+      scheduleViewport()
       return
     }
-    if (!dragging) return
+    if (state.drag === null) return
     const x = viewportDomain(trajectory.viewport, fractionAt(pointerEvent.clientX))
-    setWindow(Math.min(startX, x), Math.max(startX, x))
+    setWindow(Math.min(state.drag, x), Math.max(state.drag, x))
   }
   timeline.onpointerup = (pointerEvent) => {
+    const pan = state.pan
     if (pan !== null) {
       const moved = pan.moved || Math.abs(pointerEvent.clientX - pan.x) >= 3
-      pan = null
+      state.pan = null
       if (!moved) setWindow(0, 0)
       return
     }
-    if (!dragging) return
-    dragging = false
+    const start = state.drag
+    if (start === null) return
+    const press = state.press
+    state.drag = null
+    state.press = null
     const x = viewportDomain(trajectory.viewport, fractionAt(pointerEvent.clientX))
-    setWindow(Math.min(startX, x), Math.max(startX, x))
+    /**
+     * DSH's release: a click on a bar picks it (`pickBar`); a click on the empty track centres the narrowest window there
+     * and shows the nearest record's row (onRecordFocus); a drag of 3 px or more commits its window, widened to the
+     * narrowest if it is narrower.
+     */
+    if (press !== null && Math.abs(pointerEvent.clientX - press.x) < 3) {
+      const tick = press.bar === null ? undefined : [...wrapper.querySelectorAll('.tr-tick')].find((each) => holds(each, press.bar))
+      pickedByPointer = true
+      if (tick !== undefined) {
+        pickBar(tick)
+        return
+      }
+      commitWindow(start, start)
+      const nearest = nearestItem(placed.map((record) => ({ x0: record.x0 ?? record.start, x1: record.x1 ?? record.end })), start)
+      if (nearest !== -1) showRecord(placed[nearest].turn, placed[nearest].lane, rankOf[nearest], false)
+      return
+    }
+    pickedByPointer = true
+    commitWindow(Math.min(start, x), Math.max(start, x))
   }
+  /**
+   * The keyboard, from the strip's one Tab stop: the arrows, Home and End move it among the bars, a zoomed strip panning
+   * just far enough to show the bar (DSH's rule for its selected span); Enter or Space picks the bar, as a click does; and
+   * Escape clears the focus window, as Escape on DSH's overview does. A bar the keyboard stands on stays the stop.
+   */
+  wrapper.addEventListener('focusin', (focusEvent) => {
+    const tick = tickOf(focusEvent.target)
+    if (tick !== null && tick.tabIndex !== 0) makeStop(tick)
+  })
+  wrapper.addEventListener('keydown', (keyEvent) => {
+    pickedByPointer = false
+    if (keyEvent.altKey || keyEvent.ctrlKey || keyEvent.metaKey || keyEvent.isComposing) return
+    if (keyEvent.key === 'Escape') {
+      if (state.focus === null) return
+      keyEvent.preventDefault()
+      setWindow(0, 0)
+      return
+    }
+    const tick = tickOf(keyEvent.target)
+    if (tick === null) return
+    const ticks = inOrder()
+    const target = overviewKeyTarget(ticks.map((each) => ({ x0: Number(each.dataset.x0), lane: each.dataset.lane })), ticks.indexOf(tick), keyEvent.key)
+    if (target === null) return
+    keyEvent.preventDefault()
+    const next = ticks[target]
+    const shown = viewportShowing(trajectory.viewport, Number(next.dataset.x0), Number(next.dataset.x1))
+    makeStop(next)
+    next.focus({ preventScroll: true })
+    /**
+     * A step that pans draws the bars again about the new view, which takes the focused bar away: settleBars hands the
+     * focus to the bar that now holds its record. Without the redraw, the next step would stop at the margin's edge.
+     */
+    if (shown !== trajectory.viewport) {
+      trajectory.viewport = shown
+      applyViewport(true)
+    }
+  })
   const legend = document.createElement('div')
   legend.id = 'timeline-legend'
   legend.textContent = [human(total) + ' recorded', spans.length + ' turn(s)'].filter(Boolean).join(' · ')
@@ -7410,9 +8565,15 @@ function wireTrajectoryToolbar() {
       trajectory[key] = !trajectory[key]
       button.setAttribute('aria-pressed', trajectory[key] ? 'true' : 'false')
       if (key === 'durationActual') {
-        /** Record slots and recorded time are different domains, with different floors: a zoom does not carry over. */
+        /**
+         * Record slots and recorded time are different domains, with different floors: neither a zoom nor a focus window
+         * carries over. The redraw drops the window from the strip, so the rows it dimmed are lit again with it.
+         */
         trajectory.viewport = null
+        const hadFocus = trajectory.focus !== null
+        trajectory.focus = null
         renderTimeline(trajectory.timeline, trajectory.data)
+        if (hadFocus) renderRows()
       }
       else renderRows()
     })
@@ -7598,7 +8759,7 @@ function historyFailureText(status, statusText, failure) {
     failure !== null && typeof failure === 'object' && typeof failure.error === 'string' && failure.error.length > 0
       ? failure.error
       : statusText || 'no reason given'
-  return `Failed to load history: ${reason} (${status})`
+  return `Failed to load history: ${reason}${status > 0 ? ` (${status})` : ''}`
 }
 
 /* chat-scroll:begin */
@@ -7678,8 +8839,62 @@ let sessionFolder = null
  * late was appended under the newer session too. So every step after an await first checks that this is still the
  * latest open (`showGeneration`).
  */
+/* page-lifecycle:begin */
+/**
+ * The page's own leaving, for failHistory's write of the empty selection (#56; the union of first-visit-2 and 4b2a0552).
+ *
+ * A navigation (a reload, a link) stops the page's requests, and a history read rejects while the old page still runs.
+ * Writing the empty selection then emptied the saved selection of a session that could be read, and the next load
+ * restored nothing (check-chat-view's resize test, reloading twice in quick succession). So the write waits:
+ * - `beforeunload` and `pagehide` mark the page as leaving, with **one** expiry timer, replaced on each, so an earlier
+ *   timer never ends a newer leaving (developer-twelve's 10a6);
+ * - a failure's write that comes while the page is leaving is kept as pending, `{ id, generation }`, not dropped;
+ * - when the page turns out to stay, at `pageshow` or when the expiry fires (a canceled navigation, one that became a
+ *   download), the pending write is done if that same failure still shows: nothing current, the same unavailable
+ *   session, the same open generation (developer-twelve's 9a04). A page that really unloads runs neither, and writes
+ *   nothing.
+ * A page that is not leaving writes at once.
+ */
+const LEAVING_EXPIRY_MS = 10_000
+const pageLifecycle = (() => {
+  let leaving = false
+  let expiry = null
+  let pending = null
+  const stillShown = (failure) => current === null && unavailableSession === failure.id && showGeneration === failure.generation
+  const resume = () => {
+    leaving = false
+    if (expiry !== null) clearTimeout(expiry)
+    expiry = null
+    const failure = pending
+    pending = null
+    if (failure !== null && stillShown(failure)) rememberCurrent()
+  }
+  return {
+    leave() {
+      leaving = true
+      if (expiry !== null) clearTimeout(expiry)
+      expiry = setTimeout(resume, LEAVING_EXPIRY_MS)
+    },
+    resume,
+    /** failHistory's write of the empty selection for the failure of `id` in open `generation`. */
+    clearFailedSelection(id, generation) {
+      const failure = { id, generation }
+      if (leaving) {
+        pending = failure
+        return
+      }
+      if (stillShown(failure)) rememberCurrent()
+    },
+  }
+})()
+window.addEventListener('beforeunload', () => pageLifecycle.leave())
+window.addEventListener('pagehide', () => pageLifecycle.leave())
+window.addEventListener('pageshow', () => pageLifecycle.resume())
+/* page-lifecycle:end */
+
 async function showSession(id) {
   const generation = ++showGeneration
+  const superseded = () => generation !== showGeneration || current !== id
   /** Where the reader left the session being replaced, before anything below changes the view. */
   rememberChatScroll()
   sessionFolder = null
@@ -7691,7 +8906,6 @@ async function showSession(id) {
   sessionStats = null
   liveRounds = 0
   liveUsage = undefined
-  liveTurns = 0
   liveGenerationMs = 0
   liveDecodeTokens = 0
   liveRoundStartedAt = null
@@ -7726,10 +8940,10 @@ async function showSession(id) {
   adoptSession(id)
   await refreshSessions()
   /** A later open started while the list was read. That open empties and fills the log, so this one must not touch it. */
-  if (generation !== showGeneration) return false
+  if (superseded()) return false
   syncSelectionToSession()
   if (view === 'trajectory') await showLedger(id)
-  if (generation !== showGeneration) return false
+  if (superseded()) return false
   /**
    * The log is cleared and refilled from the session's own history.
    *
@@ -7738,67 +8952,89 @@ async function showSession(id) {
    */
   sessionLoading = { id, generation, events: [] }
   log.replaceChildren()
+  /**
+   * A session that is no longer there is **not** the session being shown.
+   *
+   * Measured: a remembered id whose log had been removed left `current` pointing at nothing — the header said
+   * "No session", the conversation column was empty, and the empty state stayed hidden because `current` still
+   * held an id. Giving the pointer back is what lets the panel say the truth: there is nothing open here.
+   *
+   * What it says follows DSH (#56; ported from developer-six's 4cd4cafb, R-developer-six-4): Chat's "Failed to load
+   * history: {message} ({code})" where the conversation would be, and a disabled composer that reads "Session
+   * unavailable". This branch used to paint the blank start page under "No session" with the composer enabled, which
+   * invited a message the server then answered with a 500, and showed the server's answer nowhere. The failure line
+   * is content, so it wins over the empty state (`paintEmptyState`) for a session the person opened.
+   *
+   * A page load never reaches this for a saved session that is gone: `restoreSelection` reads the list first, and an
+   * unlisted saved session starts a fresh New session instead (`WorkspaceTree.restoreChoice`), as DSH's
+   * `restoreSelection` does. The tree is read again here, so a row whose session is no longer listed goes, and the
+   * selection with it.
+   */
+  async function failHistory(status, statusText, failure, vanished = false) {
+    if (generation !== showGeneration || current !== id) return false
+    // Lifecycle state was processed on first delivery. A partial live tail is not history.
+    if (sessionLoading?.generation === generation) {
+      sessionLoading.events.length = 0
+      sessionLoading = null
+    }
+    unavailableSession = id
+    current = null
+    paintSessionHeading()
+    const branch = document.getElementById('session-branch')
+    if (branch !== null) branch.textContent = ''
+    const note = document.createElement('div')
+    note.className = 'turn denied load-error'
+    note.setAttribute('role', 'alert')
+    note.textContent = historyFailureText(status, statusText, failure)
+    log.append(note)
+    /**
+     * The draft that takes a vanished session's place starts from the default selection, not that session's (A104).
+     * Only the server's refusal says the session is gone; a read that failed in transit keeps the seat.
+     */
+    if (vanished) {
+      chosenEndpoint = null
+      chosenModel = defaultSelection.model
+      chosenEffort = defaultSelection.effort
+      renderModelSeat()
+    }
+    paintEmptyState()
+    applySessionAccess(null)
+    /** And it is not kept as the session to reopen either: DSH's `clearMain` empties its saved selection too. Nothing open to lock. */
+    setTimeout(() => pageLifecycle.clearFailedSelection(id, generation), 0)
+    paintComposerAccess()
+    renderComposerState()
+    selectedPath = null
+    await renderTree()
+    markSelection()
+    jobsSessionChanged()
+    paintScheduleHeader()
+    return false
+  }
   try {
+    /** The seat's choice count when this view was asked for: a choice made after it outranks the view. */
+    const selectionAt = selectionSeq
     const response = await fetch('/api/sessions/' + encodeURIComponent(id))
-    if (generation !== showGeneration) return false
+    if (superseded()) return false
     if (!response.ok) {
-      if (sessionLoading?.generation === generation) sessionLoading = null
-      /**
-       * A session that is no longer there is **not** the session being shown.
-       *
-       * Measured: a remembered id whose log had been removed left `current` pointing at nothing — the header said
-       * "No session", the conversation column was empty, and the empty state stayed hidden because `current` still
-       * held an id. Giving the pointer back is what lets the panel say the truth: there is nothing open here.
-       *
-       * What it says follows DSH (#56; ported from developer-six's 4cd4cafb, R-developer-six-4): Chat's "Failed to load
-       * history: {message} ({code})" where the conversation would be, and a disabled composer that reads "Session
-       * unavailable". This branch used to paint the blank start page under "No session" with the composer enabled, which
-       * invited a message the server then answered with a 500, and showed the server's answer nowhere. The failure line
-       * is content, so it wins over the empty state (`paintEmptyState`) for a session the person opened.
-       *
-       * A page load never reaches this for a saved session that is gone: `restoreSelection` reads the list first, and an
-       * unlisted saved session starts a fresh New session instead (`WorkspaceTree.restoreChoice`), as DSH's
-       * `restoreSelection` does. The tree is read again here, so a row whose session is no longer listed goes, and the
-       * selection with it.
-       */
       const failure = await response.json().catch(() => ({}))
-      /** A later open replaced this one while the read was in flight: that session is the one shown, not this failure. */
-      if (generation !== showGeneration) return false
-      if (current !== id) return false
-      unavailableSession = id
-      current = null
-      paintSessionHeading()
-      const branch = document.getElementById('session-branch')
-      if (branch !== null) branch.textContent = ''
-      const note = document.createElement('div')
-      note.className = 'turn denied load-error'
-      note.setAttribute('role', 'alert')
-      note.textContent = historyFailureText(response.status, response.statusText, failure)
-      log.append(note)
-      paintEmptyState()
-      applySessionAccess(null)
-      /** And it is not kept as the session to reopen either: DSH's `clearMain` empties its saved selection too. Nothing open to lock. */
-      rememberCurrent()
-      paintComposerAccess()
-      renderComposerState()
-      selectedPath = null
-      await renderTree()
-      markSelection()
-      jobsSessionChanged()
-      paintScheduleHeader()
-      return false
+      return await failHistory(response.status, response.statusText, failure, true)
     }
     const body = await response.json()
-    /** The same check after the body is read: only the latest open appends its turns. */
-    if (generation !== showGeneration) return false
+    /** Only the latest open publishes; an away session may still retain its own model record. */
+    if (superseded()) {
+      if (current !== id) adoptViewSelection(id, body, selectionAt)
+      return false
+    }
     /**
      * The session's own model choice, when it has one. A session that has never recorded one leaves the
      * seat where it is, which is what lets a person pick a backend **before** the turn that creates the
      * session: the choice travels with the request and the server records it on the session it made.
      */
-    applySessionModel(body.endpoint ?? null, body.model ?? null, body.reasoningEffort ?? null)
+    /** The view's selection, published only while this session is still shown and has no newer choice (#46). */
+    adoptViewSelection(id, body, selectionAt)
     /** The same answer that carries the transcript carries the statistics its dock prints. */
     sessionStats = body.stats ?? null
+    liveTurns.delete(id)
     updateStatusBar()
     /** The session's own access mode, which is what the chip must show after a reload. */
     applySessionAccess(body.permission?.mode ?? null)
@@ -7828,7 +9064,9 @@ async function showSession(id) {
         holder.dataset.kind = 'command'
         holder.dataset.commandId = String(turn.commandId)
         log.append(holder)
-        void slashReady.then((commands) => commands?.drawTurn(turn))
+        void slashReady.then((commands) => {
+          if (generation === showGeneration && unavailableSession === null && current === id) commands?.drawTurn(turn)
+        })
         continue
       }
       try {
@@ -7846,16 +9084,16 @@ async function showSession(id) {
     restoreChatScroll(id)
   } catch (error) {
     /** An older open's failed read says nothing in the conversation a later open is drawing. */
-    if (generation !== showGeneration) return false
-    // A history that cannot be read must not empty the live view as well; the stream keeps appending.
-    drawKeptEvents(generation, null)
-    const note = document.createElement('div')
-    note.className = 'turn denied'
-    note.textContent = 'could not read this session: ' + (error && error.message)
-    log.append(note)
+    if (superseded()) return false
+    return await failHistory(0, '', { error: error && error.message })
   }
+  // History was drawn already. A same-session replacement still leaves this requested session shown,
+  // but the older generation must not perform any further panel updates.
+  if (superseded()) return current === id
   await refreshGoal()
+  if (superseded()) return current === id
   await refreshTodo()
+  if (superseded()) return current === id
   /**
    * The reminders: the transcript's turn tails get their cards, then both sources are re-read — the cards first, so the
    * catalog read is newer than their mount and a task deleted since the turn reads "Deleted".
@@ -8684,10 +9922,15 @@ events.addEventListener('session', (message) => {
   const payload = JSON.parse(message.data)
   const event = payload.event
   /**
-   * The session the panel shows: the open one, or the one whose history could not be loaded (#56), under whose "Failed
-   * to load history" no other session's live turn may draw. Only with neither does the panel follow any session's turn.
+   * Another page (or this one) changed the shown session's model selection: the seat follows it, as every DSH
+   * client follows the session's `modelSelection` (#46).
    */
-  const shown = current ?? unavailableSession
+  if (event.type === 'model/selection' && typeof payload.session === 'string') {
+    recordedSelections.add(payload.session)
+    serverSeats.set(payload.session, { endpoint: event.endpoint ?? null, model: event.model ?? null, effort: event.reasoningEffort ?? null })
+    heldSeats.set(payload.session, { endpoint: event.endpoint ?? null, model: event.model ?? null, effort: event.reasoningEffort ?? null })
+    if (payload.session === current && current !== null) applySessionModel(event.endpoint ?? null, event.model ?? null, event.reasoningEffort ?? null)
+  }
   if (event.type === 'message' || event.type === 'assistant/completed' || event.type === 'turn/completed') scheduleTreeRefresh()
   /**
    * Whether a turn is running, read before the session filter below and for **every** session.
@@ -8742,10 +9985,6 @@ events.addEventListener('session', (message) => {
     runningSince.delete(payload.session)
     paintRunningMarks()
     scheduleTreeRefresh()
-    if (shown === null || payload.session === shown) {
-      if (TurnFailure.shows(event)) drawTurnFailure(payload.session, event.message)
-      settleChat()
-    }
     if (payload.session === composerKey) void pumpQueue()
     renderComposerState()
   }
@@ -8766,6 +10005,38 @@ events.addEventListener('session', (message) => {
      */
     if (queues.has(payload.session)) void pumpQueue(payload.session)
     renderComposerState()
+  }
+  // Keep all-session lifecycle bookkeeping above, but no transcript drawing while unavailable.
+  if (unavailableSession !== null) return
+  const shown = current ?? unavailableSession
+  if (shown && payload.session !== shown) {
+    // Retain other sessions' persisted facts without drawing them into this conversation (#116).
+    if (event.type === 'message' && event.message.role === 'user') {
+      liveTurns.set(payload.session, (liveTurns.get(payload.session) ?? 0) + 1)
+    }
+    return
+  }
+  /** The panel's session is being read from history: its events wait for the read (see `sessionLoading`). */
+  if (sessionLoading !== null && payload.session === sessionLoading.id) {
+    sessionLoading.events.push(payload)
+    return
+  }
+  drawSessionEvent(payload)
+})
+
+/**
+ * Draw one event of the panel's session: the stream listener's drawing half, which `drawKeptEvents` also replays for
+ * the events kept aside while the session's history was read.
+ */
+function drawSessionEvent(payload) {
+  const event = payload.event
+  if (unavailableSession !== null) return
+  const shown = current ?? unavailableSession
+  if (shown && payload.session !== shown) return
+  if (event.type === 'turn/failed') {
+    if (TurnFailure.shows(event)) drawTurnFailure(payload.session, event.message)
+    settleChat()
+  } else if (event.type === 'turn/completed') {
     /**
      * And it is when the answer stops arriving, so the rows settle and the document is drawn.
      *
@@ -8789,24 +10060,11 @@ events.addEventListener('session', (message) => {
       void attachEditedFiles()
     }
   }
-  if (shown && payload.session !== shown) return
-  /** The panel's session is being read from history: its events wait for the read (see `sessionLoading`). */
-  if (sessionLoading !== null && payload.session === sessionLoading.id) {
-    sessionLoading.events.push(payload)
-    return
-  }
-  drawSessionEvent(payload)
-})
-
-/**
- * Draw one event of the panel's session: the stream listener's drawing half, which `drawKeptEvents` also replays for
- * the events kept aside while the session's history was read.
- */
-function drawSessionEvent(payload) {
-  const event = payload.event
   /** A slash command's row, whichever window ran it (src/commands/menu.js). */
   if (event.type === 'command/run' || event.type === 'command/done' || event.type === 'plan/mode') {
-    void slashReady.then((commands) => commands?.draw(event))
+    void slashReady.then((commands) => {
+      if (unavailableSession === null && (current === null || payload.session === current)) commands?.draw(event)
+    })
     return
   }
   /**
@@ -8843,6 +10101,13 @@ function drawSessionEvent(payload) {
     }
     return
   }
+  /**
+   * A replacement copy is not drawn. It is a message that stands in for part of the model's surface: today, a tool result
+   * cut down under context pressure. It is what the model is sent from now on, not something a person reads; the original
+   * stays in the log and on its card. DSH's chat keeps such a copy model-only (`isAppendSurfaceEvent`). Drawn, it was
+   * appended to its call's full output, which then showed twice until a reload (#186).
+   */
+  if (event.type === 'message' && isReplacementCopy(event)) return
   if (event.type === 'assistant/chunk' && event.chunk.type === 'text-delta') {
     settleReasoning()
     add('assistant', event.chunk.text)
@@ -8868,6 +10133,10 @@ function drawSessionEvent(payload) {
       })
     }
   } else if (event.type === 'message' && event.message.role === 'user') {
+    // Count the same persisted fact as both backend folds, not a local send attempt (#116).
+    // An admitted prompt still counts if its provider fails or its acknowledgment is lost.
+    liveTurns.set(payload.session, (liveTurns.get(payload.session) ?? 0) + 1)
+    updateStatusBar()
     add('user', messageContentText(event.message.content), false, undefined, {
       time: new Date().toISOString(),
       attachments: contentAttachments(event.message.content, payload.session),
@@ -8899,7 +10168,7 @@ function drawSessionEvent(payload) {
 /**
  * Draw the events kept aside during a history read. When the answer said how far it reaches (`upTo`, its `seq`), only
  * the events past it are drawn; an event without a `seq` is a live-only fragment the history's card already covers.
- * Without a `seq` (a read that failed), every kept event is drawn, as the stream would have.
+ * Without a snapshot `seq`, every kept event is drawn. A failed read discards them instead.
  */
 function drawKeptEvents(generation, upTo) {
   if (sessionLoading === null || sessionLoading.generation !== generation) return
@@ -9267,6 +10536,7 @@ const slashReady = import('/commands/menu.js')
         await startNewSession()
         return composerKey === QUEUE_KEY_NONE ? null : composerKey
       },
+      maskUserText,
       sendAsPrompt: (text, attachments = []) => submitText(text, attachments, 'enter'),
       pendingAttachments: () => pendingAttachments.length,
       takeAttachments: () => takeAttachments(),
@@ -9893,8 +11163,9 @@ function queueRow(item) {
   if (Array.isArray(item.attachments) && item.attachments.length > 0) row.append(queueAttachmentStrip(item.attachments))
   const preview = document.createElement('span')
   preview.className = 'preview'
-  preview.textContent = queuePreview(item.text)
-  preview.title = item.text
+  const masked = maskUserText(item.text)
+  preview.textContent = queuePreview(masked)
+  preview.title = masked
   row.append(preview)
   if (item.status === 'sending' || item.status === 'failed') {
     const status = document.createElement('span')
@@ -10097,6 +11368,8 @@ events.addEventListener('turn', (message) => {
 
 async function runTurn(text, key, attachments = [], onAccepted) {
   const target = key === QUEUE_KEY_NONE ? null : key
+  const seatAtSend = { endpoint: chosenEndpoint, model: chosenModel, effort: chosenEffort }
+  const shownAtSend = current
   /**
    * A message with no session starts one, and it starts it **where the page says** (#134): the workspace the hero chip
    * and the note name (`newConversationTarget`), read after boot has drawn the tree and run first use, so a message sent
@@ -10121,29 +11394,39 @@ async function runTurn(text, key, attachments = [], onAccepted) {
       throw new Error(NO_WORKSPACE_REFUSAL)
     }
   }
-  liveTurns += 1
-  updateStatusBar()
   /** The turn's own events reach this page only through the stream, so a send at load waits for it to open (#128). */
   await events.whenOpen(3000)
   const startedAt = performance.now()
+  // Every record in flight, including one chosen while this turn waited, reaches the server before the turn does.
+  while (pendingSaves.size > 0) await Promise.all([...pendingSaves])
+  const held = target !== null ? heldSeats.get(target) : undefined
+  // An unknown queued session must not inherit another session's currently shown model.
+  const carrySeat = target === null || (!recordedSelections.has(target) && (held !== undefined || target === shownAtSend))
+  /** The target's own seat, as its records settled (a refusal restores it), else its seat shown at the send. */
+  const seat = held ?? seatAtSend
   const response = await sendTurn({
     /**
      * A session's turn names it, and the server resumes that session wherever it lives. A turn with no session names the
      * folder it starts in, above.
      *
-     * The endpoint and model named here are the composer's own choice, which is what makes the model seat
-     * more than a label: the turn asks the backend a person picked, and the server records it on the session
-     * so a reload comes back to it.
+     * The endpoint and model are named only for a session with no recorded selection: one this turn creates, or a
+     * blank one (New session, a folder) whose first turn must run on the seat's choice. A turn into a session that
+     * has a record names none and runs on the session's own selection: DSH's prompt carries no model, and the
+     * selection is session state every page follows (`model/selection`). Sending the seat with every turn let a
+     * second tab, still showing the model it opened with, silently switch the session back over another tab's
+     * choice (#46). A choice made here is recorded at once by `recordSelection`, so nothing is lost.
      */
     prompt: text,
     ...(attachments.length > 0 ? { attachments: attachments.map((item) => item.path) } : {}),
     session: target,
     folder,
     ...(fresh ? { new: true } : {}),
-    ...selectionForTurn(),
+    ...(carrySeat ? selectionForSeat(seat) : {}),
     /** Answer at acceptance; the verdict comes on the stream (#128). A server without it streams, read below. */
     detach: true,
   })
+  /** The server records the selection a turn carried, so the session now has one. */
+  if (carrySeat && target !== null && response.ok) recordedSelections.add(target)
   if (!response.ok) {
     /**
      * The server's own sentence, not only its status.
@@ -10175,9 +11458,9 @@ async function runTurn(text, key, attachments = [], onAccepted) {
     if (name === 'session') {
       /**
        * A turn with no session starts one, and the panel follows it: the queue that was loose while the
-       * turn ran belongs to the session it created.
+       * turn ran belongs to the session it created. A history failure that took the panel meanwhile stays unavailable.
        */
-      if (target === null && adopted === null) {
+      if (target === null && adopted === null && unavailableSession === null) {
         adopted = payload.session
         /**
          * The panel may show another session by now (developer-ten's N1): a message sent from the blank composer during
@@ -10189,6 +11472,7 @@ async function runTurn(text, key, attachments = [], onAccepted) {
         if (current !== null && current !== payload.session) void showSession(payload.session)
         else {
           current = payload.session
+          updateStatusBar()
           rememberCurrent()
           chooseWorkspace(null)
           adoptSession(payload.session)
@@ -10484,11 +11768,12 @@ let sessionStats = null
 let liveRounds = 0
 let liveUsage = undefined
 /**
- * A turn this page started that the fold does not count yet. The reference's turn count moves when a prompt
- * is sent, not when the transcript has finished drawing; the durable count on its own therefore lags a fresh
- * turn, and counting rendered rows instead lags the other way. The sum is the figure a person expects.
+ * Persisted user messages delivered since the durable fold was read. The same facts count in both backend
+ * folds; a local submission or admission acknowledgment alone is not a message (#116). Keep each session's
+ * count even before a new turn adopts its id, without letting another session's messages contaminate its dock.
+ * History reads keep their events until the cutoff excludes facts already folded.
  */
-let liveTurns = 0
+const liveTurns = new Map()
 /**
  * The rate's halves for the round in flight: when its request opened, the time to its done frame, and the
  * output tokens that frame reported. Reset when the durable fold is re-read, so a finished turn is counted
@@ -10824,7 +12109,7 @@ function updateStatusBar() {
     statusBar.hidden = true
     return
   }
-  const turns = (sessionStats?.turns ?? 0) + liveTurns
+  const turns = (sessionStats?.turns ?? 0) + (liveTurns.get(current) ?? 0)
   const steps = (sessionStats?.steps ?? 0) + liveRounds
   const usage = addUsage(sessionStats?.usage, liveUsage)
   const cell = (name) => statusBar.querySelector(`[data-stat="${name}"]`)
@@ -10906,7 +12191,7 @@ async function refreshSessionStats() {
     sessionStats = body.stats ?? null
     liveUsage = undefined
     liveRounds = 0
-    liveTurns = 0
+    liveTurns.delete(id)
     liveGenerationMs = 0
     liveDecodeTokens = 0
     liveRoundStartedAt = null
@@ -11461,6 +12746,25 @@ function closeAccessGate() {
 }
 
 /**
+ * The custom risk card needs the containment native dialogs already provide elsewhere on this page.
+ * After DSH's RiskConfirmation -> Modal focus hook: use the current enabled, visible controls on every Tab.
+ * This is only the risk gate's plain Tab cycle; Escape cancellation and native control activation stay unchanged.
+ */
+function handleAccessGateTab(keyEvent) {
+  if (accessDialog.hidden || keyEvent.key !== 'Tab' || keyEvent.defaultPrevented ||
+      keyEvent.ctrlKey || keyEvent.altKey || keyEvent.metaKey || keyEvent.isComposing || keyEvent.keyCode === 229) return
+  const focusables = [...accessDialog.querySelectorAll('button, input, select, textarea, a[href], [tabindex]')].filter((element) =>
+    element.tabIndex >= 0 && !element.matches(':disabled') && !element.closest('[hidden], [inert]') &&
+    element.getClientRects().length > 0 && !['hidden', 'collapse'].includes(getComputedStyle(element).visibility))
+  keyEvent.preventDefault()
+  const at = focusables.indexOf(document.activeElement)
+  const next = at < 0
+    ? (keyEvent.shiftKey ? focusables.length - 1 : 0)
+    : (at + (keyEvent.shiftKey ? -1 : 1) + focusables.length) % focusables.length
+  ;(focusables[next] ?? accessDialog).focus()
+}
+
+/**
  * Ask the server to change this session's mode, and **only** its answer changes the label.
  *
  * The confirmation token is sent only from the gate's Enable button, which is only enabled after the risk has
@@ -11957,6 +13261,7 @@ document.addEventListener('click', (clickEvent) => {
   if (!accessMenu.contains(clickEvent.target) && clickEvent.target !== accessButton) closeAccessMenu()
 })
 document.addEventListener('keydown', (keyEvent) => {
+  handleAccessGateTab(keyEvent)
   if (keyEvent.key !== 'Escape') return
   if (!accessDialog.hidden) {
     closeAccessGate()
@@ -11989,6 +13294,8 @@ let endpointDefault = null
 /** What this page will ask with. `null` means "whatever the server defaults to". */
 let chosenEndpoint = null
 let chosenModel = null
+/** The run's default selection as the endpoint list last named it (A104): what a fresh draft starts from. */
+let defaultSelection = { model: null, effort: null }
 let chosenEffort = null
 /** Which pane the open menu shows: the two-row root, the model list or the effort list. */
 let modelPane = 'root'
@@ -12668,6 +13975,67 @@ function closeAfterSelection() {
 }
 
 /**
+ * Sessions whose model selection the server has recorded, as far as this page knows: from a session's view, a
+ * `model/selection` event, a successful record, or a turn that carried the seat. A turn into any other session (a
+ * blank one opened from New session or a folder) carries the seat's choice, which the server then records (#46,
+ * developer-ten's B1); a turn into a recorded session carries none and runs on the session's own selection.
+ */
+const recordedSelections = new Set()
+/** Every record `recordSelection` has in flight; a turn waits until none is left. */
+const pendingSaves = new Set()
+/** The newest record, which the next one waits behind, so records reach the server in the order they were chosen. */
+let saveChain = Promise.resolve()
+/** Each choice's number, and each session's newest one: only the newest may roll the seat back. */
+let selectionSeq = 0
+const latestSelection = new Map()
+/** What the server is known to hold per session (its view, a model/selection event, an accepted record). */
+const serverSeats = new Map()
+/**
+ * The seat this page holds for each session: what its seat shows when the session is shown, kept per session so a turn
+ * sent into one session never reads the seat of another shown since (developer-twelve's review of 565d4847).
+ */
+const heldSeats = new Map()
+
+/** A turn's selection fields for a given seat, through the same rules as the shown seat's (synchronous). */
+function selectionForSeat(seat) {
+  const shown = [chosenEndpoint, chosenModel, chosenEffort]
+  chosenEndpoint = seat.endpoint
+  chosenModel = seat.model
+  chosenEffort = seat.effort
+  try {
+    return selectionForTurn()
+  } finally {
+    ;[chosenEndpoint, chosenModel, chosenEffort] = shown
+  }
+}
+
+/**
+ * A session's view arrived: record what the server holds for it, and publish its selection to the seat only while that
+ * session is still the one shown and no choice was made for it after the view was asked for (`selectionAt`). A late
+ * view of a session switched away from, or one overtaken by a newer choice, changes no seat.
+ */
+function adoptViewSelection(id, body, selectionAt) {
+  if (body === null || typeof body !== 'object') return
+  const endpoint = typeof body.endpoint === 'string' && body.endpoint.length > 0 ? body.endpoint : null
+  const newerChoice = (latestSelection.get(id) ?? 0) > (selectionAt ?? 0)
+  if (endpoint !== null) {
+    recordedSelections.add(id)
+    if (!newerChoice) {
+      const seat = { endpoint, model: body.model ?? null, effort: body.reasoningEffort ?? null }
+      serverSeats.set(id, seat)
+      heldSeats.set(id, seat)
+    }
+  } else if (!newerChoice) {
+    recordedSelections.delete(id)
+    serverSeats.delete(id)
+  }
+  if (current !== id || newerChoice) return
+  applySessionModel(body.endpoint ?? null, body.model ?? null, body.reasoningEffort ?? null)
+  // A blank session holds the seat it was opened with, which its first turn carries.
+  if (endpoint === null) heldSeats.set(id, { endpoint: chosenEndpoint, model: chosenModel, effort: chosenEffort })
+}
+
+/**
  * Record one selection on the session.
  *
  * The local state is updated first so the seat answers at once — a control that waits for a round trip reads as
@@ -12679,17 +14047,50 @@ function closeAfterSelection() {
  * is shown, and the person is still standing where they can undo the choice.
  */
 async function recordSelection(selection) {
+  const previous = { endpoint: chosenEndpoint, model: chosenModel, effort: chosenEffort }
+  const seq = ++selectionSeq
+  const recording = current
+  /**
+   * A refused or failed record puts the seat back (S1), but only when it is still this session's newest choice and
+   * this session is still shown: a later choice owns the seat, and after a switch the seat belongs to another session
+   * (developer-twelve's review of 1ebfcbc9). It goes back to what the server is known to hold for the session, else to
+   * the seat before this choice.
+   */
+  const restore = () => {
+    if (seq !== latestSelection.get(recording)) return
+    const known = serverSeats.get(recording) ?? previous
+    heldSeats.set(recording, { endpoint: known.endpoint, model: known.model, effort: known.effort })
+    if (current !== recording) return
+    chosenEndpoint = known.endpoint
+    chosenModel = known.model
+    chosenEffort = known.effort
+    renderModelSeat()
+  }
   chosenEndpoint = selection.endpoint
   chosenModel = selection.model ?? null
   chosenEffort = selection.reasoningEffort ?? null
   renderModelSeat()
-  if (current === null) return true
+  if (recording === null) return true
+  latestSelection.set(recording, seq)
+  heldSeats.set(recording, { endpoint: chosenEndpoint, model: chosenModel, effort: chosenEffort })
+  /**
+   * Records are sent one at a time, in the order they were chosen, so the server ends on the last one (a model, then
+   * an effort, picked in quick succession). Each is tracked by its own promise; a turn waits for every record in flight.
+   */
+  let release = () => {}
+  const saved = new Promise((resolve) => {
+    release = resolve
+  })
+  const before = saveChain
+  saveChain = saved
+  pendingSaves.add(saved)
   modelPending = true
   modelTrigger.setAttribute('aria-busy', 'true')
   modelSpinner.hidden = false
   if (!modelMenu.hidden) renderModelPane()
   try {
-    const response = await fetch(`/api/sessions/${encodeURIComponent(current)}/model`, {
+    await before
+    const response = await fetch(`/api/sessions/${encodeURIComponent(recording)}/model`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -12700,18 +14101,26 @@ async function recordSelection(selection) {
     })
     if (!response.ok) {
       const body = await response.json().catch(() => ({}))
-      setNote(body.error ?? `could not switch this session onto ${selection.endpoint}`)
+      if (current === recording) setNote(body.error ?? `could not switch this session onto ${selection.endpoint}`)
+      restore()
       return false
     }
-    setNote('')
+    if (current === recording) setNote('')
+    recordedSelections.add(recording)
+    serverSeats.set(recording, { endpoint: selection.endpoint, model: selection.model ?? null, effort: selection.reasoningEffort ?? null })
     return true
   } catch (error) {
-    setNote(`could not switch this session onto ${selection.endpoint}: ${(error && error.message) || error}`)
+    if (current === recording) setNote(`could not switch this session onto ${selection.endpoint}: ${(error && error.message) || error}`)
+    restore()
     return false
   } finally {
-    modelPending = false
-    modelTrigger.setAttribute('aria-busy', 'false')
-    modelSpinner.hidden = true
+    pendingSaves.delete(saved)
+    release()
+    if (pendingSaves.size === 0) {
+      modelPending = false
+      modelTrigger.setAttribute('aria-busy', 'false')
+      modelSpinner.hidden = true
+    }
     if (!modelMenu.hidden) {
       renderModelPane()
       placeModelMenu()
@@ -12771,6 +14180,19 @@ async function loadEndpoints() {
     const body = await response.json()
     endpointOptions = Array.isArray(body.endpoints) ? body.endpoints : []
     endpointDefault = typeof body.default === 'string' ? body.default : null
+    /**
+     * A page that has chosen nothing yet starts from the run's default selection (the model row's defaultModel and
+     * defaultEffort, which the server already checked against the default endpoint; DSH's default model selection),
+     * so a fresh session shows and sends it. A session's own recorded selection still wins when one is opened.
+     */
+    defaultSelection = {
+      model: typeof body.defaultModel === 'string' ? body.defaultModel : null,
+      effort: typeof body.defaultEffort === 'string' ? body.defaultEffort : null,
+    }
+    if (chosenEndpoint === null && chosenModel === null && chosenEffort === null) {
+      chosenModel = defaultSelection.model
+      chosenEffort = defaultSelection.effort
+    }
   } catch (error) {
     setNote(`could not read the endpoint list: ${(error && error.message) || error}`)
   }
@@ -13548,7 +14970,9 @@ function humanBytes(bytes) {
  * what is read is what was clicked.
  */
 let fileFetches = 0
+let cancelHtmlFrame = null
 async function showFile(node) {
+  if (cancelHtmlFrame !== null) cancelHtmlFrame()
   closeSchedulesPage()
   /** A file is something to read; the invitation belongs to the panel with nothing in it. */
   document.getElementById('empty-state')?.setAttribute('hidden', '')
@@ -13650,7 +15074,7 @@ async function showFile(node) {
  * page and nothing it says can reach this one.
  */
 const fileHtml = document.getElementById('file-html')
-const htmlView = document.getElementById('html-view')
+let htmlView = document.getElementById('html-view')
 
 /** What a preview is allowed to contain, and it is **narrower** than DOMPurify's default rather than wider. */
 const PREVIEW_TAGS = [
@@ -13725,28 +15149,52 @@ async function showHtml(path, body, ticket) {
     WHOLE_DOCUMENT: true,
     RETURN_DOM: false,
   })
-  /**
-   * The policy goes in as the first thing in the document, and `base` after it, so a relative reference the browser
-   * resolves itself — a `url()` inside a stylesheet, which the rewrite cannot see — still lands beside the document.
-   */
-  const base = path.slice(0, path.lastIndexOf('/') + 1)
-  const framed = clean.replace(
-    /<head([^>]*)>/i,
-    `<head$1><meta http-equiv="Content-Security-Policy" content="${body.csp ?? ''}"><base href="${base}">`,
-  )
-  htmlView.setAttribute('sandbox', 'allow-same-origin')
-  /**
-   * The sanitiser is asked for a whole document, so there is no branch that rebuilds one around a fragment.
-   *
-   * Measured, and it is why this is a sentence rather than code: the first version had such a fallback, and writing the
-   * closing document tag inside its template literal **closed this page** — the browser ended the harness document at
-   * that line, the body came out empty, and the server was answering correctly the whole time. The same trap caught the
-   * comment that explained it, which is why this paragraph names no tag. A fallback that cannot be reached is not worth
-   * a second way to write the document.
-   */
-  htmlView.srcdoc = framed
-  fileBody.hidden = true
-  fileHtml.hidden = false
+  // Only DOMPurify's clean whole-document output is parsed. The response header, not source markup, owns CSP.
+  const parsed = new DOMParser().parseFromString(clean, 'text/html')
+  if (ticket !== fileFetches) return
+  // A fresh frame per selection prevents a queued load from an older navigation publishing into this one.
+  if (cancelHtmlFrame !== null) cancelHtmlFrame()
+  const frame = htmlView.cloneNode(false)
+  frame.removeAttribute('src')
+  frame.setAttribute('sandbox', 'allow-same-origin')
+  frame.setAttribute('referrerpolicy', 'no-referrer')
+  await new Promise((resolve, reject) => {
+    let timer
+    let settled = false
+    const finish = (error) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      frame.onload = null
+      frame.onerror = null
+      if (cancelHtmlFrame === cancel) cancelHtmlFrame = null
+      if (error) reject(error)
+      else resolve()
+    }
+    const cancel = () => finish()
+    cancelHtmlFrame = cancel
+    frame.onload = () => {
+      if (settled) return
+      if (ticket !== fileFetches || htmlView !== frame) { finish(); return }
+      try {
+        const inner = frame.contentDocument
+        // Ignore the initial empty document; inject only after the exact same-origin shell has loaded.
+        if (inner === null || inner.URL !== new URL('/api/html/frame', location.href).href || inner.contentType !== 'text/html') {
+          throw new Error('the preview shell did not load at its fixed same-origin address')
+        }
+        if (ticket !== fileFetches || htmlView !== frame) { finish(); return }
+        inner.documentElement.replaceWith(inner.importNode(parsed.documentElement, true))
+        fileBody.hidden = true
+        fileHtml.hidden = false
+        finish()
+      } catch (error) { finish(error) }
+    }
+    frame.onerror = () => finish(new Error('the preview shell did not load'))
+    timer = setTimeout(() => finish(new Error('the preview shell did not load')), 15000)
+    frame.src = '/api/html/frame'
+    htmlView.replaceWith(frame)
+    htmlView = frame
+  })
 }
 
 /**
@@ -13969,6 +15417,7 @@ async function selectSession(node) {
   if (view !== 'chat' && view !== 'trajectory') await showView('chat')
   renderRing('session')
   await showSession(node.session.id)
+  if (current !== node.session.id) return
   /**
    * The mark is put on the row that was **clicked**, and last, because `showSession` resynchronises the
    * selection to whichever row claims the session. Before the tree stopped showing a captured conversation
@@ -16079,14 +17528,16 @@ function isStopSequence(previous, now) {
   return previous !== null && now - previous >= 0 && now - previous <= STOP_SEQUENCE_MS
 }
 /**
- * Whether something on screen takes this Escape for itself: an open dialog, a menu, the usage popover or the approval
- * card. DSH breaks the stop sequence on each, so Escape closing the model menu or an approval card never also counts
- * toward a stop. Read in the capture phase, before those controls close themselves.
+ * Whether something on screen takes this Escape for itself: an open dialog, a menu, the usage popover, the approval
+ * card, or the trajectory overview clearing its focus window. DSH breaks the stop sequence on each, so Escape closing
+ * the model menu or an approval card never also counts toward a stop. Read in the capture phase, before those controls
+ * close themselves.
  */
 function uiTakesEscape() {
   if (document.querySelector('dialog[open]') !== null) return true
   if ([...document.querySelectorAll('[role="menu"]')].some((menu) => !menu.hidden)) return true
   if (statPopoverKind !== null) return true
+  if (timeline?.dataset.window === 'true' && timeline.contains(document.activeElement)) return true
   const card = document.getElementById('approval-card')
   return card !== null && !card.hidden
 }
@@ -19727,6 +21178,7 @@ async function renderFlatList() {
         }
         /** A session that could not be loaded is not the open one, so no row is marked for it (#56). */
         if (!(await showSession(meta.id))) return
+        if (current !== meta.id) return
         for (const item of treeList.querySelectorAll('li[data-kind="session"]')) {
           item.setAttribute('aria-selected', item.dataset.sessionId === meta.id ? 'true' : 'false')
         }

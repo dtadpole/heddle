@@ -1,6 +1,7 @@
 import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
 
+import { selectionProblem } from '../endpoints.ts'
 import { adapterFor } from './adapters.ts'
 import { projectAttachments } from './attachments.ts'
 import { inputModalitiesFromModelList, type InputModality } from './model-info.ts'
@@ -170,6 +171,54 @@ export class ModelService extends Service {
     const candidate = nominated ?? this.nominated
     if (candidate !== undefined && this.endpoints.has(candidate)) return candidate
     return this.endpoints.keys().next().value
+  }
+
+  /** The model and effort the configuration names for a new session (the model row's `defaultModel`, `defaultEffort`). */
+  private defaults: { readonly model?: string; readonly effort?: string } = {}
+  /** The stale defaults already warned about, so one stale value is said once rather than on every session. */
+  private warnedDefaults = new Set<string>()
+
+  /** Record the model and effort a new session starts with when it names none. */
+  setDefaults(defaults: { readonly model?: string; readonly effort?: string }): void {
+    this.defaults = { ...defaults }
+  }
+
+  /**
+   * What a new session starts with when it names nothing: the default endpoint, the configured default model when
+   * that endpoint still offers it, and the configured default effort when the chosen model still declares it (DSH's
+   * `dsh-agent-default-model` `currentSelection`). A stale default never fails a session: it falls back to the
+   * endpoint's own model and default level and is warned about once, with the reason `selectionProblem` gives.
+   */
+  defaultSelection(): { readonly endpoint?: string; readonly model?: string; readonly reasoningEffort?: string } {
+    const endpoint = this.defaultEndpoint()
+    const configured = endpoint === undefined ? undefined : this.endpoint(endpoint)
+    if (endpoint === undefined || configured === undefined) return {}
+    const warn = (value: string, problem: string) => {
+      if (this.warnedDefaults.has(value)) return
+      this.warnedDefaults.add(value)
+      this.ctx.logger.warn('model: the configured default %s', `${problem}; the endpoint's own is used instead`)
+    }
+    let model = this.defaults.model
+    if (model !== undefined) {
+      const problem = selectionProblem(configured, model)
+      if (problem !== null) {
+        warn(`model:${endpoint}:${model}`, problem)
+        model = undefined
+      }
+    }
+    let effort = this.defaults.effort
+    if (effort !== undefined) {
+      const problem = selectionProblem(configured, model, effort)
+      if (problem !== null) {
+        warn(`effort:${endpoint}:${model ?? ''}:${effort}`, problem)
+        effort = undefined
+      }
+    }
+    return {
+      endpoint,
+      ...(model !== undefined ? { model } : {}),
+      ...(effort !== undefined ? { reasoningEffort: effort } : {}),
+    }
   }
 
   /** Record which endpoint the configuration nominates as the default. */

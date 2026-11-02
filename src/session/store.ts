@@ -21,9 +21,13 @@ import { zstdCompressSync } from 'node:zlib'
 import type { Chunk, ContentPart, Message } from '../llm/types.ts'
 import { workspaceKey } from './layout.ts'
 import { interruptedTurnClosers } from './repair.ts'
+import { appendWhole, NODE_APPEND_IO, replaceWhole, SessionUnsavedError, type AppendIo } from './append.ts'
+import { recoverTranscript } from './transcript.ts'
 import { SessionTitles } from './title.ts'
 import { decodeTranscript, encodeFrame, isEventRecord, judgeLogHeader, type LogHeader } from './transcript.ts'
 import { normalizeSessionTitle } from './title-text.ts'
+
+import { formatLock, judgeLock, type LockFile, ownedSentence, ownLock, parseLock, stampLock } from './writer-lock.ts'
 
 /**
  * The session store.
@@ -64,7 +68,8 @@ import { normalizeSessionTitle } from './title-text.ts'
  * **One process writes a session at a time.** The first append takes a writer lock beside the log
  * (`<id>.lock`, or `session.lock` inside an old-layout session directory) and the process keeps it
  * until it lets go or exits; another process that tries to append is refused with DSH's sentence,
- * `session "<id>" is already owned by an active write handle`. Without it, a `heddle web` server and a
+ * `session "<id>" is already owned by an active write handle`, and a lock whose holder is gone is taken over, also when
+ * its pid now names another process (`./writer-lock.ts`, #202). Without it, a `heddle web` server and a
  * `heddle --resume <id> --turn` each appended from their own in-memory seq counter and the log got the
  * same seqs twice (R-developer-eight-27). See {@link SessionOwnedError} and `acquireWriterLock`.
  */
@@ -420,6 +425,16 @@ export function foldSurface(events: readonly SessionEvent[]): SurfaceState {
  * adapter keeps separate text blocks apart with a newline, so a part per delta handed the model its own earlier answer
  * broken at every point where the stream split it (live-testing draft developer-five-2). The log itself still holds
  * one event per chunk; only the derivation coalesces. The Rust twin is `derive_message` in heddle-session `surface.rs`.
+ *
+ * **A run its turn closed as failed derives to nothing** (#173). A stream that broke mid-answer (a cut connection, a
+ * timeout, a provider error frame) leaves a run with no `done`, and the turn that threw closes it with an
+ * `assistant/completed` whose `finishReason` is `'error'` (`recordUnfinished` in src/agent/loop.ts). Derived as it
+ * stood, that fragment reached the next request as the model's own earlier answer, cut mid-word, and a fork or a
+ * summary carried it on. DSH settles a failed stream as `assistant/attempt`, which takes no place on the surface, and
+ * only a stream that a Stop cut with content as an `assistant/message` marked `interrupted` (dsh-agent-loop, the step's
+ * stream `catch` and its `finish.kind === 'error'` branch). So a stopped turn (`'aborted'`) keeps what streamed here
+ * too. Only the model's view changes: the log still holds the chunks, and the page's transcript draws the fragment with
+ * its failure line, as DSH's live stream shows it to the person.
  */
 export function deriveMessage(bySeq: ReadonlyMap<number, SessionEvent>, seq: number): Message | null {
   const event = bySeq.get(seq)
@@ -444,6 +459,8 @@ export function deriveMessage(bySeq: ReadonlyMap<number, SessionEvent>, seq: num
       // A message held for the step boundary, an inbox splice or any other note written while the model streamed is
       // not part of its step (#30): the step runs to its `done`, or to a new request or the turn's end.
       if (endsStep(next.type)) break
+      // A run with no `done` whose turn closed as failed: a broken stream's fragment, which the model never answered.
+      if (next.type === 'assistant/completed' && next.finishReason === 'error') return null
       continue
     }
     const chunk = next.chunk as Chunk | undefined
@@ -623,21 +640,29 @@ export function underArchivedSession(
 /**
  * A write refused because another process holds the session's writer lock.
  *
- * The sentence is DSH's `SessionAlreadyOwnedError` word for word (`@deepseek-ai/dsh-session-persistence`), and the
- * code is the one its session controller answers a resume with (`session/writer-held`); the holder's pid is added in
- * brackets because a person who is refused needs to know which process to stop. Read-only access is never refused.
+ * The sentence opens with DSH's `SessionAlreadyOwnedError` word for word (`@deepseek-ai/dsh-session-persistence`), and
+ * the code is the one its session controller answers a resume with (`session/writer-held`). The holder's pid and command
+ * name are added in brackets because a person who is refused needs to know which process to stop, and the lock file is
+ * named with how to clear it when that process is not heddle (#202, `ownedSentence` in `./writer-lock.ts`, the same
+ * words as the Rust build's `SessionError::AlreadyOwned`). Read-only access is never refused.
  */
 export class SessionOwnedError extends Error {
   readonly code = 'session/writer-held'
   readonly id: string
   /** The process named in the lock, when the lock named one. */
   readonly pid: number | undefined
+  /** That process's command name, when the system said it. */
+  readonly processName: string | undefined
+  /** The lock file's name (`<id>.lock`, or `session.lock` in an old-layout directory). */
+  readonly lock: string | undefined
 
-  constructor(id: string, pid?: number) {
-    super(`session "${id}" is already owned by an active write handle${pid !== undefined ? ` (process ${pid})` : ''}`)
+  constructor(id: string, pid?: number, processName?: string, lock?: string) {
+    super(ownedSentence(id, pid, processName, lock))
     this.name = 'SessionAlreadyOwnedError'
     this.id = id
     this.pid = pid
+    this.processName = processName
+    this.lock = lock
   }
 }
 
@@ -700,48 +725,35 @@ export function readLogHeader(path: string): LogHeader {
  * Where a session's writer lock is: `<id>.lock` beside its log, or `session.lock` inside an old-layout session
  * directory — DSH's `session.lock`, named the way this layout names everything else of one session.
  *
- * The Rust store uses the same path and the same contents (the holder's pid and a newline), so either build refuses
- * a writer the other one holds.
+ * The Rust store uses the same path and the same contents (the holder's pid, boot and start: `./writer-lock.ts`), so
+ * either build refuses a writer the other one holds, and takes over a lock the other one left behind.
  */
 export function lockPath(handle: SessionHandle): string {
   return basename(handle.meta) === 'meta.json' ? join(handle.dir, 'session.lock') : join(handle.dir, `${handle.id}.lock`)
 }
 
-/**
- * How long a lock file with no pid in it is taken to be one being written, rather than one left half-written.
- *
- * The holder creates the file and writes its pid in the next call, so an empty lock older than this is debris.
- */
-const UNWRITTEN_LOCK_GRACE_MS = 5_000
-
 /** The lock files this process holds, and how many stores in it hold each — the last one to let go removes it. */
 const heldByProcess = new Map<string, number>()
 let exitHookInstalled = false
 
-/** Whether a process with this pid exists. A process this user may not signal (`EPERM`) exists. */
-function processAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'EPERM'
-  }
-}
-
-/** The pid a lock file names, or undefined when it names none. */
-function lockHolder(text: string): number | undefined {
-  const trimmed = text.trim()
-  if (!/^\d+$/.test(trimmed)) return undefined
-  const pid = Number(trimmed)
-  return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined
-}
-
 /** Remove a lock file only if it still names this process, so letting go never removes somebody else's lock. */
 function removeOwnLock(path: string): void {
   try {
-    if (lockHolder(readFileSync(path, 'utf8')) === process.pid) unlinkSync(path)
+    if (parseLock(readFileSync(path, 'utf8'))?.pid === process.pid) unlinkSync(path)
   } catch {
     // Already gone, or unreadable: there is nothing of ours left to remove.
+  }
+}
+
+/** A lock file as it is now, for {@link judgeLock}; undefined when there is none. */
+function readLockFile(path: string): LockFile | undefined {
+  try {
+    const text = readFileSync(path, 'utf8')
+    const stat = statSync(path)
+    return { text, mtimeMs: stat.mtimeMs, ...(process.platform !== 'win32' ? { uid: stat.uid } : {}) }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
   }
 }
 
@@ -749,11 +761,12 @@ function removeOwnLock(path: string): void {
  * Take a session's writer lock for this process, or throw {@link SessionOwnedError}.
  *
  * DSH arbitrates with a kernel `flock(2)` on `session.lock`, which Node cannot take without a native addon; a lock
- * file created with `O_EXCL` and naming its holder's pid is the portable equivalent both builds can share. What
- * flock gives for free is supplied by hand: a holder that died without letting go (a crash, `SIGKILL`) leaves a
- * file naming a pid that no longer exists, and that lock is removed and taken rather than blocking the session
- * forever. A live holder is never expropriated, as in DSH: there is no expiry that could let a stalled writer's
- * resumed appends tear the log.
+ * file created with `O_EXCL` and naming its holder is the portable equivalent both builds can share. What flock gives
+ * for free is supplied by hand: a holder that died without letting go (a crash, `SIGKILL`, a power cut) leaves a file
+ * naming a process that is gone, or a pid the system has since given to another process, and that lock is removed
+ * and taken rather than blocking the session for as long as that process lives (#202; the rules are `judgeLock`'s in
+ * `./writer-lock.ts`). A live holder is never expropriated, as in DSH: there is no expiry that could let a stalled
+ * writer's resumed appends tear the log.
  *
  * Answers whether this process **took** the lock now (true) or already held it through another store (false): only a
  * fresh take is a write-open after whatever wrote the session before, which is when an unfinished turn is closed.
@@ -777,7 +790,9 @@ function acquireWriterLock(path: string, id: string): boolean {
     try {
       const fd = openSync(path, 'wx')
       try {
-        writeSync(fd, `${process.pid}\n`)
+        const own = ownLock()
+        writeSync(fd, formatLock(own))
+        stampLock(fd, own)
       } finally {
         closeSync(fd)
       }
@@ -786,29 +801,23 @@ function acquireWriterLock(path: string, id: string): boolean {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
     }
-    let text: string
-    let modified: number
-    try {
-      text = readFileSync(path, 'utf8')
-      modified = statSync(path).mtimeMs
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
-      throw error
+    const file = readLockFile(path)
+    if (file === undefined) continue
+    /**
+     * A lock naming this process that this process does not hold is a previous process's that had the same pid. It is
+     * replaced rather than kept: its boot and start are that process's, so another reader would judge it stale.
+     */
+    if (parseLock(file.text)?.pid !== process.pid) {
+      const verdict = judgeLock(file)
+      if (verdict.kind === 'held') throw new SessionOwnedError(id, verdict.pid, verdict.name, basename(path))
     }
-    const holder = lockHolder(text)
-    if (holder === process.pid) {
-      take()
-      return true
-    }
-    if (holder !== undefined && processAlive(holder)) throw new SessionOwnedError(id, holder)
-    if (holder === undefined && Date.now() - modified < UNWRITTEN_LOCK_GRACE_MS) throw new SessionOwnedError(id)
     try {
       unlinkSync(path)
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
     }
   }
-  throw new SessionOwnedError(id)
+  throw new SessionOwnedError(id, undefined, undefined, basename(path))
 }
 
 /** Let go of one store's hold on a lock; the last hold in this process removes the file. */
@@ -850,8 +859,11 @@ export class SessionStore {
    * appends, and taking the lock drops the fold so the first write re-reads what another process
    * may have appended before it let go. A process that only reads may show an older history until
    * it opens the session again.
+   *
+   * `poisoned` is set when an append failed and its partial bytes could not be cut away (`./append.ts`, #221): every
+   * later append of the session is refused with that error until the fold is dropped and the file read again.
    */
-  private readonly loaded = new Map<string, { readonly events: SessionEvent[]; readonly framed: boolean }>()
+  private readonly loaded = new Map<string, { readonly events: SessionEvent[]; readonly framed: boolean; poisoned?: SessionUnsavedError }>()
 
   /** The sessions this store holds the writer lock for, and where each lock is. */
   private readonly held = new Map<string, string>()
@@ -1152,7 +1164,7 @@ export class SessionStore {
     if (records.length === 0) return
     foldSurface([...log.events, ...records])
     const lines = records.map((record) => `${JSON.stringify(record)}\n`)
-    appendFileSync(handle.transcript, log.framed ? Buffer.concat(lines.map(encodeFrame)) : Buffer.from(lines.join(''), 'utf8'))
+    this.appendBytes(handle, log, log.framed ? Buffer.concat(lines.map(encodeFrame)) : Buffer.from(lines.join(''), 'utf8'))
     /** One push per event: a long source's seed is far more events than a spread may pass as arguments. */
     for (const record of records) log.events.push(record)
     const turns = records.filter((record) => record.type === 'message' && (record.message as RecordedMessage | undefined)?.role === 'user').length
@@ -1379,10 +1391,14 @@ export class SessionStore {
      * are identical before and after an append, so an earlier event is never rewritten — and a
      * crash that tears the last frame costs that frame alone, because the reader walks frames and
      * stops at the first incomplete one.
+     *
+     * The frame goes on whole or not at all (`appendBytes`, #221): a write that fails is cut back before the error is
+     * thrown, so the event is neither in the file nor in the fold and the next append takes its seq.
      */
     const line = `${JSON.stringify(record)}\n`
-    appendFileSync(handle.transcript, this.load(handle).framed ? encodeFrame(line) : Buffer.from(line, 'utf8'))
-    this.load(handle).events.push(record)
+    const entry = this.load(handle)
+    this.appendBytes(handle, entry, entry.framed ? encodeFrame(line) : Buffer.from(line, 'utf8'))
+    entry.events.push(record)
     /**
      * No event here moves `updated`: DSH dates a row by the latest prompt or steer only (see `message()`), so an answer, a
      * turn boundary or a harness note no longer re-dates it. This used to touch on those three types (R-developer-eight-20).
@@ -1427,8 +1443,32 @@ export class SessionStore {
     if (records.length === 0) return
     const entry = this.load(handle)
     const lines = records.map((record) => `${JSON.stringify(record)}\n`)
-    appendFileSync(handle.transcript, entry.framed ? Buffer.concat(lines.map(encodeFrame)) : Buffer.from(lines.join(''), 'utf8'))
+    this.appendBytes(handle, entry, entry.framed ? Buffer.concat(lines.map(encodeFrame)) : Buffer.from(lines.join(''), 'utf8'))
     entry.events.push(...records)
+  }
+
+  /**
+   * The file calls an append makes (`./append.ts`): the real file system, unless a test puts one in that fails a write
+   * part-way.
+   */
+  appendIo: AppendIo = NODE_APPEND_IO
+
+  /**
+   * Append bytes to a session's log whole or not at all, the one way `append`, `record` and a fork's `seed` write (#221).
+   *
+   * A write that fails is cut back to the length the log had, and `SessionUnsavedError` says why in words. When the cut
+   * fails too, the fold is marked poisoned and every later append of the session throws that same error, because an
+   * append after a torn tail would be lost on the next open; opening the session again re-reads the file and cuts the
+   * tail (`load`).
+   */
+  private appendBytes(handle: SessionHandle, entry: { poisoned?: SessionUnsavedError }, bytes: Uint8Array): void {
+    if (entry.poisoned !== undefined) throw entry.poisoned
+    try {
+      appendWhole(handle.transcript, bytes, this.appendIo)
+    } catch (error) {
+      if (error instanceof SessionUnsavedError && error.poisoned) entry.poisoned = error
+      throw error
+    }
   }
 
   /** Whether this store holds the session's writer lock. */
@@ -1437,7 +1477,8 @@ export class SessionStore {
   }
 
   /**
-   * Whether a live writer holds the session: this process (through any store), or the live process its lock names.
+   * Whether a live writer holds the session: this process (through any store), or the live process its lock names,
+   * judged as a writer judges it (`judgeLock`, #202), so a lock whose pid now names another process holds nothing.
    *
    * A reader asks it before it shows a session's unfinished turn as closed (`SessionService.events`): a turn whose
    * writer is alive may still be running, and one whose writer is gone never will. A lock naming this process that
@@ -1446,14 +1487,15 @@ export class SessionStore {
   writerHeld(handle: SessionHandle): boolean {
     const path = lockPath(handle)
     if (heldByProcess.has(path)) return true
-    let text: string
+    let file: LockFile | undefined
     try {
-      text = readFileSync(path, 'utf8')
+      file = readLockFile(path)
     } catch {
       return false
     }
-    const holder = lockHolder(text)
-    return holder !== undefined && holder !== process.pid && processAlive(holder)
+    const holder = file !== undefined ? parseLock(file.text)?.pid : undefined
+    if (file === undefined || holder === undefined || holder === process.pid) return false
+    return judgeLock(file).kind === 'held'
   }
 
   /**
@@ -1499,12 +1541,23 @@ export class SessionStore {
    * The format is decided by what the file says and what it is called, so a session born before
    * frames existed keeps being appended to as plain JSONL rather than being rewritten.
    */
-  private load(handle: SessionHandle): { events: SessionEvent[]; framed: boolean } {
+  private load(handle: SessionHandle): { events: SessionEvent[]; framed: boolean; poisoned?: SessionUnsavedError } {
     const cached = this.loaded.get(handle.id)
-    if (cached !== undefined) return cached as { events: SessionEvent[]; framed: boolean }
+    if (cached !== undefined) return cached
 
     let { bytes, decoded } = this.readLog(handle)
     const torn = bytes.length - decoded.readableBytes > 0
+
+    /**
+     * A tear in the **middle** is stepped over when whole frames follow it (#221).
+     *
+     * An append that failed part-way, before the rollback in `./append.ts` existed, left its partial frame in the file,
+     * and the turns written after the disk had room again sit behind it. Cutting at the tear threw them away (J183: t6,
+     * answered after the space came back, was gone after the restart). `recoverTranscript` finds where whole frames
+     * start again and keeps them, when their seqs join the ones before the tear; it answers nothing for a tear at the
+     * tail, which is cut below as it always was.
+     */
+    let recovered = torn ? recoverTranscript(bytes) : undefined
 
     /**
      * A torn tail is cut off before anything is appended.
@@ -1520,19 +1573,36 @@ export class SessionStore {
      * be that process's append in progress, so a reader that cannot take the lock reads the whole
      * frames and leaves the file alone; one that can re-reads under the lock before it cuts, because
      * the frame may have been finished by the holder it just replaced.
+     *
+     * A log torn in the middle is written again without its torn bytes, in one step (`replaceWhole`): a truncate cannot
+     * take bytes out of the middle. Every frame kept is copied as it was. A log that cannot be written again (a full disk)
+     * is read past its tear and left as it is; the next open tries again.
      */
     let dropped = 0
+    let droppedRanges: { offset: number; length: number }[] | undefined
     if (torn && this.tryClaim(handle)) {
       ;({ bytes, decoded } = this.readLog(handle))
-      dropped = bytes.length - decoded.readableBytes
-      if (dropped > 0) {
+      recovered = bytes.length > decoded.readableBytes ? recoverTranscript(bytes) : undefined
+      if (recovered !== undefined) {
         try {
-          truncateSync(handle.transcript, decoded.readableBytes)
+          replaceWhole(handle.transcript, Buffer.concat(recovered.kept.map((frame) => bytes.subarray(frame.start, frame.end))))
+          dropped = recovered.dropped.reduce((sum, range) => sum + range.end - range.start, 0)
+          droppedRanges = recovered.dropped.map((range) => ({ offset: range.start, length: range.end - range.start }))
         } catch {
-          // a transcript that cannot be truncated still reads; the next append simply lands after the tear
+          // read past the tear from memory; the file keeps it until an open can write the log again
+        }
+      } else {
+        dropped = bytes.length - decoded.readableBytes
+        if (dropped > 0) {
+          try {
+            truncateSync(handle.transcript, decoded.readableBytes)
+          } catch {
+            // a transcript that cannot be truncated still reads; the next append simply lands after the tear
+          }
         }
       }
     }
+    const lines = recovered?.lines ?? decoded.lines
 
     /**
      * Every line must be a session event, as the Rust build's reader requires of every line (`SessionEvent::from_line`):
@@ -1541,7 +1611,7 @@ export class SessionStore {
      * team sweep as an event and stopped the start on `event.type.startsWith`).
      */
     const events: SessionEvent[] = []
-    for (const [index, line] of decoded.lines.entries()) {
+    for (const [index, line] of lines.entries()) {
       let record: unknown
       try {
         record = JSON.parse(line)
@@ -1551,10 +1621,22 @@ export class SessionStore {
       if (!isEventRecord(record)) throw new SessionLogUnreadableError(handle.transcript, index + 1, 'is not a session event')
       events.push(record as SessionEvent)
     }
-    const framed = decoded.format === 'zstd-frames' || ((torn || decoded.lines.length === 0) && isFramed(handle.transcript))
-    const entry = { events, framed }
+    const framed = decoded.format === 'zstd-frames' || ((torn || lines.length === 0) && isFramed(handle.transcript))
+    const entry: { events: SessionEvent[]; framed: boolean; poisoned?: SessionUnsavedError } = { events, framed }
     this.loaded.set(handle.id, entry)
-    if (dropped > 0) this.append(handle, { type: 'transcript/repaired', droppedBytes: dropped })
+    /**
+     * The repair is recorded, and a tear stepped over names the ranges it took out (offsets in the file as it was). A note
+     * the disk will not take does not fail the read: the repair is already on disk, and the next append says why it
+     * cannot be saved.
+     */
+    if (dropped > 0) {
+      try {
+        this.append(handle, { type: 'transcript/repaired', droppedBytes: dropped, ...(droppedRanges !== undefined ? { droppedRanges } : {}) })
+      } catch (error) {
+        if (!(error instanceof SessionUnsavedError)) throw error
+        this.warn(`heddle session: the repair of ${handle.transcript} could not be recorded: ${error.message}`)
+      }
+    }
     return entry
   }
 
@@ -1740,6 +1822,8 @@ export class SessionStore {
       readonly endpoint: string
       readonly model?: string
       readonly reasoningEffort?: string
+      /** The level is the model's declared default, not a choice (#157; DSH's adapterDefaults.reasoningEffort). */
+      readonly reasoningEffortDefault?: true
       readonly messages: number
       readonly tools: readonly string[]
       readonly estimatedTokens?: number

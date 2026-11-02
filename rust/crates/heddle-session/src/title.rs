@@ -16,6 +16,16 @@
 //! - **What it sends**: the first-prompt system prompt and the one message framed as JSON (first-prompt
 //!   lib/index.js:44-56), within [`MAX_INPUT_BYTES`], [`MAX_OUTPUT_TOKENS`] and [`TIMEOUT`], tagged
 //!   [`SESSION_TITLE_PURPOSE`] (`dsh-session-title-llm` lib/index.js:160-220).
+//! - **At what effort**: the route's least supported reasoning level, whatever the session runs at (#215). DSH's
+//!   provider passes `selectReasoningEffort = (model) => model.reasoning?.efforts[0]?.id` (first-prompt
+//!   lib/index.js:41-42) and `executeSessionTitleLlm` lays that effort over the call's controls (`dsh-session-title-llm`
+//!   lib/index.js:184-190), so a route that declares no levels gets none (`dsh-llm` `resolveCallWithInfo`,
+//!   lib/index.js:2190-2191). [`title_reasoning_effort`] picks the first level the route declares
+//!   ([`TitleModel::reasoning_levels`], the list the model switcher shows, least first), and the request names it, so
+//!   the model service's default fill (#157) leaves it alone. The call carries no session id: that id is read only by
+//!   session-scoped `model/request` hooks — the server's running-turn selection rule and the plan-mode section — which
+//!   made the title run at the session's level as if it were one of its turns. No adapter sends it and no usage is
+//!   booked by it; the route is already the session's, because it is the one the turn's own request recorded.
 //! - **How it is cleaned**: [`title_from_answer`] — the first non-empty line without wrapping emphasis, controls
 //!   removed, whitespace collapsed, cut to [`MAX_TITLE_BYTES`] on a code point; only a `stop` finish with text counts.
 //! - **What stops it**: a person's rename ([`SessionTitles::supersede`], called by `SessionService::rename`), as DSH's
@@ -327,9 +337,29 @@ pub fn title_text_of(message: &Value) -> Option<String> {
 /// Where one title call's answer goes; called once, from whatever thread the model answered on.
 pub type TitleDone = Box<dyn FnOnce(Result<TitleAnswer, String>) + Send + 'static>;
 
+/// The reasoning level a title call asks for: the route's least supported one, the first it declares (DSH's
+/// `selectReasoningEffort`, first-prompt lib/index.js:41-42), or `None` when it declares none, so nothing is sent.
+pub fn title_reasoning_effort(levels: Option<&heddle_llm::ReasoningLevels>) -> Option<String> {
+    levels
+        .and_then(|levels| levels.levels.first())
+        .map(|level| level.id.clone())
+        .filter(|id| !id.is_empty())
+}
+
 /// The model a title is asked of. `generate` must not block its caller: it starts the call and answers through `done`.
 pub trait TitleModel: Send + Sync {
     fn generate(&self, request: heddle_llm::GenerateRequest, done: TitleDone);
+
+    /// The reasoning levels a route declares — an endpoint and the model its request named — or `None` for none, in
+    /// which case the title asks for no effort.
+    fn reasoning_levels(
+        &self,
+        endpoint: &str,
+        model: Option<&str>,
+    ) -> Option<heddle_llm::ReasoningLevels> {
+        let _ = (endpoint, model);
+        None
+    }
 }
 
 /// One title call, as [`LlmTitles`] hands it to the runtime.
@@ -366,6 +396,15 @@ impl TitleModel for LlmTitles {
                 .map_err(|error| error.to_string());
             done(answer);
         }));
+    }
+
+    /// The catalogue the model switcher and the default fill read: the endpoint's model's levels, else the endpoint's.
+    fn reasoning_levels(
+        &self,
+        endpoint: &str,
+        model: Option<&str>,
+    ) -> Option<heddle_llm::ReasoningLevels> {
+        self.models.endpoint(endpoint)?.reasoning_levels_for(model)
     }
 }
 
@@ -541,9 +580,16 @@ impl SessionTitles {
         }
         // What stood when the call began — the fallback the first message wrote; an answer replaces only that.
         let expected = title_of(meta_of(handle).as_ref());
+        // The route's least level, named so the default fill keeps it; no session id, so no session hook rewrites it.
+        let reasoning_effort = title_reasoning_effort(
+            model
+                .reasoning_levels(endpoint, model_id.as_deref())
+                .as_ref(),
+        );
         let request = heddle_llm::GenerateRequest {
             endpoint: endpoint.to_string(),
             model: model_id,
+            reasoning_effort,
             messages: vec![
                 Message::new(
                     Role::System,
@@ -554,7 +600,6 @@ impl SessionTitles {
                 Message::new(Role::User, vec![ContentPart::Text { text: input }]),
             ],
             max_output_tokens: Some(MAX_OUTPUT_TOKENS),
-            session_id: Some(handle.id.clone()),
             purpose: Some(SESSION_TITLE_PURPOSE.to_string()),
             ..heddle_llm::GenerateRequest::default()
         };
@@ -696,6 +741,7 @@ mod tests {
                     endpoint: "scripted".to_string(),
                     model: model.map(str::to_string),
                     reasoning_effort: None,
+                    reasoning_effort_default: None,
                     messages: 1,
                     tools: Vec::new(),
                     estimated_tokens: None,
@@ -796,7 +842,9 @@ mod tests {
         assert_eq!(asked.model.as_deref(), Some("the-model"));
         assert_eq!(asked.max_output_tokens, Some(4096));
         assert_eq!(asked.purpose.as_deref(), Some("session-title"));
-        assert_eq!(asked.session_id.as_deref(), Some(handle.id.as_str()));
+        // #215: no session id for a session hook to rewrite, and no levels known to this fake, so no effort.
+        assert_eq!(asked.session_id, None);
+        assert_eq!(asked.reasoning_effort, None);
         assert_eq!(asked.messages.len(), 2);
         assert_eq!(asked.messages[0].role, Role::System);
         assert_eq!(
@@ -1051,5 +1099,350 @@ mod tests {
         plain.store().titles().detach();
         fake.release();
         assert_eq!(title(&plain, &next), Some(title_from(PROMPT)));
+    }
+
+    /// A route's levels, least first, as the catalogue declares them (Claude Opus 5.5's ladder, default xhigh).
+    fn ladder() -> heddle_llm::ReasoningLevels {
+        serde_json::from_value(json!({
+            "default": "xhigh",
+            "levels": [
+                {"id": "low", "name": "Low", "value": "low"},
+                {"id": "medium", "name": "Medium", "value": "medium"},
+                {"id": "high", "name": "High", "value": "high"},
+                {"id": "xhigh", "name": "XHigh", "value": "xhigh"},
+                {"id": "max", "name": "Max", "value": "max"}
+            ]
+        }))
+        .expect("a level ladder")
+    }
+
+    /// A title model that keeps every request, answers at once, and declares the ladder for `gateway` / `opus` only.
+    #[derive(Default)]
+    struct Laddered {
+        requests: Mutex<Vec<heddle_llm::GenerateRequest>>,
+    }
+
+    impl TitleModel for Laddered {
+        fn generate(&self, request: heddle_llm::GenerateRequest, done: TitleDone) {
+            self.requests.lock().unwrap().push(request);
+            done(Ok(stop("Quarterly revenue comparison")));
+        }
+
+        fn reasoning_levels(
+            &self,
+            endpoint: &str,
+            model: Option<&str>,
+        ) -> Option<heddle_llm::ReasoningLevels> {
+            (endpoint == "gateway" && model == Some("opus")).then(ladder)
+        }
+    }
+
+    /// What the loop records before a turn's model call, at the given route and level.
+    fn request_at(
+        service: &SessionService,
+        handle: &SessionHandle,
+        endpoint: &str,
+        model: &str,
+        effort: Option<&str>,
+        effort_default: Option<bool>,
+    ) {
+        service
+            .store()
+            .model_request(
+                handle,
+                &ModelRequestRecord {
+                    endpoint: endpoint.to_string(),
+                    model: Some(model.to_string()),
+                    reasoning_effort: effort.map(str::to_string),
+                    reasoning_effort_default: effort_default,
+                    messages: 1,
+                    tools: Vec::new(),
+                    estimated_tokens: None,
+                    threshold_tokens: None,
+                    pruned: None,
+                    compacted: None,
+                    breakdown: None,
+                    generation: None,
+                },
+            )
+            .expect("the request record");
+    }
+
+    /// The selection a session's record holds: the part a title call must leave as it found it.
+    fn selection_of(
+        service: &SessionService,
+        handle: &SessionHandle,
+    ) -> (Option<String>, Option<String>, Option<String>) {
+        let meta = service.meta(&handle.id).expect("the session's record");
+        (
+            meta.endpoint().map(str::to_string),
+            meta.model().map(str::to_string),
+            meta.reasoning_effort().map(str::to_string),
+        )
+    }
+
+    fn select(service: &SessionService, handle: &SessionHandle, model: &str, effort: Option<&str>) {
+        service
+            .set_model(
+                &handle.id,
+                crate::meta::ModelSelection {
+                    endpoint: "gateway".to_string(),
+                    model: Some(model.to_string()),
+                    reasoning_effort: effort.map(str::to_string),
+                },
+            )
+            .expect("the selection is written")
+            .expect("the session exists");
+    }
+
+    /// #215: DSH's first-prompt provider titles at `model.reasoning?.efforts[0]?.id` (first-prompt lib/index.js:41-42),
+    /// laid over the call's controls (dsh-session-title-llm lib/index.js:184-190): the route's first declared level, and
+    /// nothing for a route that declares none. Heddle sent no effort and the session's id, so the server's selection
+    /// rule and the default fill (#157) ran the title at the session's max or xhigh.
+    #[test]
+    fn a_title_call_asks_for_the_routes_least_effort_not_the_sessions_and_names_no_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = SessionConfig {
+            root: Some(dir.path().join("sessions").to_string_lossy().into_owned()),
+        };
+        let service = SessionService::new(&config, &Env::default(), None);
+        let laddered = Arc::new(Laddered::default());
+        service.attach_titles(Arc::clone(&laddered) as Arc<dyn TitleModel>);
+
+        let at_max = start(&service, &dir);
+        select(&service, &at_max, "opus", Some("max"));
+        let before = selection_of(&service, &at_max);
+        service.user(&at_max, PROMPT, None).unwrap();
+        request_at(&service, &at_max, "gateway", "opus", Some("max"), None);
+        let asked = laddered.requests.lock().unwrap().clone();
+        assert_eq!(asked.len(), 1, "the turn's request started the title call");
+        assert_eq!(
+            asked[0].reasoning_effort.as_deref(),
+            Some("low"),
+            "a session at max: the title asks for the route's least level"
+        );
+        assert_eq!(
+            asked[0].session_id, None,
+            "and carries no session id, so no session hook rewrites it"
+        );
+        assert_eq!(asked[0].reasoning_effort_default, None);
+        assert_eq!(
+            selection_of(&service, &at_max),
+            before,
+            "the session keeps its endpoint, model and max"
+        );
+        assert_eq!(before.2.as_deref(), Some("max"));
+
+        let at_default = start(&service, &dir);
+        select(&service, &at_default, "opus", None);
+        service.user(&at_default, PROMPT, None).unwrap();
+        request_at(
+            &service,
+            &at_default,
+            "gateway",
+            "opus",
+            Some("xhigh"),
+            Some(true),
+        );
+        let asked = laddered.requests.lock().unwrap().clone();
+        assert_eq!(
+            asked[1].reasoning_effort.as_deref(),
+            Some("low"),
+            "a session at the model's default xhigh: the least level too"
+        );
+        assert_eq!(
+            selection_of(&service, &at_default).2,
+            None,
+            "and the session still names no level"
+        );
+
+        let plain = start(&service, &dir);
+        select(&service, &plain, "plain", None);
+        service.user(&plain, PROMPT, None).unwrap();
+        request_at(&service, &plain, "gateway", "plain", None, None);
+        let asked = laddered.requests.lock().unwrap().clone();
+        assert_eq!(asked.len(), 3);
+        assert_eq!(
+            asked[2].reasoning_effort, None,
+            "a route that declares no levels: no effort is asked for"
+        );
+        assert_eq!(asked[2].session_id, None);
+    }
+
+    /// A selection hook keyed on the session id, as the server's running-turn rule is (`heddle` web.rs
+    /// `SessionSelectionRule`): a request that names a session runs at that session's recorded route and level.
+    struct SessionRule {
+        sessions: SessionService,
+    }
+
+    impl heddle_llm::ModelHooks for SessionRule {
+        fn request(
+            &self,
+            _service: &heddle_llm::ModelService,
+            _request: &heddle_llm::GenerateRequest,
+            next: &mut dyn FnMut() -> Result<heddle_llm::GenerateRequest, heddle_llm::ModelError>,
+        ) -> Result<heddle_llm::GenerateRequest, heddle_llm::ModelError> {
+            let mut resolved = next()?;
+            let Some(meta) = resolved
+                .session_id
+                .as_deref()
+                .and_then(|id| self.sessions.meta(id))
+            else {
+                return Ok(resolved);
+            };
+            if let Some(endpoint) = meta.endpoint() {
+                resolved.endpoint = endpoint.to_string();
+                resolved.model = meta.model().map(str::to_string);
+                if let Some(effort) = meta.reasoning_effort() {
+                    resolved.reasoning_effort = Some(effort.to_string());
+                }
+            }
+            Ok(resolved)
+        }
+    }
+
+    /// The title model over the real model service: each request is resolved as a call resolves it (the
+    /// `model/request` hooks, then the default fill), and the route's levels are read by [`LlmTitles`] itself.
+    struct Resolving {
+        models: Arc<heddle_llm::ModelService>,
+        titles: LlmTitles,
+        resolved: Mutex<Vec<heddle_llm::GenerateRequest>>,
+    }
+
+    impl TitleModel for Resolving {
+        fn generate(&self, request: heddle_llm::GenerateRequest, done: TitleDone) {
+            let resolved = self
+                .models
+                .resolve(&request)
+                .expect("the title request resolves");
+            self.resolved.lock().unwrap().push(resolved);
+            done(Ok(stop("Northern revenue comparison")));
+        }
+
+        fn reasoning_levels(
+            &self,
+            endpoint: &str,
+            model: Option<&str>,
+        ) -> Option<heddle_llm::ReasoningLevels> {
+            self.titles.reasoning_levels(endpoint, model)
+        }
+    }
+
+    #[test]
+    fn through_the_model_service_the_title_leaves_at_the_least_level_and_the_turn_at_the_sessions()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let config = SessionConfig {
+            root: Some(dir.path().join("sessions").to_string_lossy().into_owned()),
+        };
+        let service = SessionService::new(&config, &Env::default(), None);
+        let endpoint: heddle_llm::EndpointConfig = serde_json::from_value(json!({
+            "name": "gateway",
+            "kind": "scripted",
+            "baseUrl": dir.path().join("script.json").to_string_lossy(),
+            "model": "opus",
+            "models": [{"id": "opus", "reasoning": ladder()}, {"id": "plain"}]
+        }))
+        .expect("an endpoint");
+        let models =
+            Arc::new(heddle_llm::ModelService::new(vec![endpoint]).expect("a model service"));
+        models.add_hooks(Arc::new(SessionRule {
+            sessions: service.clone(),
+        }));
+        let resolving = Arc::new(Resolving {
+            models: Arc::clone(&models),
+            titles: LlmTitles::new(Arc::clone(&models), Arc::new(|_task: TitleTask| {})),
+            resolved: Mutex::new(Vec::new()),
+        });
+        service.attach_titles(Arc::clone(&resolving) as Arc<dyn TitleModel>);
+        // One turn's first step as the loop takes it: resolved once, recorded, then the title follows the record.
+        let turn = |handle: &SessionHandle, model: &str, effort: Option<&str>| {
+            let resolved = models
+                .resolve(&heddle_llm::GenerateRequest {
+                    endpoint: "gateway".to_string(),
+                    model: Some(model.to_string()),
+                    reasoning_effort: effort.map(str::to_string),
+                    session_id: Some(handle.id.clone()),
+                    round: Some(0),
+                    ..heddle_llm::GenerateRequest::default()
+                })
+                .expect("the turn's request resolves");
+            service.user(handle, PROMPT, None).unwrap();
+            request_at(
+                &service,
+                handle,
+                &resolved.endpoint,
+                resolved.model.as_deref().unwrap_or(model),
+                resolved.reasoning_effort.as_deref(),
+                resolved.reasoning_effort_default,
+            );
+            resolved
+        };
+
+        let at_max = start(&service, &dir);
+        select(&service, &at_max, "opus", Some("max"));
+        let sent = turn(&at_max, "opus", Some("max"));
+        assert_eq!(
+            sent.reasoning_effort.as_deref(),
+            Some("max"),
+            "the turn runs at the session's max"
+        );
+        let titled = resolving.resolved.lock().unwrap().clone();
+        assert_eq!(titled.len(), 1, "the turn's record started the title call");
+        assert_eq!(
+            titled[0].reasoning_effort.as_deref(),
+            Some("low"),
+            "the title asks for the least level: {:?}",
+            titled[0]
+        );
+        assert_eq!(
+            titled[0].reasoning_effort_default, None,
+            "a level the title named, not the model default filled in"
+        );
+        assert_eq!(
+            titled[0].model.as_deref(),
+            Some("opus"),
+            "on the turn's own route"
+        );
+        assert_eq!(selection_of(&service, &at_max).2.as_deref(), Some("max"));
+        assert_eq!(
+            title(&service, &at_max).as_deref(),
+            Some("Northern revenue comparison")
+        );
+
+        let at_default = start(&service, &dir);
+        let sent = turn(&at_default, "opus", None);
+        assert_eq!(
+            (
+                sent.reasoning_effort.as_deref(),
+                sent.reasoning_effort_default
+            ),
+            (Some("xhigh"), Some(true)),
+            "a session that names no level runs its turn at the model default"
+        );
+        let titled = resolving.resolved.lock().unwrap().clone();
+        assert_eq!(
+            titled[1].reasoning_effort.as_deref(),
+            Some("low"),
+            "its title, at the least level"
+        );
+
+        let plain = start(&service, &dir);
+        turn(&plain, "plain", None);
+        let titled = resolving.resolved.lock().unwrap().clone();
+        assert_eq!(titled.len(), 3, "the plain route was asked for a title");
+        assert_eq!(
+            titled[2].reasoning_effort, None,
+            "a route without levels: the title sends no effort"
+        );
+        assert_eq!(
+            title_reasoning_effort(None),
+            None,
+            "nothing declared, nothing chosen"
+        );
+        assert_eq!(
+            title_reasoning_effort(Some(&ladder())).as_deref(),
+            Some("low")
+        );
     }
 }

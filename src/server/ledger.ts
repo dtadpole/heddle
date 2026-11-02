@@ -46,6 +46,22 @@ export interface LedgerEvent {
   readonly model?: string
   /** The tools the request offered, when it recorded them. */
   readonly tools?: readonly string[]
+  /** How the event entered the model's surface: absent or `'append'`, or `{ op: 'replace', … }` for a replacement copy. */
+  readonly surfaceOp?: unknown
+}
+
+/**
+ * Whether a logged event is a replacement copy: it shadowed a span of the model's surface (`surfaceOp: { op: 'replace', … }`)
+ * instead of appending to it.
+ *
+ * Today the one such message is a tool result cut down under context pressure (`src/context/prune.ts`). It is what the model
+ * is sent from then on, not what a person reads, and the original stays in the log. So neither the transcript nor the ledger
+ * draws it, as DSH keeps a replacement copy model-only (`isAppendSurfaceEvent`). Drawn, it showed the call's output a second
+ * time (#186).
+ */
+export function isReplacementCopy(event: { readonly type: string; readonly surfaceOp?: unknown }): boolean {
+  const op = event.surfaceOp
+  return typeof op === 'object' && op !== null && (op as { readonly op?: unknown }).op === 'replace'
 }
 
 /** What produced a record. The vocabulary is DSH's, so a reader of either tool sees the same words. */
@@ -653,6 +669,8 @@ export function projectLedger(events: readonly LedgerEvent[]): Ledger {
   }
 
   for (const event of events) {
+    /** A replacement copy is model-only: its call already holds the original, and an unpaired row would repeat it. */
+    if (event.type === 'message' && isReplacementCopy(event)) continue
     if (event.type === 'message') {
       const role = event.message?.role
       const text = (event.message?.content ?? []).map((part) => part.text ?? '').join('')
@@ -702,7 +720,8 @@ export function projectLedger(events: readonly LedgerEvent[]): Ledger {
       continue
     }
 
-    if (event.type === 'session/created') continue
+    // Durable session state is followed by the model seat, not an activity row or a turn boundary.
+    if (event.type === 'session/created' || event.type === 'model/selection') continue
 
     if (event.type === 'model/request') {
       settleAssistant(event.at, true)

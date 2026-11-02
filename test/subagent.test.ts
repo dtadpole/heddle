@@ -9,6 +9,8 @@ import { Context } from '@deepseek-ai/cordis'
 import {
   delegateSubagent,
   finalAssistantText,
+  INTERRUPTED_DIAGNOSTIC,
+  INTERRUPTED_REPORT_WINDOW_MS,
   parentFacts,
   type SettlementNotice,
   settlementNotice,
@@ -266,4 +268,121 @@ test('the production runner is a function, not a second implementation of the lo
   // The plugin wires it to runTurn; this test pins the seam's shape so a future change cannot silently
   // replace the child's turn with a direct model call.
   assert.equal(typeof subagentRunner, 'function')
+})
+
+/**
+ * A child a previous process left mid-turn: its prompt, a model request and some streamed text, no turn end, and its
+ * writer lock let go, as a process that exited leaves it (`release` stands in for the exit).
+ */
+function cutChild(store: SessionStore, parent: { id: string }, extra: { teamId?: string } = {}) {
+  const child = store.create({ cwd: root, endpoint: 'scripted', model: 'm', parentSession: parent.id, origin: 'subagent', delegationDepth: 1, ...extra })
+  store.append(child, { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'the task' }] } })
+  store.append(child, { type: 'model/request', messages: 1 })
+  store.append(child, { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'half an answer' } })
+  store.release(child)
+  return child
+}
+
+function reportSetup() {
+  const { store, parent } = setup()
+  const notices: { parent: string; notice: SettlementNotice }[] = []
+  const service = new SubagentService(
+    {
+      store,
+      run: async () => {},
+      deliver: async (to, notice) => {
+        notices.push({ parent: to.id, notice })
+      },
+    },
+    { maxDepth: 2, maxActive: 1 },
+  )
+  return { store, parent, notices, service }
+}
+
+test('a child a previous process left mid-turn is closed in its log and reported to its parent as interrupted, once (#170)', async () => {
+  const { store, parent, notices, service } = reportSetup()
+  const child = cutChild(store, parent)
+  const balanced = store.create({ cwd: root, endpoint: 'scripted', model: 'm', parentSession: parent.id, origin: 'subagent', delegationDepth: 1 })
+  store.append(balanced, { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'done task' }] } })
+  store.append(balanced, { type: 'model/request', messages: 1 })
+  store.append(balanced, { type: 'turn/completed', rounds: 1 })
+  store.release(balanced)
+
+  const handles = [parent, child, balanced]
+  assert.equal(service.reportInterrupted(handles), 1, 'only the child whose turn was left open is reported')
+  assert.equal(await service.settle(parent.id), 1, 'settle waits for the delivery')
+  assert.equal(notices.length, 1)
+  assert.equal(notices[0]?.parent, parent.id)
+  assert.deepEqual(notices[0]?.notice.content.map((part) => part.text), [
+    `Background subagent ${child.id} was interrupted before it finished.`,
+    'Its closing message:',
+    'half an answer',
+    INTERRUPTED_DIAGNOSTIC,
+  ])
+  assert.deepEqual(notices[0]?.notice.source, {
+    kind: 'subagent-settled',
+    form: 'notice',
+    summary: `Background subagent ${child.id} was interrupted before it finished.`,
+    senderSessionId: child.id,
+  })
+
+  // The closers are written, not only shown: a fresh store on the same files reads the turn closed.
+  const reread = new SessionStore(store.root).read(child)
+  assert.deepEqual(reread.slice(-2).map((event) => event.type), ['assistant/completed', 'turn/completed'])
+  assert.deepEqual(reread.at(-1)?.reason, { kind: 'interrupted' })
+  assert.equal(store.writerHeld(child), false, 'and the child’s writer lock is let go again')
+
+  assert.equal(service.reportInterrupted(handles), 0, 'the next start finds the turn closed and reports nothing')
+  assert.equal(notices.length, 1)
+})
+
+test('a child whose only open item is a /compact a restart cut is not reported to its parent as interrupted (#206)', async () => {
+  const { store, parent, notices, service } = reportSetup()
+  // Its turn ended; then a /compact was waiting on its summary when the process exited.
+  const child = store.create({ cwd: root, endpoint: 'scripted', model: 'm', parentSession: parent.id, origin: 'subagent', delegationDepth: 1 })
+  store.append(child, { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'the task' }] } })
+  store.append(child, { type: 'model/request', messages: 1 })
+  store.append(child, { type: 'assistant/completed', text: 'the answer' })
+  store.append(child, { type: 'turn/completed', rounds: 1 })
+  store.append(child, { type: 'command/run', commandId: 'cmd-1', name: 'compact', source: { kind: 'user' } })
+  store.append(child, { type: 'compaction/start', fromSeq: 1, throughSeq: 3, shadowedSeqs: [1, 2, 3] })
+  store.release(child)
+
+  assert.equal(service.reportInterrupted([parent, child]), 0, 'no turn was cut, so the parent has nothing to hear')
+  await service.settle(parent.id)
+  assert.equal(notices.length, 0)
+  assert.equal(store.read(child).at(-1)?.type, 'compaction/start', 'and the sweep leaves the log to the next write-open')
+  assert.equal(store.writerHeld(child), false)
+})
+
+test('the start report leaves teammates, old cuts, orphans and live writers alone, and a cut parent gets the notice without a turn', async () => {
+  const { store, parent, notices, service } = reportSetup()
+  const teammate = cutChild(store, parent, { teamId: parent.id })
+  const old = cutChild(store, parent)
+  const orphanParent = store.create({ cwd: root, endpoint: 'scripted', model: 'm' })
+  const orphan = cutChild(store, orphanParent)
+  const live = cutChild(store, parent)
+  store.claim(live)
+
+  const later = Date.now() + INTERRUPTED_REPORT_WINDOW_MS + 60_000
+  assert.equal(service.reportInterrupted([old], later), 0, 'a child cut more than a day before the start is left as it is')
+  assert.equal(store.read(old).at(-1)?.type, 'assistant/chunk', 'and its log is not touched')
+  assert.equal(service.reportInterrupted([teammate], Date.now()), 0, 'a teammate is the team sweep’s')
+  assert.equal(service.reportInterrupted([live]), 0, 'a child whose writer is alive may still be running')
+  rmSync(orphanParent.meta, { force: true })
+  assert.equal(service.reportInterrupted([orphan]), 0, 'a child whose parent is gone has no one to tell')
+  assert.equal(notices.length, 0)
+  store.release(live)
+
+  // A chain cut in one restart: the middle child is told about its own child in its log, and only the top parent is
+  // woken, with the middle child's own closing message.
+  const middle = cutChild(store, parent)
+  const grandchild = cutChild(store, middle)
+  assert.equal(service.reportInterrupted([grandchild, middle]), 2)
+  await service.settle(parent.id)
+  assert.deepEqual(notices.map((one) => [one.parent, one.notice.source.senderSessionId]), [[parent.id, middle.id]], 'one turn is started, in the top parent')
+  assert.match(notices[0]?.notice.content[2]?.text ?? '', /half an answer/)
+  const written = store.read(middle).filter((event) => event.type === 'message' && (event.message as { source?: { kind?: string } }).source?.kind === 'subagent-settled')
+  assert.equal(written.length, 1, 'the middle child has its child’s notice in its log')
+  assert.equal(store.read(middle).at(-1), written[0], 'with no turn after it')
 })

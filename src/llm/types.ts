@@ -144,6 +144,27 @@ export interface GenerateRequest {
  */
 export const HEALTHY_FINISH_REASONS: readonly string[] = ['stop', 'tool_calls']
 
+/**
+ * Why a summary call's answer cannot be a checkpoint, from how it finished; `undefined` when it finished normally (#207).
+ *
+ * A summary the provider cut at its output limit stops mid-sentence, and the facts it had not reached are gone once it
+ * replaces the history: measured on both builds, a `/compact` whose summary ended `finish_reason: "length"` reported
+ * "Compacted 33 history items", and the next request no longer held the number the summary was about to write. DSH's
+ * `dsh-compaction-basic` `finishError` refuses it as "summarization truncated at the token cap (incomplete checkpoint)",
+ * code `MAX_TOKENS`; its `error` and `aborted` finishes are failures thrown before an answer exists here. Any other
+ * finish the loop does not call healthy (a content filter, an `incomplete` Responses status) ended the summary early
+ * too, and is refused the same way. The Rust build says the same words (`heddle-llm` `summary_finish_failure`).
+ */
+export function summaryFinishFailure(endpoint: string, finishReason: string): ModelError | undefined {
+  if (finishReason === 'max_output_tokens') {
+    return new ModelError('summarization truncated at the token cap (incomplete checkpoint)', { endpoint, code: 'MAX_TOKENS' })
+  }
+  if (!HEALTHY_FINISH_REASONS.includes(finishReason)) {
+    return new ModelError(`summarization ended '${finishReason}' (incomplete checkpoint)`, { endpoint, code: 'INCOMPLETE' })
+  }
+  return undefined
+}
+
 /** How each wire shape spells the same three outcomes. */
 const FINISH_ALIASES: Readonly<Record<string, string>> = {
   // finished
@@ -446,17 +467,27 @@ export interface Adapter {
  */
 export const CONTEXT_WINDOW_EXCEEDED = 'CONTEXT_WINDOW_EXCEEDED'
 
+/**
+ * The code a refusal that says the account's quota or balance is spent is normalized to, at any status (S31). DSH's
+ * `QUOTA_EXCEEDED_CODE` (`dsh-llm`), which its retry policy never repeats: a quota-worded 429 is not a rate limit, and
+ * the provider-retry decision keeps any code that is not `HTTP` (`retryFailureCode`).
+ */
+export const QUOTA_EXCEEDED = 'QUOTA'
+
 /** A failure with the endpoint and status attached, so a caller can diagnose it. */
 export class ModelError extends Error {  readonly endpoint: string
   readonly status?: number
   readonly code: string
+  /** The provider's `Retry-After`, in milliseconds, when it sent a positive one: a retry policy waits that long. */
+  readonly retryAfterMs?: number
 
-  constructor(message: string, options: { endpoint: string; code: string; status?: number; cause?: unknown }) {
+  constructor(message: string, options: { endpoint: string; code: string; status?: number; retryAfterMs?: number; cause?: unknown }) {
     super(message, options.cause !== undefined ? { cause: options.cause } : undefined)
     this.name = 'ModelError'
     this.endpoint = options.endpoint
     this.code = options.code
     if (options.status !== undefined) this.status = options.status
+    if (options.retryAfterMs !== undefined) this.retryAfterMs = options.retryAfterMs
   }
 }
 

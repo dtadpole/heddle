@@ -32,14 +32,16 @@ pub use ports::{
     TurnHooks,
 };
 pub use subagent::{
-    LateSubagentRunner, ParentFacts, SettlementNotice, StartedSubagent, SubagentConfig,
-    SubagentDeliver, SubagentDeps, SubagentError, SubagentErrorCode, SubagentLimits,
-    SubagentResult, SubagentRun, SubagentService, SubagentStopReason, SubagentStore,
-    delegate_subagent, final_assistant_text, parent_facts, register_subagent_row,
-    settlement_notice, settlement_summary, subagent_deliverer, subagent_runner, subagent_tools,
+    INTERRUPTED_DIAGNOSTIC, INTERRUPTED_REPORT_WINDOW_MS, LateSubagentRunner, ParentFacts,
+    SettlementNotice, StartedSubagent, SubagentConfig, SubagentDeliver, SubagentDeps,
+    SubagentError, SubagentErrorCode, SubagentLimits, SubagentResult, SubagentRun, SubagentService,
+    SubagentStopReason, SubagentStore, delegate_subagent, final_assistant_text, parent_facts,
+    register_subagent_row, settlement_notice, settlement_summary, subagent_deliverer,
+    subagent_runner, subagent_tools,
 };
 pub use turn::{
     AgentRuntime, BegunTurn, ContextSummary, Denial, RoundLimit, RunTurnOptions, ToolCallRecord,
-    TurnError, TurnResult, begin_turn, has_new_input, merge_usage, parse_arguments, run_turn,
+    TurnError, TurnResult, begin_turn, begin_turn_queued, has_new_input, merge_usage,
+    parse_arguments, run_turn,
 };
 pub use turns::{LiveTurn, TurnRegistry};

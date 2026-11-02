@@ -42,6 +42,10 @@ pub struct ModelError {
     pub code: Option<String>,
     /// The provider's sentence.
     pub message: String,
+    /// The HTTP status, when the provider answered with one; a retry policy names the failure by it.
+    pub status: Option<u16>,
+    /// The provider's `Retry-After`, in whole milliseconds, when it sent a positive one.
+    pub retry_after_ms: Option<u64>,
 }
 
 impl From<heddle_llm::ModelError> for ModelError {
@@ -53,6 +57,8 @@ impl From<heddle_llm::ModelError> for ModelError {
         Self {
             code,
             message: error.message.clone(),
+            status: error.status,
+            retry_after_ms: error.retry_after_ms.map(|delay| delay.ceil() as u64),
         }
     }
 }
@@ -87,6 +93,12 @@ pub trait ModelPort: Send + Sync {
 
     /// The endpoint a session with none recorded runs on.
     fn default_endpoint(&self) -> Option<String>;
+
+    /// The retry policy a failed call to `endpoint` is judged by (DSH's provider-owned `retryPolicy`); `None`
+    /// means the loop does not retry, which is the default for a port that does not say.
+    fn retry_policy(&self, _endpoint: &str) -> Option<heddle_llm::RetryPolicy> {
+        None
+    }
 }
 
 /// The `model/request` record, written before each model call. Field order and spelling are the
@@ -102,6 +114,9 @@ pub struct ModelRequestRecord {
     /// The reasoning level, when the turn named one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Whether that level is the model's declared default rather than a choice (#157).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_default: Option<bool>,
     /// How many messages the request carries.
     pub messages: usize,
     /// The names of the tools it carries.
@@ -264,7 +279,7 @@ pub enum HookFailure {
 }
 
 /// What one refused model call is offered on `agent/request-error`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct RequestErrorPayload {
     /// The failure's code and sentence.
     pub code: String,
@@ -280,6 +295,8 @@ pub struct RequestErrorPayload {
     pub cwd: PathBuf,
     /// The tools the request carried.
     pub tools: Vec<ToolSpec>,
+    /// The turn's stop token, so the forced reduction's summary call stops with the turn (#154).
+    pub cancel: Option<tokio_util::sync::CancellationToken>,
 }
 
 /// A listener's answer on `agent/request-error`.
@@ -472,6 +489,7 @@ mod tests {
             model: None,
             cwd: PathBuf::from("/w"),
             tools: Vec::new(),
+            cancel: None,
         };
         assert_eq!(
             chain.request_error(&payload).await,

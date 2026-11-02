@@ -83,6 +83,22 @@ impl LlmModel {
 }
 
 impl ModelPort for LlmModel {
+    /// The endpoint's `retryPolicy`, resolved with DSH's defaults when it writes none; an endpoint that is not
+    /// configured has none, and a policy that cannot be read is reported and not used.
+    fn retry_policy(&self, endpoint: &str) -> Option<heddle_llm::RetryPolicy> {
+        let config = self.service.endpoint(endpoint)?;
+        match heddle_llm::resolve_retry_policy(
+            config.retry_policy.as_ref(),
+            &format!("endpoints.{endpoint}.retryPolicy"),
+        ) {
+            Ok(policy) => Some(policy),
+            Err(error) => {
+                tracing::warn!("turn: the retry policy of {endpoint} cannot be used: {error}");
+                None
+            }
+        }
+    }
+
     fn stream(
         &self,
         request: GenerateRequest,
@@ -196,6 +212,7 @@ impl SessionPort for Sessions {
             endpoint: record.endpoint.clone(),
             model: record.model.clone(),
             reasoning_effort: record.reasoning_effort.clone(),
+            reasoning_effort_default: record.reasoning_effort_default,
             messages: record.messages as u64,
             tools: record.tools.clone(),
             estimated_tokens: Some(record.estimated_tokens),
@@ -396,6 +413,33 @@ impl SubagentStore for SessionSubagents {
             .map_err(port_error)?;
         Ok(event.seq)
     }
+
+    fn open(&self, id: &str) -> Option<SessionHandle> {
+        self.service.open(id)
+    }
+
+    fn close_interrupted(&self, session: &SessionHandle) -> Result<bool, PortError> {
+        // The store's own log, without the closers a read adds while no writer holds it: whether the turn is open
+        // is the question.
+        let store = self.service.store();
+        if store.writer_held(session) {
+            return Ok(false);
+        }
+        let events = store.read(session).map_err(port_error)?;
+        // Only a cut turn counts: a command left open alone (a `/compact` a restart cut, #206) lost no answer, and
+        // its closers are written at the session's next write-open.
+        if !heddle_session::interrupted_turn_closers(&events)
+            .iter()
+            .any(|event| event.kind == "turn/completed")
+        {
+            return Ok(false);
+        }
+        // A fresh write-open writes the closers (`SessionStore::claim`); letting go leaves the session as free
+        // as the process that died left it.
+        store.claim(session).map_err(port_error)?;
+        store.release(session);
+        Ok(true)
+    }
 }
 
 /// How the context service names a session, given the loop's handle.
@@ -463,6 +507,8 @@ impl<S: ContextStore + 'static> ContextPort for Context<S> {
                 summarizer: None,
                 // An ordinary round: the trigger and the retained tail apply.
                 force: false,
+                // The turn's stop token reaches the summary call (#154).
+                cancel: options.cancel.as_ref(),
             };
             self.service
                 .prepare(&handle, &prepared)
@@ -533,6 +579,7 @@ impl<S: ContextStore + 'static> TurnHooks for ContextRecovery<S> {
                 endpoint: &payload.endpoint,
                 model: payload.model.as_deref(),
                 tools: &payload.tools,
+                cancel: payload.cancel.as_ref(),
             };
             match self.service.recover_overflow(&handle, &request).await {
                 Ok(heddle_context::RecoveryDecision::Retry) => Some(RequestErrorAction::Retry),
@@ -608,6 +655,38 @@ pub(crate) mod tests {
         let service =
             Arc::new(ModelService::from_configuration(vec![endpoint], Some("scripted")).unwrap());
         (service, dir)
+    }
+
+    #[test]
+    fn the_llm_port_resolves_each_endpoints_retry_policy() {
+        let endpoints: Vec<EndpointConfig> = serde_json::from_value(json!([
+            { "name": "plain", "kind": "scripted", "baseUrl": "/nowhere.json" },
+            { "name": "patient", "kind": "scripted", "baseUrl": "/nowhere.json", "retryPolicy": { "mode": "always" } },
+            { "name": "broken", "kind": "scripted", "baseUrl": "/nowhere.json", "retryPolicy": { "mode": "sometimes" } },
+        ]))
+        .unwrap();
+        let port = LlmModel::new(Arc::new(
+            ModelService::from_configuration(endpoints, None).unwrap(),
+        ));
+        assert_eq!(
+            port.retry_policy("plain"),
+            Some(heddle_llm::RetryPolicy::default()),
+            "DSH's normal default"
+        );
+        assert_eq!(
+            port.retry_policy("patient").map(|policy| policy.mode),
+            Some(heddle_llm::RetryMode::Always)
+        );
+        assert_eq!(
+            port.retry_policy("broken"),
+            None,
+            "a policy that cannot be read is not used"
+        );
+        assert_eq!(
+            port.retry_policy("missing"),
+            None,
+            "an endpoint that is not configured has none"
+        );
     }
 
     fn request(round: u32) -> GenerateRequest {
@@ -793,6 +872,7 @@ pub(crate) mod tests {
                 endpoint: "scripted".into(),
                 model: None,
                 reasoning_effort: None,
+                reasoning_effort_default: None,
                 messages: 3,
                 tools: vec!["read_file".into()],
                 estimated_tokens: 42,
@@ -924,6 +1004,7 @@ pub(crate) mod tests {
             model: None,
             tools: Vec::new(),
             system: None,
+            cancel: None,
         }
     }
 
@@ -1098,6 +1179,7 @@ pub(crate) mod tests {
             model: None,
             cwd: std::env::temp_dir(),
             tools: Vec::new(),
+            cancel: None,
         }
     }
 

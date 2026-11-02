@@ -151,6 +151,21 @@ pub trait SubagentStore: Send + Sync {
         let _ = (session, content, source);
         Err(PortError("this store cannot write a message".to_owned()))
     }
+    /// Open a session by id; `None` when there is none or its log does not read. The default opens nothing, for
+    /// a store that only creates and reads children.
+    fn open(&self, id: &str) -> Option<SessionHandle> {
+        let _ = id;
+        None
+    }
+    /// Close the turn a writer that is gone left open in `session`, by taking its writer lock (DSH's write-open
+    /// closers, written rather than only shown) and letting go again; whether there was one to close. `false`
+    /// while a live writer holds the session, when only a command was left open (a `/compact` a restart cut,
+    /// #206: no answer was lost, and its closers wait for the next write-open), and from the default, for a store
+    /// that only creates and reads children.
+    fn close_interrupted(&self, session: &SessionHandle) -> Result<bool, PortError> {
+        let _ = session;
+        Ok(false)
+    }
 }
 
 /// Run one child turn. Production uses [`subagent_runner`]; a test passes a recorder.
@@ -519,7 +534,8 @@ pub fn register_subagent_row(
     Ok(service)
 }
 
-/// How a background child's run ended, in DSH's settlement vocabulary (`dsh-subagent` stop reasons).
+/// How a background child's run ended, in DSH's settlement vocabulary (`dsh-subagent` stop reasons), plus
+/// `Interrupted`: the process running the child exited mid-turn, and the next server start reports it (#170).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubagentStopReason {
     /// The child's turn ended normally.
@@ -528,12 +544,16 @@ pub enum SubagentStopReason {
     Aborted,
     /// The child's turn failed.
     Error,
+    /// The process running the child exited before its turn finished.
+    Interrupted,
 }
 
 /// The opening line of a settlement notice, DSH's `settlementSummary` word for word.
 ///
 /// A delegate child is one-shot: it takes no follow-up message (heddle's continuable child is the teammate), so
-/// a completed child is worded as DSH words a child that cannot receive more.
+/// a completed child is worded as DSH words a child that cannot receive more. `Interrupted` is heddle's: DSH
+/// sends no notice for a child its process lost (`_context_/dsh-mechanisms/dsh-jobs.md` section 6.3), so its
+/// line follows DSH's `stopped` and `failed` lines in form.
 pub fn settlement_summary(child_id: &str, stop: SubagentStopReason) -> String {
     let subject = format!("Background subagent {child_id}");
     match stop {
@@ -542,8 +562,21 @@ pub fn settlement_summary(child_id: &str, stop: SubagentStopReason) -> String {
         }
         SubagentStopReason::Aborted => format!("{subject} was stopped before it finished."),
         SubagentStopReason::Error => format!("{subject} failed before it finished."),
+        SubagentStopReason::Interrupted => {
+            format!("{subject} was interrupted before it finished.")
+        }
     }
 }
+
+/// The diagnostic an interrupted child's notice carries: the closer's reason, told to the parent.
+pub const INTERRUPTED_DIAGNOSTIC: &str = "The process running it exited before its turn finished, so the turn was closed; a tool call it left open has an unknown outcome.";
+
+/// How long after its last event a cut child is still reported at a server start: one day, in milliseconds.
+///
+/// The case is a deploy or a crash, where the server is back within minutes. A child cut longer ago is left as
+/// it is (a view already shows its turn closed): its parent has moved on, and the first start of a build with
+/// this sweep must not wake every old parent on the store at once.
+pub const INTERRUPTED_REPORT_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
 
 /// A settled child's report to its parent: the user-role message DSH's runtime delivers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -765,14 +798,116 @@ impl SubagentService {
         self.state().in_flight.remove(&opened.child.id);
         let closing = final_assistant_text(&self.deps.store.read(&opened.child));
         let notice = settlement_notice(&opened.child.id, stop, &closing, diagnostic.as_deref());
-        let delivered = self.deliver.deliver(&opened.parent, notice).await.is_ok();
-        if delivered {
-            *self
-                .state()
-                .delivered
-                .entry(opened.parent.id.clone())
-                .or_default() += 1;
+        self.report(&opened.parent, notice).await;
+    }
+
+    /// Hand `parent` its child's notice, and count it once it is answered.
+    async fn report(&self, parent: &SessionHandle, notice: SettlementNotice) {
+        if self.deliver.deliver(parent, notice).await.is_ok() {
+            *self.state().delivered.entry(parent.id.clone()).or_default() += 1;
         }
+    }
+
+    /// Report to their parents the background children a previous process left mid-turn, and return how many
+    /// (#170).
+    ///
+    /// The server calls this once at start, after the goal and team sweeps, with every session it lists. A
+    /// process that exits while a child's turn is open takes the child's settlement with it: the child's log is
+    /// closed at the next write-open (heddle-session's `repair.rs`), but its parent would never hear, and its model
+    /// would wait for a child that will not answer. So for each delegate child (`origin: subagent`, not a
+    /// teammate, which the team sweep owns) whose last turn is open, whose writer is gone, and whose last event is
+    /// inside [`INTERRUPTED_REPORT_WINDOW_MS`]:
+    ///
+    /// 1. its open turn is closed in its own log ([`SubagentStore::close_interrupted`]). That is what makes the
+    ///    report happen once: the next start finds the turn closed;
+    /// 2. its parent gets the [`SubagentStopReason::Interrupted`] notice, with whatever the child had said as its
+    ///    closing message, delivered as a finished child's notice is: a new parent turn, or into the parent's
+    ///    running turn.
+    ///
+    /// A parent that is itself a child cut in the same restart gets the notice written into its log without a
+    /// turn of its own: nothing would carry that turn's answer up the chain, and its own interrupted notice
+    /// already goes up. Every notice is made before any is written, so such a parent's closing message is its
+    /// own. A child whose parent is gone is left as it is. Deliveries run on spawned tasks and are not awaited (a
+    /// turn must not hold the server's start); [`Self::settle`] waits for them. The TypeScript twin is
+    /// `SubagentService.reportInterrupted`. Must be called inside a Tokio runtime.
+    pub fn report_interrupted(self: &Arc<Self>, sessions: &[String]) -> usize {
+        self.report_interrupted_at(sessions, &heddle_session::clock::iso_now())
+    }
+
+    /// [`Self::report_interrupted`] as of `now`, an ISO time, so a test can stand a day later.
+    pub fn report_interrupted_at(self: &Arc<Self>, sessions: &[String], now: &str) -> usize {
+        let store = &self.deps.store;
+        let now = heddle_session::clock::parse_iso(now);
+        let mut cut: Vec<(String, SessionHandle, SettlementNotice)> = Vec::new();
+        for id in sessions {
+            let Some(meta) = store.meta(id) else {
+                continue;
+            };
+            let teammate = meta.rest.get("teamId").is_some_and(|team| !team.is_null());
+            if meta.origin.as_deref() != Some("subagent") || teammate {
+                continue;
+            }
+            let Some(parent_id) = meta.parent_session.as_deref() else {
+                continue;
+            };
+            let Some(handle) = store.open(id) else {
+                continue;
+            };
+            // An unreadable time is outside the window, as it is in the TypeScript build.
+            let recent = store
+                .read(&handle)
+                .last()
+                .and_then(|last| heddle_session::clock::parse_iso(&last.at))
+                .zip(now)
+                .is_some_and(|(last, now)| {
+                    (now - last).num_milliseconds() <= INTERRUPTED_REPORT_WINDOW_MS
+                });
+            if !recent {
+                continue;
+            }
+            let Some(parent) = store.open(parent_id) else {
+                continue;
+            };
+            match store.close_interrupted(&handle) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
+                    tracing::warn!(child = %handle.id, %error, "an interrupted subagent's log could not be closed");
+                    continue;
+                }
+            }
+            let closing = final_assistant_text(&store.read(&handle));
+            let notice = settlement_notice(
+                &handle.id,
+                SubagentStopReason::Interrupted,
+                &closing,
+                Some(INTERRUPTED_DIAGNOSTIC),
+            );
+            cut.push((handle.id.clone(), parent, notice));
+        }
+        let cut_ids: HashSet<String> = cut.iter().map(|(child, _, _)| child.clone()).collect();
+        let reported = cut.len();
+        for (_, parent, notice) in cut {
+            if cut_ids.contains(&parent.id) {
+                // A write that fails must not stop the server's start; the parent's own notice still goes up.
+                if let Err(error) =
+                    store.user_message(&parent, notice.parts(), Some(notice.source()))
+                {
+                    tracing::warn!(parent = %parent.id, %error, "an interrupted subagent's notice could not be written");
+                }
+                continue;
+            }
+            *self.state().pending.entry(parent.id.clone()).or_default() += 1;
+            let service = Arc::clone(self);
+            tokio::spawn(async move {
+                let _pending = PendingGuard {
+                    service: Arc::clone(&service),
+                    session: parent.id.clone(),
+                };
+                service.report(&parent, notice).await;
+            });
+        }
+        reported
     }
 }
 
@@ -2155,5 +2290,272 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.message.contains("no endpoint"), "{}", error.message);
+    }
+
+    /// A child a previous process left mid-turn (#170): its prompt, a model request and some streamed text, no turn
+    /// end, and its writer lock let go, as a process that exited leaves it (`release` stands in for the exit).
+    fn cut_child(
+        sessions: &Arc<heddle_session::SessionService>,
+        parent: &str,
+        team: Option<&str>,
+    ) -> SessionHandle {
+        let store = sessions.store();
+        let child = store
+            .create(heddle_session::CreateOptions {
+                parent_session: Some(parent.to_owned()),
+                origin: Some(heddle_session::SessionOrigin::Subagent),
+                delegation_depth: Some(1),
+                team_id: team.map(str::to_owned),
+                ..heddle_session::CreateOptions::default()
+            })
+            .unwrap();
+        for value in [
+            serde_json::json!({"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "the task"}]}}),
+            serde_json::json!({"type": "model/request", "messages": 1}),
+            serde_json::json!({"type": "assistant/chunk", "chunk": {"type": "text-delta", "text": "half an answer"}}),
+        ] {
+            store
+                .append(
+                    &child,
+                    heddle_session::NewEvent::try_from(value).unwrap(),
+                    heddle_session::AppendOptions::default(),
+                )
+                .unwrap();
+        }
+        store.release(&child);
+        child
+    }
+
+    fn report_service(
+        sessions: &Arc<heddle_session::SessionService>,
+    ) -> (Arc<SubagentService>, Arc<Notices>) {
+        let store: Arc<dyn SubagentStore> =
+            Arc::new(crate::adapters::SessionSubagents::new(Arc::clone(sessions)));
+        let deps = SubagentDeps {
+            store,
+            run: Arc::new(StoreAnswer {
+                sessions: Arc::clone(sessions),
+            }),
+        };
+        service_with(deps, SubagentLimits::default())
+    }
+
+    /// The kinds of the events in the session's file, read by a fresh store so nothing a read adds counts.
+    fn written_kinds(
+        sessions: &heddle_session::SessionService,
+        handle: &SessionHandle,
+    ) -> Vec<String> {
+        let fresh = heddle_session::SessionStore::new(
+            sessions.store().root(),
+            &heddle_config::Env::default(),
+        );
+        fresh
+            .read(handle)
+            .unwrap()
+            .iter()
+            .map(|event| event.kind.clone())
+            .collect()
+    }
+
+    /// test/subagent.test.ts: the child is closed in its log and reported to its parent as interrupted, once.
+    #[tokio::test]
+    async fn a_child_a_previous_process_left_mid_turn_is_closed_and_reported_to_its_parent_once() {
+        let (sessions, _sessions_dir) = crate::adapters::tests::sessions_at("report-interrupted");
+        let parent = sessions
+            .store()
+            .create(heddle_session::CreateOptions::default())
+            .unwrap();
+        let child = cut_child(&sessions, &parent.id, None);
+        let balanced = cut_child(&sessions, &parent.id, None);
+        sessions
+            .store()
+            .append(
+                &balanced,
+                heddle_session::NewEvent::try_from(
+                    serde_json::json!({"type": "turn/completed", "rounds": 1}),
+                )
+                .unwrap(),
+                heddle_session::AppendOptions::default(),
+            )
+            .unwrap();
+        sessions.store().release(&balanced);
+        let (service, notices) = report_service(&sessions);
+        let ids = [parent.id.clone(), child.id.clone(), balanced.id.clone()];
+
+        assert_eq!(service.report_interrupted(&ids), 1, "only the open child");
+        assert_eq!(
+            service.settle(&parent.id).await,
+            1,
+            "settle waits for the delivery"
+        );
+        let seen = notices.seen();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, parent.id);
+        assert_eq!(
+            seen[0].1.texts,
+            [
+                format!(
+                    "Background subagent {} was interrupted before it finished.",
+                    child.id
+                ),
+                "Its closing message:".to_owned(),
+                "half an answer".to_owned(),
+                INTERRUPTED_DIAGNOSTIC.to_owned(),
+            ]
+        );
+        assert_eq!(
+            seen[0].1.source(),
+            serde_json::json!({
+                "kind": "subagent-settled",
+                "form": "notice",
+                "summary": format!("Background subagent {} was interrupted before it finished.", child.id),
+                "senderSessionId": child.id,
+            })
+        );
+
+        // The closers are written, not only shown.
+        let kinds = written_kinds(&sessions, &child);
+        assert_eq!(
+            kinds[kinds.len() - 2..],
+            ["assistant/completed", "turn/completed"]
+        );
+        let events = sessions.store().read(&child).unwrap();
+        assert_eq!(
+            events.last().unwrap().fields["reason"],
+            serde_json::json!({"kind": "interrupted"})
+        );
+        assert!(
+            !sessions.store().writer_held(&child),
+            "the lock is let go again"
+        );
+
+        assert_eq!(
+            service.report_interrupted(&ids),
+            0,
+            "the next start reports nothing"
+        );
+        assert_eq!(notices.seen().len(), 1);
+    }
+
+    /// test/subagent.test.ts: a child whose only open item is a `/compact` a restart cut (#206) lost no answer, so
+    /// its parent is not told it was interrupted.
+    #[tokio::test]
+    async fn a_child_whose_only_open_item_is_a_cut_compact_is_not_reported_as_interrupted() {
+        let (sessions, _sessions_dir) = crate::adapters::tests::sessions_at("report-command-only");
+        let store = sessions.store();
+        let parent = store
+            .create(heddle_session::CreateOptions::default())
+            .unwrap();
+        let child = store
+            .create(heddle_session::CreateOptions {
+                parent_session: Some(parent.id.clone()),
+                origin: Some(heddle_session::SessionOrigin::Subagent),
+                delegation_depth: Some(1),
+                ..heddle_session::CreateOptions::default()
+            })
+            .unwrap();
+        // Its turn ended; then a /compact was waiting on its summary when the process exited.
+        for value in [
+            serde_json::json!({"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "the task"}]}}),
+            serde_json::json!({"type": "model/request", "messages": 1}),
+            serde_json::json!({"type": "assistant/completed", "text": "the answer"}),
+            serde_json::json!({"type": "turn/completed", "rounds": 1}),
+            serde_json::json!({"type": "command/run", "commandId": "cmd-1", "name": "compact", "source": {"kind": "user"}}),
+            serde_json::json!({"type": "compaction/start", "fromSeq": 1, "throughSeq": 3, "shadowedSeqs": [1, 2, 3]}),
+        ] {
+            store
+                .append(
+                    &child,
+                    heddle_session::NewEvent::try_from(value).unwrap(),
+                    heddle_session::AppendOptions::default(),
+                )
+                .unwrap();
+        }
+        store.release(&child);
+        let (service, notices) = report_service(&sessions);
+
+        assert_eq!(
+            service.report_interrupted(&[parent.id.clone(), child.id.clone()]),
+            0,
+            "no turn was cut, so the parent has nothing to hear"
+        );
+        service.settle(&parent.id).await;
+        assert!(notices.seen().is_empty());
+        assert_eq!(
+            written_kinds(&sessions, &child).last().map(String::as_str),
+            Some("compaction/start"),
+            "the sweep leaves the log to the next write-open"
+        );
+        assert!(!store.writer_held(&child));
+    }
+
+    #[tokio::test]
+    async fn the_start_report_leaves_teammates_old_cuts_orphans_and_live_writers_alone_and_a_cut_parent_gets_no_turn()
+     {
+        let (sessions, _sessions_dir) = crate::adapters::tests::sessions_at("report-limits");
+        let store = sessions.store();
+        let parent = store
+            .create(heddle_session::CreateOptions::default())
+            .unwrap();
+        let teammate = cut_child(&sessions, &parent.id, Some(&parent.id));
+        let old = cut_child(&sessions, &parent.id, None);
+        let orphan = cut_child(&sessions, "session-gone", None);
+        let live = cut_child(&sessions, &parent.id, None);
+        store.claim(&live).unwrap();
+        let (service, notices) = report_service(&sessions);
+
+        // Well past the window from any time this test runs.
+        let later = "2999-01-01T00:00:00.000Z";
+        assert_eq!(
+            service.report_interrupted_at(std::slice::from_ref(&old.id), later),
+            0,
+            "a child cut more than a day before the start is left as it is"
+        );
+        assert_eq!(
+            written_kinds(&sessions, &old).last().unwrap(),
+            "assistant/chunk"
+        );
+        assert_eq!(
+            service.report_interrupted(std::slice::from_ref(&teammate.id)),
+            0
+        );
+        assert_eq!(
+            service.report_interrupted(std::slice::from_ref(&live.id)),
+            0
+        );
+        assert_eq!(
+            service.report_interrupted(std::slice::from_ref(&orphan.id)),
+            0
+        );
+        assert!(notices.seen().is_empty());
+        store.release(&live);
+
+        // A chain cut in one restart: the middle child is told in its log, and only the top parent is woken.
+        let middle = cut_child(&sessions, &parent.id, None);
+        let grandchild = cut_child(&sessions, &middle.id, None);
+        assert_eq!(
+            service.report_interrupted(&[grandchild.id.clone(), middle.id.clone()]),
+            2
+        );
+        service.settle(&parent.id).await;
+        let seen = notices.seen();
+        assert_eq!(seen.len(), 1, "one turn, in the top parent");
+        assert_eq!(seen[0].0, parent.id);
+        assert_eq!(seen[0].1.sender_session_id, middle.id);
+        assert_eq!(
+            seen[0].1.texts[2], "half an answer",
+            "the middle child's own words"
+        );
+        let events = store.read(&middle).unwrap();
+        let last = events.last().unwrap();
+        assert_eq!(
+            last.kind, "message",
+            "the middle child's log ends with its child's notice"
+        );
+        assert_eq!(last.fields["message"]["source"]["kind"], "subagent-settled");
+        assert_eq!(
+            last.fields["message"]["source"]["senderSessionId"],
+            grandchild.id.as_str()
+        );
     }
 }
