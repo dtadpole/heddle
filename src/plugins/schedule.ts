@@ -43,7 +43,7 @@ export const Config: Schema<Config> = Schema.object({
   deliveryHistoryDays: Schema.number().step(1).min(1).max(3650).default(30),
   deliveryHistoryRecords: Schema.number().step(1).min(1).max(10_000).default(200),
   autoStart: Schema.boolean().default(false),
-  maxRounds: Schema.number(),
+  maxRounds: Schema.number().step(1).min(1),
 })
 
 declare module '@deepseek-ai/cordis' {

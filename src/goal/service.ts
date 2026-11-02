@@ -123,7 +123,7 @@ export interface Config {
 }
 
 export const Config: Schema<Config> = Schema.object({
-  defaultMaxGoalRounds: Schema.number().default(100),
+  defaultMaxGoalRounds: Schema.number().step(1).min(1).default(100),
 })
 
 /** The operations a snapshot change may record. `clear` has its own tombstone shape. */

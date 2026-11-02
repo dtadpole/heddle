@@ -25,10 +25,10 @@ export interface Config {
 }
 
 export const Config = Schema.object({
-  maxMembers: Schema.number().default(8),
-  maxTasks: Schema.number().default(256),
-  maxPendingMessagesPerMember: Schema.number().default(64),
-  maxMessageBytes: Schema.number().default(65_536),
+  maxMembers: Schema.number().step(1).min(1).default(8),
+  maxTasks: Schema.number().step(1).min(1).default(256),
+  maxPendingMessagesPerMember: Schema.number().step(1).min(1).default(64),
+  maxMessageBytes: Schema.number().step(1).min(1).default(65_536),
 })
 
 declare module '@deepseek-ai/cordis' {

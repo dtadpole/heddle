@@ -61,7 +61,7 @@ export const Config = Schema.object({
    * Bounded rather than open-ended: a turn blocked forever on a card nobody saw is a turn that cannot be stopped
    * cleanly, and `cancelled` is the truthful answer to "nobody answered".
    */
-  answerTimeoutMs: Schema.number().default(300_000),
+  answerTimeoutMs: Schema.number().step(1).min(1).max(2_147_483_647).default(300_000),
 })
 
 export interface Config {

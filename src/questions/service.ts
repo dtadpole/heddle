@@ -239,7 +239,7 @@ export function lateAnswerMessage(request: FoldedRequest, answers: readonly Answ
 
 export const Config = Schema.object({
   mode: Schema.union(['legacy', 'timed']).default('legacy').description('legacy waits for an answer; timed may release the model at a deadline'),
-  timeout: Schema.number().default(DEFAULT_TIMEOUT_SECONDS).description('default foreground wait of a timed call, in seconds; -1 waits indefinitely'),
+  timeout: Schema.union([-1, Schema.number().step(1).min(1).max(MAX_TIMEOUT_SECONDS)]).default(DEFAULT_TIMEOUT_SECONDS).description('default foreground wait of a timed call, in seconds; -1 waits indefinitely'),
 })
 
 export interface Config {

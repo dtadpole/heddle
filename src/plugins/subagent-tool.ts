@@ -24,8 +24,8 @@ export interface Config {
 }
 
 export const Config: Schema<Config> = Schema.object({
-  maxDepth: Schema.number().default(2),
-  maxActive: Schema.number().default(1),
+  maxDepth: Schema.number().step(1).min(0).default(2),
+  maxActive: Schema.number().step(1).min(1).default(1),
 })
 
 /** Did the session's model see this event? True once a model request follows it. */

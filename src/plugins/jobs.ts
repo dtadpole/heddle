@@ -59,7 +59,7 @@ export const Config: Schema<Config> = Schema.object({
   completionDelivery: Schema.union(['wakeup', 'quiet']).default('wakeup'),
   maxConsecutiveWakes: Schema.number().step(1).min(1),
   killGraceMs: Schema.number().min(0).default(3_000),
-  maxRounds: Schema.number(),
+  maxRounds: Schema.number().step(1).min(1),
   promoteOnTimeout: Schema.boolean().default(true),
 })
 

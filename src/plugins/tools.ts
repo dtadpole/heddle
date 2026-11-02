@@ -35,7 +35,7 @@ export default class ToolsPlugin extends ToolRegistry {
     /** Register the harness's own four tools. */
     includeBuiltins: Schema.boolean().default(true),
     /** Wall time a `bash` call may take before it is killed. */
-    bashTimeoutMs: Schema.number().default(30_000),
+    bashTimeoutMs: Schema.natural().min(1).max(2_147_483_647).default(30_000),
     /** The most wall time a `bash` call may ask for with its own `timeoutMs`; a larger request is cut (DSH's `maxTimeoutMs`). */
     bashMaxTimeoutMs: Schema.natural().min(1).max(2_147_483_647).default(600_000),
     /** Characters of a `bash` call's combined output the model is shown; the rest is cut and marked (DSH's output cap). */
