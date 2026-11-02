@@ -1659,6 +1659,10 @@ mod tests {
             "{text}"
         );
         promoting.detach();
+        assert!(
+            timeout(&bash).starts_with("Wall time before the command is killed"),
+            "detached, the kill text is back"
+        );
     }
 
     #[test]

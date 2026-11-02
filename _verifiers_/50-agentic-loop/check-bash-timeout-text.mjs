@@ -123,11 +123,12 @@ test('the bash schema a provider receives says a timed-out call moves to a backg
   const provider = await double()
   const config = join(home, 'heddle.json')
   writeFileSync(config, `${JSON.stringify({ default: 'double', endpoints: [{ name: 'double', kind: 'openai-chat', baseUrl: provider.baseUrl, model: 'double-model', apiKey: 'a-test-key' }] }, null, 2)}\n`)
-  const server = await startCli(
-    ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--endpoint', 'double', '--session-root', join(home, 'sessions')],
-    { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
-  )
+  let server = null
   try {
+    server = await startCli(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--endpoint', 'double', '--session-root', join(home, 'sessions')],
+      { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
+    )
     const cookie = await cookieFor(server.url)
     await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: work }) })
     const turn = await fetch(new URL('/api/turn', server.url), {
@@ -145,7 +146,7 @@ test('the bash schema a provider receives says a timed-out call moves to a backg
     assert.match(text, /on expiry the command moves to the background as a job instead of being killed\.$/, `the timeout text says promotion\nsaw: ${text}`)
     assert.ok(bash.function.parameters?.properties?.run_in_background !== undefined, 'and the jobs row is attached')
   } finally {
-    server.kill()
+    server?.kill()
     provider.close()
     removeDir(home)
     removeDir(work)

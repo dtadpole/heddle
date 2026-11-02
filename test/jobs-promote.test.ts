@@ -189,3 +189,20 @@ test('bash tells the model what its timeout does: moved to a job while promotion
   const killing = timeoutText(harness({ promoteOnTimeout: false }))
   assert.match(killing, /^Wall time before the command is killed/)
 })
+
+/** The text is read per call: a runner attached or detached later changes it, as the run_in_background property does. */
+test('the timeout text follows a runner attached and detached after the tools were built', () => {
+  const root = join(scratch, `attach-${(counter += 1)}`)
+  mkdirSync(join(root, 'workspace'), { recursive: true })
+  const sandbox = new SandboxService(new Context(), { mode: 'danger-full-access', workspaceRoot: join(root, 'workspace'), backend: 'none' })
+  const bash = builtinTools(sandbox).find((tool) => tool.spec.name === 'bash')!
+  const text = () => String((bash.spec.parameters as { properties: { timeoutMs: { description: string } } }).properties.timeoutMs.description)
+  assert.match(text(), /^Wall time before the command is killed/)
+  const plain = attachBashBackground(sandbox, { property: { type: 'boolean', description: 'x' }, start: async () => ({ output: '' }) } as never)
+  assert.match(text(), /^Wall time before the command is killed/, 'a runner that does not promote')
+  plain()
+  const promoting = attachBashBackground(sandbox, { property: { type: 'boolean', description: 'x' }, start: async () => ({ output: '' }), runForeground: async () => ({ output: '' }) } as never)
+  assert.match(text(), /moves to the background as a job instead of being killed\.$/)
+  promoting()
+  assert.match(text(), /^Wall time before the command is killed/, 'detached, the kill text is back')
+})
