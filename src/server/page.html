@@ -783,6 +783,17 @@
   .turn-usage[open] summary::before { transform: rotate(90deg); }
   .turn-usage .turn-usage-figures { display: flex; flex-wrap: wrap; gap: .25rem 1rem; padding: 4px 0 0 .9rem; }
   .turn-usage .turn-usage-figures span b { font-weight: 500; color: var(--text-2); }
+  /**
+   * DSH's model-retry row (#251): one per retry chain, in the turn's flow before the answer. Its summary says which
+   * attempt, and counts the wait down while it waits. Its details give the delay and the failure.
+   */
+  .turn.model-retry { margin-top: 6px; font-size: 12px; line-height: 18px; color: var(--text-3); }
+  .turn.model-retry summary { display: inline-flex; align-items: center; gap: .35rem; cursor: pointer; list-style: none; }
+  .turn.model-retry summary::-webkit-details-marker { display: none; }
+  .turn.model-retry summary::before { content: '›'; display: inline-block; transition: transform .12s; }
+  .turn.model-retry[open] summary::before { transform: rotate(90deg); }
+  .turn.model-retry[data-retry-state="scheduled"] .retry-text { color: var(--text-2); }
+  .turn.model-retry .retry-details { padding: 4px 0 0 .9rem; display: grid; gap: 2px; }
   .changed-files { margin-top: 8px; border: .5px solid var(--line); border-radius: 16px; background: var(--surface); overflow: hidden; }
   .changed-head {
     display: flex; align-items: center; gap: 10px; width: 100%; box-sizing: border-box; height: 60px; padding: 8px 10px;
@@ -5267,6 +5278,139 @@ function codeGlyph() {
  */
 const CHANGED_FILES_COLLAPSED = 4
 
+/* model-retry:begin */
+/**
+ * DSH's model-retry row (#251; dsh-client-ui-chat `retryDefinition` and `ModelRetryItem`, lib/client.js:5285-5343 and
+ * 10037-10104). Each retry chain (`retryId`) is one row, at its first attempt and before the answer. The row shows the
+ * chain's last attempt:
+ * - while that attempt waits, "Retrying model request (n/max) · Ns", counting down to its start;
+ * - once it started, "Retried model request";
+ * - if the turn ended first, "Model request retry cancelled".
+ * Its details give the delay and the failure.
+ *
+ * The transcript folds the same rows for a reload (`model-retry` turns), and the live page folds `llm/retry` and
+ * `llm/retry-started` the same way, so both draw one row. The wait counts from the attempt's own time (`at`), so a page
+ * that loads mid-wait, or gets a frame late, shows the time that is really left. DSH's summary is a status region. Here
+ * only the label and attempt are in it; the ticking seconds are hidden from assistive tech, so a reader is told each
+ * change once, not every 250 ms.
+ */
+const RETRY_WORDS = {
+  en: { active: 'Retrying model request', started: 'Retried model request', cancelled: 'Model request retry cancelled', delay: 'Retry delay: ', failure: 'Failure reason: ', status: (label, retry, maximum) => `${label} (${retry}/${maximum})`, ms: (value) => `${value}ms` },
+  zh: { active: '正在重试模型请求', started: '已重试模型请求', cancelled: '模型请求重试已取消', delay: '重试延迟：', failure: '失败原因：', status: (label, retry, maximum) => `${label}（${retry}/${maximum}）`, ms: (value) => `${value}毫秒` },
+}
+function retryWords() {
+  const language = typeof document.documentElement?.lang === 'string' ? document.documentElement.lang : 'en'
+  return language.startsWith('zh') ? RETRY_WORDS.zh : RETRY_WORDS.en
+}
+/** DSH's `retrySeconds`: whole seconds, never below one. */
+function retrySeconds(milliseconds) {
+  return Math.max(1, Math.ceil(milliseconds / 1000))
+}
+/** The instant an attempt's wait ends: its scheduling time plus its delay, or from now when it carries no time. */
+function retryDeadline(attempt) {
+  const at = typeof attempt.at === 'string' ? Date.parse(attempt.at) : NaN
+  return (Number.isFinite(at) ? at : Date.now()) + (Number(attempt.delayMs) || 0)
+}
+/** The attempt a live `llm/retry` event schedules, in the transcript's shape. */
+function retryAttemptOf(event) {
+  const failure = event.failure ?? {}
+  return {
+    retry: event.retry,
+    ...(typeof event.maxRetries === 'number' ? { maxRetries: event.maxRetries } : {}),
+    mode: typeof event.mode === 'string' ? event.mode : 'normal',
+    delayMs: typeof event.delayMs === 'number' ? event.delayMs : 0,
+    failure: { code: typeof failure.code === 'string' ? failure.code : '', message: typeof failure.message === 'string' ? failure.message : '' },
+    ...(typeof event.at === 'string' ? { at: event.at } : {}),
+    state: 'scheduled',
+  }
+}
+/** A row for a `model-retry` turn, drawn from its attempts. */
+function retryRow(turn) {
+  const row = document.createElement('details')
+  row.className = 'turn model-retry'
+  row.dataset.kind = 'model-retry'
+  row.dataset.modelRetry = ''
+  row.dataset.retryId = String(turn.retryId ?? '')
+  const summary = document.createElement('summary')
+  const text = document.createElement('span')
+  text.className = 'retry-text'
+  text.setAttribute('role', 'status')
+  const seconds = document.createElement('span')
+  seconds.className = 'retry-seconds'
+  seconds.setAttribute('aria-hidden', 'true')
+  summary.append(text, seconds)
+  const details = document.createElement('div')
+  details.className = 'retry-details'
+  row.append(summary, details)
+  row.retryAttempts = Array.isArray(turn.attempts) ? turn.attempts.map((attempt) => ({ ...attempt })) : []
+  paintRetryRow(row)
+  return row
+}
+/** Draw a row's last attempt, and keep its countdown running while that attempt waits. */
+function paintRetryRow(row) {
+  const words = retryWords()
+  const current = row.retryAttempts[row.retryAttempts.length - 1]
+  if (current === undefined) return
+  const active = current.state === 'scheduled'
+  row.dataset.retryState = current.state
+  const label = active ? words.active : current.state === 'cancelled' ? words.cancelled : words.started
+  const maximum = current.mode === 'normal' && typeof current.maxRetries === 'number' ? current.maxRetries : '∞'
+  row.querySelector('.retry-text').textContent = words.status(label, current.retry, maximum)
+  const tick = () => {
+    const left = active ? retryDeadline(current) - Date.now() : Number(current.delayMs) || 0
+    const secs = retrySeconds(left)
+    row.querySelector('.retry-seconds').textContent = ` · ${secs}s`
+    return secs
+  }
+  clearInterval(row.retryTimer)
+  row.retryTimer = undefined
+  if (tick() > 1 && active) {
+    row.retryTimer = setInterval(() => {
+      if (!row.isConnected || tick() <= 1) { clearInterval(row.retryTimer); row.retryTimer = undefined }
+    }, 250)
+  }
+  const delay = document.createElement('div')
+  const delayLabel = document.createElement('span')
+  delayLabel.className = 'retry-detail-label'
+  delayLabel.textContent = words.delay
+  delay.append(delayLabel, words.ms(Math.round(Number(current.delayMs) || 0)))
+  const failure = document.createElement('div')
+  const failureLabel = document.createElement('span')
+  failureLabel.className = 'retry-detail-label'
+  failureLabel.textContent = words.failure
+  failure.append(failureLabel, current.failure?.message || current.failure?.code || '')
+  row.querySelector('.retry-details').replaceChildren(delay, failure)
+}
+/** Fold a live `llm/retry` or `llm/retry-started` into its chain's row, as the transcript folds them. */
+function foldLiveRetry(event) {
+  const retryId = typeof event.retryId === 'string' ? event.retryId : ''
+  if (retryId === '' || typeof event.retry !== 'number') return
+  const row = [...log.querySelectorAll('[data-model-retry]')].find((node) => node.dataset.retryId === retryId)
+  if (event.type === 'llm/retry-started') {
+    if (row === undefined) return
+    row.retryAttempts = row.retryAttempts.map((attempt) => (attempt.retry === event.retry ? { ...attempt, state: 'started' } : attempt))
+    paintRetryRow(row)
+    return
+  }
+  if (row !== undefined) {
+    row.retryAttempts = [...row.retryAttempts, retryAttemptOf(event)]
+    paintRetryRow(row)
+    return
+  }
+  log.append(retryRow({ retryId, attempts: [retryAttemptOf(event)] }))
+  keepRunningLast()
+}
+/** A turn's end cancels the attempt any of its chains still waits on, as DSH cancels one whose turn closed. */
+function endLiveRetries() {
+  for (const row of log.querySelectorAll('[data-model-retry][data-retry-state="scheduled"]')) {
+    const last = row.retryAttempts[row.retryAttempts.length - 1]
+    if (last === undefined) continue
+    row.retryAttempts = [...row.retryAttempts.slice(0, -1), { ...last, state: 'cancelled' }]
+    paintRetryRow(row)
+  }
+}
+/* model-retry:end */
+
 /**
  * Why a turn stopped early, as the reference's own words. It carries the loop's sentence rather than a rewording —
  * "stopped after the round limit of 32" is the fact, and a page that paraphrased it could drift from the loop.
@@ -5660,8 +5804,11 @@ function answerText(row) {
  */
 function lastTurnRow() {
   for (let node = log.lastElementChild; node !== null; node = node.previousElementSibling) {
-    /** A turn tail (the created-reminder cards) is not a row of the transcript, so a merge looks past it too. */
-    if (!node.hasAttribute('data-chat-running') && !node.hasAttribute('data-turn-tail')) return node
+    /**
+     * A turn tail (the created-reminder cards) is not a row of the transcript, so a merge looks past it too. So does a
+     * model-retry row (#251): the answer, its notices and its late deltas belong to the answer row, not to the retry.
+     */
+    if (!node.hasAttribute('data-chat-running') && !node.hasAttribute('data-turn-tail') && !node.hasAttribute('data-model-retry')) return node
   }
   return null
 }
@@ -8648,6 +8795,11 @@ async function showSession(id) {
      */
     for (const turn of body.turns ?? []) {
       /** A command's row is held in place now and drawn by the menu module once it has loaded. */
+      /** A model retry chain's row (#251), drawn by the same renderer as the live one. */
+      if (turn.kind === 'model-retry') {
+        log.append(retryRow(turn))
+        continue
+      }
       if (turn.kind === 'command') {
         const holder = document.createElement('div')
         holder.className = 'turn command hc-command'
@@ -9635,6 +9787,12 @@ function drawSessionEvent(payload) {
     void slashReady.then((commands) => commands?.draw(event))
     return
   }
+  /** A model retry chain (#251): one row per `retryId`; a turn's end cancels the attempt still waiting. */
+  if (event.type === 'llm/retry' || event.type === 'llm/retry-started') {
+    foldLiveRetry(event)
+    return
+  }
+  if (event.type === 'turn/completed' || event.type === 'turn/failed') endLiveRetries()
   /**
    * Usage rides the chunk that ends a round. It is merged into the live value so the dock's numbers move with
    * the running turn, exactly as the reference's do; the turn's end re-reads the durable fold.

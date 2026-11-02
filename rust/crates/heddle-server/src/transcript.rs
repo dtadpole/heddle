@@ -39,6 +39,9 @@ pub enum TurnKind {
     Tool,
     /// A slash command's row: `command/run` and its `command/done`.
     Command,
+    /// A model retry chain's row: its `llm/retry` and `llm/retry-started` events (#251).
+    #[serde(rename = "model-retry")]
+    ModelRetry,
 }
 
 /// A tool turn's phase: running until its result says otherwise; a result starting with `error`
@@ -123,6 +126,31 @@ pub struct ChatTurn {
     /// last answer, and only when every round reported usage.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<Value>,
+    /// A model-retry row's chain id (`retryId`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_id: Option<String>,
+    /// A model-retry row's attempts, oldest first; the last is the one the row shows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempts: Option<Vec<RetryAttempt>>,
+}
+
+/// One attempt of a model retry chain, as DSH's model-retry node holds it (dsh-client-ui-chat `retryDefinition`),
+/// with the TypeScript build's key order. Numbers are copied from the event as written.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetryAttempt {
+    pub retry: Value,
+    /// The policy's limit; absent in `always` mode, which DSH shows as ∞.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<Value>,
+    pub mode: String,
+    pub delay_ms: Value,
+    pub failure: Value,
+    /// When the retry was scheduled: its `llm/retry` event's own time. A page counts the wait down from here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+    /// `scheduled` while it waits, `started` once its request went again, `cancelled` when its turn ended first.
+    pub state: &'static str,
 }
 
 impl ChatTurn {
@@ -146,6 +174,8 @@ impl ChatTurn {
             html: None,
             trigger: None,
             usage: None,
+            retry_id: None,
+            attempts: None,
         }
     }
 }
@@ -395,6 +425,97 @@ struct UsageAccount {
     start: usize,
 }
 
+/// Fold one `llm/retry` or `llm/retry-started` into its chain's row (#251): a new chain opens a row at its first
+/// attempt, a later retry appends an attempt, and `llm/retry-started` marks that attempt started.
+fn fold_retry(
+    event: &Value,
+    event_type: &str,
+    turns: &mut Vec<ChatTurn>,
+    retry_at: &mut HashMap<String, usize>,
+    open_assistant: &mut Option<usize>,
+    open_reasoning: &mut Option<usize>,
+) {
+    let retry_id = event.get("retryId").and_then(Value::as_str).unwrap_or("");
+    let Some(retry) = event.get("retry").filter(|retry| retry.is_number()) else {
+        return;
+    };
+    if retry_id.is_empty() {
+        return;
+    }
+    let index = retry_at.get(retry_id).copied();
+    if event_type == "llm/retry-started" {
+        if let Some(attempts) = index
+            .and_then(|index| turns.get_mut(index))
+            .and_then(|row| row.attempts.as_mut())
+        {
+            for attempt in attempts
+                .iter_mut()
+                .filter(|attempt| &attempt.retry == retry)
+            {
+                attempt.state = "started";
+            }
+        }
+        return;
+    }
+    let failure = event.get("failure");
+    let text_of = |key: &str| {
+        failure
+            .and_then(|failure| failure.get(key))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned()
+    };
+    let attempt = RetryAttempt {
+        retry: retry.clone(),
+        max_retries: event
+            .get("maxRetries")
+            .filter(|max| max.is_number())
+            .cloned(),
+        mode: event
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or("normal")
+            .to_owned(),
+        delay_ms: event
+            .get("delayMs")
+            .filter(|delay| delay.is_number())
+            .cloned()
+            .unwrap_or(Value::from(0)),
+        failure: serde_json::json!({ "code": text_of("code"), "message": text_of("message") }),
+        at: event.get("at").and_then(Value::as_str).map(str::to_owned),
+        state: "scheduled",
+    };
+    if let Some(attempts) = index
+        .and_then(|index| turns.get_mut(index))
+        .and_then(|row| row.attempts.as_mut())
+    {
+        attempts.push(attempt);
+        return;
+    }
+    *open_assistant = None;
+    *open_reasoning = None;
+    retry_at.insert(retry_id.to_owned(), turns.len());
+    let mut row = ChatTurn::new(TurnKind::ModelRetry, "");
+    row.retry_id = Some(retry_id.to_owned());
+    row.attempts = Some(vec![attempt]);
+    turns.push(row);
+}
+
+/// A turn's end cancels the attempt each of its chains still waits on, and closes the chains (#251).
+fn end_retries(turns: &mut [ChatTurn], retry_at: &mut HashMap<String, usize>) {
+    for index in retry_at.values() {
+        if let Some(last) = turns
+            .get_mut(*index)
+            .and_then(|row| row.attempts.as_mut())
+            .and_then(|attempts| attempts.last_mut())
+            .filter(|last| last.state == "scheduled")
+        {
+            last.state = "cancelled";
+        }
+    }
+    retry_at.clear();
+}
+
 /// Fold a session's recorded events into the turns the page renders.
 pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
     let mut turns: Vec<ChatTurn> = Vec::new();
@@ -417,6 +538,10 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
     };
     // Where each slash command's row sits, by its run id.
     let mut command_at: HashMap<String, usize> = HashMap::new();
+    // Where each model-retry row sits, by its `retryId`, while its turn is open (#251). DSH's `retryDefinition` folds
+    // a chain's `llm/retry` and `llm/retry-started` into one node at its first attempt; the attempt still scheduled
+    // when the turn ends is cancelled.
+    let mut retry_at: HashMap<String, usize> = HashMap::new();
 
     for event in events {
         let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
@@ -463,6 +588,20 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
                     .to_owned();
             }
             continue;
+        }
+        if event_type == "llm/retry" || event_type == "llm/retry-started" {
+            fold_retry(
+                event,
+                event_type,
+                &mut turns,
+                &mut retry_at,
+                &mut open_assistant,
+                &mut open_reasoning,
+            );
+            continue;
+        }
+        if event_type == "turn/completed" || event_type == "turn/failed" {
+            end_retries(&mut turns, &mut retry_at);
         }
         if event_type == "message" {
             close_runs(&mut open_assistant, &mut open_reasoning);
@@ -1473,5 +1612,94 @@ mod tests {
             "a done for another id settles nothing"
         );
         assert_eq!(turns[1].text, "");
+    }
+
+    // #251: the same three vectors as test/transcript-model-retry.test.ts, so both builds fold one row per chain.
+    fn retry_user() -> Value {
+        serde_json::json!({"seq": 1, "type": "message", "at": "2026-11-02T00:00:00.000Z", "message": {"role": "user", "content": [{"type": "text", "text": "go"}]}})
+    }
+    fn retry_scheduled(seq: u64, retry_id: &str, retry: u64, max_retries: u64) -> Value {
+        serde_json::json!({
+            "seq": seq, "type": "llm/retry", "at": format!("2026-11-02T00:00:0{seq}.000Z"), "retryId": retry_id,
+            "round": 0, "provider": "scripted", "mode": "normal", "policyKey": "normal:5", "retry": retry,
+            "maxRetries": max_retries, "delayMs": 500 * retry,
+            "failure": {"code": "SERVER", "message": "upstream answered 503"}
+        })
+    }
+    fn retry_started(seq: u64, retry_id: &str, retry: u64) -> Value {
+        serde_json::json!({"seq": seq, "type": "llm/retry-started", "retryId": retry_id, "round": 0, "retry": retry})
+    }
+    fn retry_attempt(seq: u64, retry: u64, max_retries: u64, state: &str) -> Value {
+        serde_json::json!({
+            "retry": retry, "maxRetries": max_retries, "mode": "normal", "delayMs": 500 * retry,
+            "failure": {"code": "SERVER", "message": "upstream answered 503"},
+            "at": format!("2026-11-02T00:00:0{seq}.000Z"), "state": state
+        })
+    }
+    fn kinds_and_json(events: &[Value]) -> (Vec<Value>, Vec<Value>) {
+        let turns: Vec<Value> = transcript_turns(events)
+            .iter()
+            .map(|turn| serde_json::to_value(turn).unwrap())
+            .collect();
+        (
+            turns.iter().map(|turn| turn["kind"].clone()).collect(),
+            turns,
+        )
+    }
+
+    #[test]
+    fn a_model_retry_chain_is_one_row_of_started_attempts_before_the_answer() {
+        let (kinds, turns) = kinds_and_json(&[
+            retry_user(),
+            retry_scheduled(2, "retry-a", 1, 5),
+            retry_started(3, "retry-a", 1),
+            retry_scheduled(4, "retry-a", 2, 5),
+            retry_started(5, "retry-a", 2),
+            serde_json::json!({"seq": 6, "type": "assistant/chunk", "chunk": {"type": "text-delta", "text": "done"}}),
+            serde_json::json!({"seq": 7, "type": "turn/completed"}),
+        ]);
+        assert_eq!(kinds, vec!["user", "model-retry", "assistant"]);
+        assert_eq!(
+            turns[1],
+            serde_json::json!({"kind": "model-retry", "text": "", "retryId": "retry-a", "attempts": [retry_attempt(2, 1, 5, "started"), retry_attempt(4, 2, 5, "started")]})
+        );
+    }
+
+    #[test]
+    fn a_model_retry_chain_is_one_row_when_its_request_fails_again() {
+        let (kinds, turns) = kinds_and_json(&[
+            retry_user(),
+            retry_scheduled(2, "retry-b", 1, 1),
+            retry_started(3, "retry-b", 1),
+            serde_json::json!({"seq": 4, "type": "turn/failed", "message": "upstream answered 503"}),
+        ]);
+        assert_eq!(kinds, vec!["user", "model-retry", "assistant"]);
+        assert_eq!(
+            turns[1],
+            serde_json::json!({"kind": "model-retry", "text": "", "retryId": "retry-b", "attempts": [retry_attempt(2, 1, 1, "started")]})
+        );
+        assert_eq!(
+            turns[2]["ended"],
+            serde_json::json!(["the turn failed: upstream answered 503"])
+        );
+    }
+
+    #[test]
+    fn a_model_retry_chain_is_one_row_cancelled_when_its_turn_stops_during_the_wait() {
+        let (kinds, turns) = kinds_and_json(&[
+            retry_user(),
+            retry_scheduled(2, "retry-c", 1, 5),
+            serde_json::json!({"seq": 3, "type": "assistant/completed", "text": "", "ended": ["stopped by the caller"]}),
+            serde_json::json!({"seq": 4, "type": "turn/completed"}),
+        ]);
+        assert_eq!(kinds, vec!["user", "model-retry", "assistant"]);
+        assert_eq!(
+            turns[1],
+            serde_json::json!({"kind": "model-retry", "text": "", "retryId": "retry-c", "attempts": [retry_attempt(2, 1, 5, "cancelled")]})
+        );
+        assert_eq!(
+            turns[2]["ended"],
+            serde_json::json!(["stopped by the caller"])
+        );
     }
 }

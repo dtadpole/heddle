@@ -3830,6 +3830,54 @@ export function transcriptTurns(
   /** Where each slash command's row sits, by its run id (src/commands/, developer-three). */
   const commandAt = new Map<string, number>()
 
+  /**
+   * Where each model-retry row sits, by its `retryId`, while its turn is open (#251). DSH's `retryDefinition` folds a
+   * chain's `llm/retry` and `llm/retry-started` events into one node, anchored at its first attempt. A retry is
+   * scheduled by `llm/retry`, and `llm/retry-started` marks that attempt started. When the turn ends first, the
+   * attempt still scheduled becomes cancelled, as DSH cancels one whose step or turn closed.
+   */
+  const retryAt = new Map<string, number>()
+  const foldRetry = (event: { readonly type: string; readonly [key: string]: unknown }): void => {
+    const retryId = typeof event.retryId === 'string' ? event.retryId : ''
+    const retry = typeof event.retry === 'number' ? event.retry : undefined
+    if (retryId === '' || retry === undefined) return
+    const index = retryAt.get(retryId)
+    const row = index === undefined ? undefined : turns[index]
+    if (event.type === 'llm/retry-started') {
+      if (index === undefined || row?.attempts === undefined) return
+      turns[index] = { ...row, attempts: row.attempts.map((attempt) => (attempt.retry === retry ? { ...attempt, state: 'started' } : attempt)) }
+      return
+    }
+    const failure = (event.failure ?? {}) as { code?: unknown; message?: unknown }
+    const attempt: RetryAttempt = {
+      retry,
+      ...(typeof event.maxRetries === 'number' ? { maxRetries: event.maxRetries } : {}),
+      mode: typeof event.mode === 'string' ? event.mode : 'normal',
+      delayMs: typeof event.delayMs === 'number' ? event.delayMs : 0,
+      failure: { code: typeof failure.code === 'string' ? failure.code : '', message: typeof failure.message === 'string' ? failure.message : '' },
+      ...(typeof event.at === 'string' ? { at: event.at } : {}),
+      state: 'scheduled',
+    }
+    if (index === undefined || row?.attempts === undefined) {
+      closeRuns()
+      retryAt.set(retryId, turns.length)
+      turns.push({ kind: 'model-retry', text: '', retryId, attempts: [attempt] })
+      return
+    }
+    turns[index] = { ...row, attempts: [...row.attempts, attempt] }
+  }
+  /** A turn's end cancels the attempt each of its chains still waits on, and closes the chains. */
+  const endRetries = (): void => {
+    for (const index of retryAt.values()) {
+      const row = turns[index]
+      const attempts = row?.attempts
+      const last = attempts?.[attempts.length - 1]
+      if (row === undefined || attempts === undefined || last?.state !== 'scheduled') continue
+      turns[index] = { ...row, attempts: [...attempts.slice(0, -1), { ...last, state: 'cancelled' }] }
+    }
+    retryAt.clear()
+  }
+
   for (const event of events) {
     /**
      * A slash command is a row of its own, outside the conversation: `command/run` opens it and `command/done`
@@ -3856,6 +3904,11 @@ export function transcriptTurns(
       }
       continue
     }
+    if (event.type === 'llm/retry' || event.type === 'llm/retry-started') {
+      foldRetry(event)
+      continue
+    }
+    if (event.type === 'turn/completed' || event.type === 'turn/failed') endRetries()
     if (event.type === 'message') {
       /** A message is a whole thing, not a delta, so whatever run was open has ended. */
       closeRuns()
@@ -4052,8 +4105,25 @@ export interface TurnAttachment {
   readonly url: string
 }
 
+/**
+ * One attempt of a model retry chain, as DSH's model-retry node holds it (dsh-client-ui-chat `retryDefinition`), from
+ * its `llm/retry` and `llm/retry-started` events (#251).
+ */
+export interface RetryAttempt {
+  readonly retry: number
+  /** The policy's limit; absent in `always` mode, which DSH shows as ∞. */
+  readonly maxRetries?: number
+  readonly mode: string
+  readonly delayMs: number
+  readonly failure: { readonly code: string; readonly message: string }
+  /** When the retry was scheduled: its `llm/retry` event's own time. A page counts the wait down from here. */
+  readonly at?: string
+  /** `scheduled` while it waits, `started` once its request went again, `cancelled` when its turn ended first. */
+  readonly state: 'scheduled' | 'started' | 'cancelled'
+}
+
 export interface ChatTurn {
-  readonly kind: 'user' | 'assistant' | 'reasoning' | 'tool' | 'command'
+  readonly kind: 'user' | 'assistant' | 'reasoning' | 'tool' | 'command' | 'model-retry'
   /**
    * When the logged event happened, as its own `at` — the **user message's clock**, which the page shows beside
    * the bubble and the copy button (DSH's `MessageIconActions` reads the same event time). It is the recorded
@@ -4108,6 +4178,10 @@ export interface ChatTurn {
    * sends as the fork's `atSeq` — DSH's turn footer forks at the turn's end seq.
    */
   readonly forkSeq?: number
+  /** A model-retry row's chain id (`retryId`). */
+  readonly retryId?: string
+  /** A model-retry row's attempts, oldest first; the last is the one the row shows. */
+  readonly attempts?: readonly RetryAttempt[]
   /** A slash command's run id, which pairs its `command/run` and `command/done` (src/commands/). */
   readonly commandId?: string
   /** What followed the command's name, when the log kept it. */

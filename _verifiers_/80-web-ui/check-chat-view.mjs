@@ -59,6 +59,12 @@ async function startServer(label, steps, options = {}) {
         home,
         steps: typeof steps === 'function' ? steps(work) : steps ?? [{ toolCall: { name: 'list_dir', arguments: { path: work } } }, { text: 'it listed the folder' }],
       })
+  /** An endpoint `retryPolicy` for the scripted endpoint, for the model-retry row's cases (#251). */
+  if (options.retryPolicy !== undefined) {
+    const written = JSON.parse(readFileSync(config, 'utf8'))
+    written.endpoints[0].retryPolicy = options.retryPolicy
+    writeFileSync(config, JSON.stringify(written, null, 2))
+  }
   const child = await startCli(
     /**
      * `HEDDLE_CHECK_PATCH` names a patch layer to use **instead of** the project's, so this check can run while
@@ -2169,6 +2175,82 @@ test('a turn this page did not start still says Weaving', async (context) => {
     browser.close()
     await server.close()
   }
+})
+
+/**
+ * #251: a model request the provider refused and that heddle retries gets DSH's model-retry row (dsh-client-ui-chat
+ * `retryDefinition` and `ModelRetryItem`). It is one row per retry chain, before the answer, live and after a reload.
+ * The scripted endpoint fails round 0 with a server error, and a retry policy with a fixed 4 s first delay (no jitter)
+ * gives the page time to be read during the wait. The check then rewrites the script so the retry answers.
+ */
+async function retryCase(label, delayMs, body) {
+  const server = await startServer(label, [{ error: { code: 'SERVER', message: 'upstream answered 503' } }], {
+    retryPolicy: { mode: 'normal', maxRetries: 3, backoff: { initialDelayMs: delayMs, maxDelayMs: 10_000, jitterRatio: 0 } },
+  })
+  const browser = await openBrowser()
+  const openSession = async (session) => {
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    return browser.evaluate(`(async () => await showSession(${JSON.stringify(session)}))()`)
+  }
+  try {
+    mkdirSync(server.work, { recursive: true })
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    assert.equal(await openSession(session), true, 'the session opens')
+    const row = (field) => `(document.querySelector("#log [data-kind=\\"model-retry\\"]")?.${field} ?? null)`
+    /** The summary's text: its label and attempt, then the seconds, on one line as drawn. */
+    const summary = 'document.querySelector("#log [data-kind=\\"model-retry\\"] summary")?.textContent ?? null'
+    await body({ server, browser, session, openSession, row, summary })
+  } finally {
+    browser.close()
+    await server.close()
+  }
+}
+
+test('a retried model request is one model-retry row that counts down, then reads retried, live and after a reload (#251)', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  await retryCase('retry-row', 4_000, async ({ server, browser, session, openSession, row, summary }) => {
+    await sendMessage(browser, 'ask the model')
+    assert.ok(await browser.waitFor(`${row('dataset.retryState')} === "scheduled"`, 15_000), 'the refused request shows a retry row while it waits')
+    const waiting = await browser.evaluate(summary)
+    assert.match(waiting, /^Retrying model request \(1\/3\) · [234]s/, `in DSH's words, with the attempt and a countdown\n${waiting}`)
+    assert.equal(await browser.evaluate('document.querySelector("#log [data-kind=\\"model-retry\\"] .retry-text").getAttribute("role")'), 'status', 'the label and attempt are a status')
+    assert.equal(await browser.evaluate('document.querySelector("#log [data-kind=\\"model-retry\\"] .retry-seconds").getAttribute("aria-hidden")'), 'true', 'the ticking seconds are not read out')
+    writeFileSync(join(server.home, 'script.json'), JSON.stringify({ steps: [{ text: 'recovered after the retry' }] }))
+    assert.ok(await browser.waitFor(`${row('dataset.retryState')} === "started"`, 10_000), 'the row reads retried once the request goes again')
+    assert.ok(await browser.waitFor('document.getElementById("log").innerText.includes("recovered after the retry")', 15_000), 'and the answer follows')
+    const settled = await browser.evaluate(summary)
+    assert.match(settled, /^Retried model request \(1\/3\) · 4s/, `${settled}`)
+    const details = await browser.evaluate('document.querySelector("#log [data-kind=\\"model-retry\\"] .retry-details").textContent')
+    assert.match(details, /Retry delay: 4000ms/, 'its details give the delay')
+    assert.match(details, /Failure reason: upstream answered 503/, 'and the failure')
+    const order = 'JSON.stringify([...document.querySelectorAll("#log .turn")].map((node) => node.dataset.kind ?? node.className))'
+    const live = JSON.parse(await browser.evaluate(order))
+    assert.ok(live.indexOf('model-retry') >= 0 && live.indexOf('model-retry') < live.lastIndexOf('assistant'), `the row sits before the answer\n${live}`)
+    assert.equal(await openSession(session), true, 'the session opens again')
+    assert.ok(await browser.waitFor(`${row('dataset.retryState')} === "started"`, 10_000), 'a reload draws the same row')
+    assert.match(await browser.evaluate(summary), /^Retried model request \(1\/3\) · 4s/, 'in the same words')
+    const reloaded = JSON.parse(await browser.evaluate(order))
+    assert.ok(reloaded.indexOf('model-retry') < reloaded.lastIndexOf('assistant'), `and in the same place\n${reloaded}`)
+  })
+})
+
+test('a Stop while a model retry waits cancels it: the row reads cancelled, live and after a reload (#251)', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  await retryCase('retry-stop', 8_000, async ({ browser, session, openSession, row, summary }) => {
+    await sendMessage(browser, 'ask the model')
+    assert.ok(await browser.waitFor(`${row('dataset.retryState')} === "scheduled"`, 15_000), 'the retry waits')
+    await browser.evaluate('document.getElementById("stop").click()')
+    assert.ok(await browser.waitFor(`${row('dataset.retryState')} === "cancelled"`, 10_000), 'a Stop cancels the waiting retry')
+    assert.match(await browser.evaluate(summary), /^Model request retry cancelled \(1\/3\) · 8s/, 'in DSH\'s words')
+    assert.equal(await openSession(session), true, 'the session opens again')
+    assert.ok(await browser.waitFor(`${row('dataset.retryState')} === "cancelled"`, 10_000), 'a reload draws it cancelled too')
+  })
 })
 
 test('a failed turn leaves no session looking active, and no running row', async (context) => {
