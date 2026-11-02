@@ -198,9 +198,10 @@ export function applyPresentation(questions: readonly Question[], presentation: 
     const intent = entry.intent
     if (intent === undefined) return detail === undefined ? question : { ...question, detail }
     if (intent.kind !== 'plan-review') throw new QuestionError(`question '${question.id}' intent kind must be 'plan-review'`, 'BAD_INTENT')
-    if (detail === undefined) throw new QuestionError(`question '${question.id}' has an intent but no detail`, 'BAD_INTENT')
+    /** DSH's own words for its two refusals (dsh-user-questions `ask`). */
+    if (detail === undefined) throw new QuestionError(`question ${question.id} declares intent plan-review without the detail it reviews`, 'BAD_INTENT')
     if (!(question.options ?? []).some((option) => option.label === intent.approve)) {
-      throw new QuestionError(`question '${question.id}' intent approves '${String(intent.approve)}', which is not one of its options`, 'BAD_INTENT')
+      throw new QuestionError(`question ${question.id} declares intent plan-review whose approve label "${String(intent.approve)}" names none of its options`, 'BAD_INTENT')
     }
     if (intent.callId !== undefined && text(intent.callId) === undefined) throw new QuestionError(`question '${question.id}' intent callId must be text`, 'BAD_INTENT')
     return {
@@ -347,7 +348,9 @@ export class QuestionService extends Service {
    * an answer.
    *
    * `presentation` adds `detail` and `intent` to questions by id, after the batch is checked ({@link applyPresentation});
-   * the fields are written only on the questions it names (#231).
+   * the fields are written only on the questions it names (#231). A presented question that goes late carries its whole
+   * `detail` into the late-answer message the model reads ({@link lateAnswerMessage} embeds the questions), so a
+   * continuable caller should not present long text. The plan review is not continuable, so it never goes late.
    */
   ask(
     handle: SessionHandle,

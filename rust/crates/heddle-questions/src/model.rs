@@ -308,9 +308,10 @@ pub fn apply_presentation(
                         "question '{id}' intent kind must be 'plan-review'"
                     )));
                 }
+                // DSH's own words for its two refusals (dsh-user-questions `ask`).
                 if entry.detail.is_none() {
                     return Err(bad_intent(format!(
-                        "question '{id}' has an intent but no detail"
+                        "question {id} declares intent plan-review without the detail it reviews"
                     )));
                 }
                 let approves = question
@@ -320,7 +321,7 @@ pub fn apply_presentation(
                     .any(|option| option.label == intent.approve);
                 if !approves {
                     return Err(bad_intent(format!(
-                        "question '{id}' intent approves '{}', which is not one of its options",
+                        "question {id} declares intent plan-review whose approve label \"{}\" names none of its options",
                         intent.approve
                     )));
                 }

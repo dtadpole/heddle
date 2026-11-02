@@ -353,7 +353,9 @@ impl QuestionService {
     ///
     /// `presentation` adds `detail` and `intent` to questions by id after the batch is checked, in the TypeScript
     /// shape `{ <question id>: { detail?, intent? } }` ([`presentation_from_value`], [`apply_presentation`]); the
-    /// fields are written only on the questions it names (#231).
+    /// fields are written only on the questions it names (#231). A presented question that goes late carries its whole
+    /// `detail` into the late-answer message the model reads ([`late_answer_message`] embeds the questions), so a
+    /// continuable caller should not present long text. The plan review is not continuable, so it never goes late.
     pub async fn ask_with(
         &self,
         session: &str,

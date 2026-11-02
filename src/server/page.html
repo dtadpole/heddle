@@ -11082,7 +11082,11 @@ async function runTurn(text, key, attachments = [], onAccepted) {
       void renderSettledAnswers()
       /** The page's own turn ended here, so its created-reminder cards (DSH's turn tail) are drawn now. */
       renderScheduleCards(true)
-      renderPlanCards(true)
+      /**
+       * This turn's plan cards, if the log still shows its session: a reader who moved to another running session must
+       * not see that session's plan rows carded before its own turn ends (developer-ten's review of #231).
+       */
+      if ((target ?? adopted) === current) renderPlanCards(true)
 
       /** DSH's per-Turn usage row, from the durable fold that a reload draws it from. */
       void attachTurnUsage()
