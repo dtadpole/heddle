@@ -5400,9 +5400,12 @@ function foldLiveRetry(event) {
   log.append(retryRow({ retryId, attempts: [retryAttemptOf(event)] }))
   keepRunningLast()
 }
-/** A turn's end cancels the attempt any of its chains still waits on, as DSH cancels one whose turn closed. */
+/**
+ * A turn's end cancels the attempt any of its chains still waits on, as DSH cancels one whose turn closed. A log that
+ * cannot be queried (the page tests' stub) has no rows to cancel.
+ */
 function endLiveRetries() {
-  for (const row of log.querySelectorAll('[data-model-retry][data-retry-state="scheduled"]')) {
+  for (const row of log.querySelectorAll?.('[data-model-retry][data-retry-state="scheduled"]') ?? []) {
     const last = row.retryAttempts[row.retryAttempts.length - 1]
     if (last === undefined) continue
     row.retryAttempts = [...row.retryAttempts.slice(0, -1), { ...last, state: 'cancelled' }]
