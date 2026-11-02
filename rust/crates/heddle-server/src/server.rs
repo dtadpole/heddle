@@ -2520,7 +2520,18 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
     }
     // A queued send to an archived session is refused before anything reaches its log, as web.ts refuses it.
     let queued_send = body.bool("queue") == Some(true);
+    // A request the host already took is answered with its row whatever happened since, as web.ts has it: a retry
+    // after an archive must not read as a refusal of a message that is queued, or already ran.
+    let already_queued = queued_send
+        && body.non_empty("requestId").is_some_and(|request| {
+            state
+                .harness()
+                .sessions
+                .queued_by_request(&session, request)
+                .is_some()
+        });
     if queued_send
+        && !already_queued
         && meta
             .as_ref()
             .and_then(|meta| meta.rest.get("archived"))
@@ -2561,8 +2572,12 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
             }
         };
         kick_queue(&state, &session);
-        let mut answer =
-            json!({"session": session, "queued": true, "id": row.id, "duplicate": duplicate});
+        // Whether the row still waits, or its turn already took it: a page that lost the first answer settles by it.
+        let pending = sessions
+            .queued(&session)
+            .iter()
+            .any(|queued| queued.id == row.id);
+        let mut answer = json!({"session": session, "queued": true, "id": row.id, "duplicate": duplicate, "pending": pending});
         if let Some(request) = row.request_id {
             answer["requestId"] = Value::String(request);
         }
