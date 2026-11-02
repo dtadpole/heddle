@@ -6,7 +6,7 @@
 //! | the store file | `config.file`, else `<heddle home>/schedule.json` |
 //! | delegated children | the session's metadata (`delegationDepth > 0`) in `heddle-session`'s store |
 //! | the four tools | `heddle-tools`' registry, each an async `tool_fn` |
-//! | a reminder's turn | `heddle-agent`'s [`begin_turn`](heddle_agent::begin_turn) on the run's shared runtime: the user message is in the session's log and the turn is live before it returns |
+//! | a reminder's turn | `heddle-agent`'s [`begin_turn_queued`](heddle_agent::begin_turn_queued) on the run's shared runtime: behind any turn running or queued on the session, then the user message is in the session's log and the turn is live before it resolves (issue #191) |
 //! | busy and idle | `heddle-agent`'s `TurnRegistry` when the profile loads `turns`; else the session's own turn events, forwarded to [`SchedulePlugin::on_session_event`] |
 //! | the delivery proof | the user message, found in the session's own log |
 //!
@@ -252,7 +252,13 @@ impl RuntimeHost {
             .and_then(|runtime| runtime.turns.clone())
     }
 
-    fn begin(&self, session_id: &str, text: &str, source: Value) -> Result<(), String> {
+    /// A reminder's turn, ready to start: the run's runtime, the turn's options and where to run its body.
+    fn prepare(
+        &self,
+        session_id: &str,
+        text: &str,
+        source: Value,
+    ) -> Result<(Arc<AgentRuntime>, RunTurnOptions, tokio::runtime::Handle), String> {
         let runtime = self
             .runtime
             .upgrade()
@@ -283,24 +289,7 @@ impl RuntimeHost {
         if let Some(rounds) = self.max_rounds {
             options.max_rounds = RoundLimit::Rounds(rounds);
         }
-        // Started, not awaited: the user message and the live registration are durable when begin returns, which
-        // is all delivery needs, and a drive must not hold the schedule queue for the length of a model call.
-        let begun =
-            heddle_agent::begin_turn(&runtime, options).map_err(|error| error.to_string())?;
-        let warn = Arc::clone(&self.warn);
-        let driver = self.driver.get().cloned();
-        let session = session_id.to_owned();
-        spawner.spawn(async move {
-            if let Err(error) = begun.run().await {
-                warn(&format!(
-                    "schedule: the reminder turn in session {session} failed — {error}"
-                ));
-                if let Some(driver) = driver.and_then(|driver| driver.upgrade()) {
-                    driver.turn_ended(&session);
-                }
-            }
-        });
-        Ok(())
+        Ok((runtime, options, spawner))
     }
 }
 
@@ -333,14 +322,37 @@ impl DeliveryHost for RuntimeHost {
             .map_or(0, |count| count as usize)
     }
 
+    /// The reminder's turn takes its place in the session's queue, behind any turn already running or queued there
+    /// (a goal round's), and its prompt is durable when this resolves, which is all delivery needs; the body runs on
+    /// its own task, so a drive never holds the schedule for a model call. Registering at once instead let a reminder
+    /// and the next goal round start in the same millisecond, two turns in one session (issue #191).
     fn start_turn(
         &self,
         session_id: &str,
         text: &str,
         source: Value,
     ) -> BoxFuture<'static, Result<(), String>> {
-        let started = self.begin(session_id, text, source);
-        Box::pin(async move { started })
+        let prepared = self.prepare(session_id, text, source);
+        let warn = Arc::clone(&self.warn);
+        let driver = self.driver.get().cloned();
+        let session = session_id.to_owned();
+        Box::pin(async move {
+            let (runtime, options, spawner) = prepared?;
+            let begun = heddle_agent::begin_turn_queued(&runtime, options)
+                .await
+                .map_err(|error| error.to_string())?;
+            spawner.spawn(async move {
+                if let Err(error) = begun.run().await {
+                    warn(&format!(
+                        "schedule: the reminder turn in session {session} failed — {error}"
+                    ));
+                    if let Some(driver) = driver.and_then(|driver| driver.upgrade()) {
+                        driver.turn_ended(&session);
+                    }
+                }
+            });
+            Ok(())
+        })
     }
 
     fn find(&self, session_id: &str, cursor: usize, text: &str) -> Option<String> {
@@ -625,6 +637,49 @@ mod tests {
             message_id.starts_with("message-") && message_id.len() == "message-".len() + 36,
             "{message_id}"
         );
+        let store = fixture.sessions.store();
+        until("the reminder turn to complete", || {
+            store
+                .read(&store.open(&session).unwrap())
+                .unwrap()
+                .iter()
+                .any(|event| event.kind == "turn/completed")
+        })
+        .await;
+    }
+
+    /// Issue #191: a reminder's turn takes its place behind a turn already holding the session's queue (a goal round
+    /// registered through `run_turn`), so its prompt is not written and no second turn is live until that one settles.
+    /// Registering at once let both start in the same millisecond on two worker threads.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reminder_turn_waits_behind_a_queued_turn_so_two_turns_never_run_at_once_in_one_session()
+     {
+        let fixture = fixture("queued-reminder", true);
+        let plugin = start(&fixture, json!({})).unwrap();
+        let session = session(&fixture);
+        let turns = fixture.runtime.turns.clone().unwrap();
+        // A goal round holds the session, registered through the queue as run_turn registers it.
+        let round = turns.begin_queued(&session, None).await;
+        let host = Arc::clone(&plugin.host);
+        let target = session.clone();
+        let started = tokio::spawn(async move {
+            host.start_turn(&target, "REMINDER-191", json!({"kind": "schedule"}))
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(
+            !started.is_finished(),
+            "the reminder's turn waits for the round in flight"
+        );
+        assert!(
+            user_messages(&fixture, &session).is_empty(),
+            "its prompt is not written while the round runs"
+        );
+        drop(round);
+        started.await.unwrap().unwrap();
+        let messages = user_messages(&fixture, &session);
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert_eq!(messages[0]["content"][0]["text"], json!("REMINDER-191"));
         let store = fixture.sessions.store();
         until("the reminder turn to complete", || {
             store

@@ -154,6 +154,7 @@ mod tests {
             cwd: Some("/work".to_owned()),
             endpoint: Some("scripted".to_owned()),
             model: Some("m".to_owned()),
+            reasoning_effort: None,
             team_id: None,
             preset: None,
         });

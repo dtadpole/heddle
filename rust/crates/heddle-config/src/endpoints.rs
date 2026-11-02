@@ -215,6 +215,10 @@ pub struct EndpointConfig {
     /// Milliseconds before a request is abandoned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    /// DSH's provider-owned `retryPolicy`, kept as written; [`crate::resolve_retry_policy`] validates and
+    /// defaults it where a failed request is judged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_policy: Option<serde_json::Value>,
     /// Whether an Anthropic route marks the prompt for caching (#70). Absent means on, as DSH caches by default;
     /// `false` is the switch for a gateway that refuses `cache_control`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -263,6 +267,8 @@ pub struct EndpointPatch {
     pub proxy: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_policy: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_cache: Option<bool>,
 }
@@ -490,6 +496,9 @@ fn apply_patch(endpoint: &mut EndpointConfig, patch: &EndpointPatch) {
     }
     if let Some(value) = patch.timeout_ms {
         endpoint.timeout_ms = Some(value);
+    }
+    if let Some(value) = &patch.retry_policy {
+        endpoint.retry_policy = Some(value.clone());
     }
     if let Some(value) = patch.prompt_cache {
         endpoint.prompt_cache = Some(value);

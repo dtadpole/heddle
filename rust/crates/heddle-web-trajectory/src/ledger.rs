@@ -317,6 +317,19 @@ fn type_of(event: &Value) -> &str {
     event.get("type").and_then(Value::as_str).unwrap_or("")
 }
 
+/// Whether a logged event is a replacement copy: it shadowed a span of the model's surface
+/// (`surfaceOp: {"op": "replace", …}`) instead of appending to it. Today the one such message is a tool result cut
+/// down under context pressure. It is what the model is sent, not what a person reads, so the ledger draws no row for
+/// it, as DSH keeps a replacement copy model-only (`isAppendSurfaceEvent`; #186). `isReplacementCopy` in
+/// `src/server/ledger.ts` reads the marker the same way.
+fn is_replacement_copy(event: &Value) -> bool {
+    event
+        .get("surfaceOp")
+        .and_then(|op| op.get("op"))
+        .and_then(Value::as_str)
+        == Some("replace")
+}
+
 /// The action a tool result reports: DSH's rule is a text starting with `error`, case-insensitively.
 fn is_refusal(text: &str) -> bool {
     text.get(..5)
@@ -641,6 +654,10 @@ impl Projector {
     }
 
     fn message(&mut self, event: &Value, at: Option<&str>) {
+        // A replacement copy is model-only: its call already holds the original, and an unpaired row would repeat it.
+        if is_replacement_copy(event) {
+            return;
+        }
         let role = event
             .get("message")
             .and_then(|message| message.get("role"))
