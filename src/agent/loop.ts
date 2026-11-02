@@ -916,8 +916,13 @@ async function runTurnBody(
   if (rounds >= maxRounds) {
     ended.push(`stopped after the round limit of ${maxRounds}`)
   }
-  /** A cut step's end outlasts a later step taken for pending input, as DSH's `max-tokens` turn end does (#208). */
-  if (cutAtLimit && !stoppedByCaller()) finishReason = 'max_output_tokens'
+  /**
+   * A cut step's end outlasts a later **normal** step taken for pending input, as DSH's `max-tokens` turn end does (#208).
+   * The precedence is DSH's (dsh-agent-loop `run`, developer-five's reading): a later step the archived gate rejected
+   * ends the turn `blocked` whatever came before (its `preStep` reject sets turnEnds unconditionally, before the sticky
+   * max-tokens rule), and a stop keeps its own end. So: blocked, then stopped, then a cut, then the last step's finish.
+   */
+  if (cutAtLimit && !stoppedByCaller() && !blocked) finishReason = 'max_output_tokens'
   ctx.session.store.append(options.session, {
     type: 'assistant/completed',
     text,

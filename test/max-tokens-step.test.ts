@@ -6,12 +6,14 @@ import { after, test } from 'node:test'
 
 import { Context } from '@deepseek-ai/cordis'
 
-import { MAX_TOKENS_NOT_RUN, MAX_TOKENS_NOTICE, runTurn } from '../src/agent/loop.ts'
+import { ARCHIVED_BLOCKED, MAX_TOKENS_NOT_RUN, MAX_TOKENS_NOTICE, runTurn } from '../src/agent/loop.ts'
 import { ApprovalService } from '../src/approvals/service.ts'
 import { ContextService } from '../src/context/service.ts'
 import { ModelService } from '../src/llm/service.ts'
 import { SandboxService } from '../src/sandbox/service.ts'
+import { queueSteer } from '../src/session/inbox.ts'
 import { SessionService } from '../src/session/service.ts'
+import type { SessionHandle } from '../src/session/store.ts'
 import { ToolRegistry } from '../src/tools/service.ts'
 
 /**
@@ -29,7 +31,12 @@ after(() => {
   rmSync(scratch, { recursive: true, force: true })
 })
 
-async function turn(label: string, steps: unknown[]) {
+async function turn(
+  label: string,
+  steps: unknown[],
+  setup?: (ctx: Context, sessions: SessionService, session: SessionHandle) => void,
+  signal?: AbortSignal,
+) {
   const ctx = new Context()
   const work = join(scratch, `${label}-work`)
   mkdirSync(work, { recursive: true })
@@ -49,7 +56,8 @@ async function turn(label: string, steps: unknown[]) {
   const script = join(scratch, `${label}-script.json`)
   writeFileSync(script, JSON.stringify({ steps }))
   new ModelService(ctx, [{ name: 'scripted', kind: 'scripted', baseUrl: script }])
-  const result = await runTurn(ctx, { session, endpoint: 'scripted', prompt: 'write the file', maxRounds: 10 })
+  setup?.(ctx, sessions, session)
+  const result = await runTurn(ctx, { session, endpoint: 'scripted', prompt: 'write the file', maxRounds: 10, ...(signal !== undefined ? { signal } : {}) })
   return { result, events: sessions.store.read(session), ran: () => ran }
 }
 
@@ -103,4 +111,80 @@ test('a healthy tool step still runs its call and the turn goes on', async () =>
   assert.equal(ran(), 1)
   assert.equal(result.rounds, 2)
   assert.equal(result.finishReason, 'stop')
+})
+
+/**
+ * The precedence of a cut against what may follow it, DSH's (dsh-agent-loop `run`): a later normal step keeps the
+ * cut's max-tokens end; a later step the archived gate rejects ends the turn blocked; a stop keeps its own end; and
+ * however many steps are cut, the notice is said once (developer-five's review).
+ */
+
+/** Queue a steer while the step's request is made, as a person sending during the call would (`times` requests). */
+function steerDuring(times: number, archive = false) {
+  return (ctx: Context, sessions: SessionService, session: SessionHandle) => {
+    let left = times
+    ctx.on('model/request', (request, next) => {
+      if (left > 0) {
+        left -= 1
+        queueSteer(sessions.store, session, [{ type: 'text', text: 'and one more thing' }])
+        if (archive) sessions.flags(session.id, { archived: true })
+      }
+      return next()
+    })
+  }
+}
+
+const requestsOf = (events: readonly { type: string }[]) => events.filter((event) => event.type === 'model/request').length
+
+test('a cut, then a normal step for a steer that waited: the turn keeps the cut\'s max-tokens end (#208)', async () => {
+  const { result, events, ran } = await turn('cut-then-steer', [{ toolCall: call, finishReason: 'max_output_tokens' }, { text: 'Answered the steer.' }], steerDuring(1))
+  assert.equal(ran(), 0)
+  assert.equal(requestsOf(events), 2, 'the steer is answered by a second step')
+  assert.equal(result.finishReason, 'max_output_tokens', 'and the turn still says it was cut')
+  assert.deepEqual(completedOf(events)[0]?.ended, [MAX_TOKENS_NOTICE])
+})
+
+test('a cut, then a step the archived gate rejects: blocked wins over max-tokens (#208)', async () => {
+  const { result, events, ran } = await turn('cut-then-archive', [{ toolCall: call, finishReason: 'max_output_tokens' }, { text: 'never asked' }], steerDuring(1, true))
+  assert.equal(ran(), 0)
+  assert.equal(requestsOf(events), 1, 'the archived session runs no further step')
+  assert.equal(result.finishReason, 'blocked', 'the reject sets the end, as DSH\'s preStep reject does')
+  assert.ok(completedOf(events)[0]?.ended?.includes(ARCHIVED_BLOCKED))
+  assert.ok(events.some((event) => event.type === 'turn/failed'), 'and the turn is recorded as blocked, consistently')
+})
+
+test('a stop after a cut: the stop keeps its own end, not max-tokens (#208)', async () => {
+  const controller = new AbortController()
+  let seen = 0
+  let read: (() => readonly { type: string }[]) | undefined
+  await assert.rejects(
+    turn('cut-then-stop', [{ toolCall: call, finishReason: 'max_output_tokens' }, { text: 'never answered' }], (ctx, sessions, session) => {
+      read = () => sessions.store.read(session)
+      ctx.on('model/request', (request, next) => {
+        seen += 1
+        /** A steer during the cut step takes the turn to a second step; the person stops as that step asks the model. */
+        if (seen === 1) queueSteer(sessions.store, session, [{ type: 'text', text: 'and one more thing' }])
+        if (seen === 2) controller.abort()
+        return next()
+      })
+    }, controller.signal),
+    /aborted/,
+    'a stop ends the turn as a stop, as before',
+  )
+  const events = read?.() ?? []
+  const completed = completedOf(events).at(-1)
+  assert.equal(completed?.finishReason, 'aborted', `the record keeps the stop's own end, not the earlier cut's\n${JSON.stringify(completed)}`)
+  assert.equal(toolMessages(events).length, 1, 'and the cut call was answered as not run')
+})
+
+test('two cut steps in one turn say the notice once (#208)', async () => {
+  const { result, events } = await turn('two-cuts', [
+    { toolCall: call, finishReason: 'max_output_tokens' },
+    { toolCall: call, finishReason: 'max_output_tokens' },
+    { text: 'done at last' },
+  ], steerDuring(2))
+  assert.equal(requestsOf(events), 3)
+  assert.equal(toolMessages(events).length, 2, 'both cut calls answered as not run')
+  assert.equal(result.finishReason, 'max_output_tokens')
+  assert.deepEqual(completedOf(events)[0]?.ended, [MAX_TOKENS_NOTICE], 'one notice')
 })

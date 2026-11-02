@@ -1178,8 +1178,11 @@ async fn run_turn_body(
     if rounds >= max_rounds {
         ended.push(format!("stopped after the round limit of {max_rounds}"));
     }
-    // A cut step's end outlasts a later step taken for pending input, as DSH's `max-tokens` turn end does (#208).
-    if cut_at_limit && !stopped() {
+    // A cut step's end outlasts a later normal step taken for pending input, as DSH's `max-tokens` turn end does
+    // (#208). The precedence is DSH's (dsh-agent-loop `run`): a later step the archived gate rejected ends the turn
+    // blocked whatever came before (its preStep reject sets turnEnds before the sticky max-tokens rule), and a stop
+    // keeps its own end. So: blocked, then stopped, then a cut, then the last step's finish.
+    if cut_at_limit && !stopped() && !blocked {
         "max_output_tokens".clone_into(&mut finish_reason);
     }
 
@@ -4526,6 +4529,88 @@ pub(crate) mod tests {
             forked.text, "ran",
             "a fork of an archived session is an independent conversation"
         );
+    }
+
+    /// #208, developer-five's precedence: a step cut at its output limit, a steer sent during it, and the session
+    /// archived before the next step. The archived gate's reject wins over the cut's max-tokens end, as DSH's preStep
+    /// reject sets the turn's end before the sticky max-tokens rule; the cut call is still answered as not run.
+    #[tokio::test]
+    async fn a_cut_step_then_an_archived_next_step_ends_the_turn_blocked_not_max_tokens() {
+        struct SteerAndArchive {
+            sessions: Arc<heddle_session::SessionService>,
+            handle: SessionHandle,
+            done: std::sync::atomic::AtomicBool,
+        }
+        impl heddle_llm::ModelHooks for SteerAndArchive {
+            fn request(
+                &self,
+                _service: &heddle_llm::ModelService,
+                _request: &heddle_llm::GenerateRequest,
+                next: &mut dyn FnMut()
+                    -> Result<heddle_llm::GenerateRequest, heddle_llm::ModelError>,
+            ) -> Result<heddle_llm::GenerateRequest, heddle_llm::ModelError> {
+                if !self.done.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    heddle_session::inbox::queue_steer(
+                        self.sessions.store(),
+                        &self.handle,
+                        vec![ContentPart::text("and one more thing")],
+                        None,
+                    )
+                    .unwrap();
+                    set_archived(&self.sessions, &self.handle.id, true);
+                }
+                next()
+            }
+        }
+        let (sessions, _sessions_dir) = crate::adapters::tests::sessions_at("cut-then-archive");
+        let handle = sessions
+            .store()
+            .create(heddle_session::CreateOptions::default())
+            .unwrap();
+        let (models, _scripted) = crate::adapters::tests::scripted_service(
+            "cut",
+            serde_json::json!([
+                { "toolCall": { "name": "note_tool", "arguments": {} }, "finishReason": "max_output_tokens" },
+                { "text": "never asked" }
+            ]),
+        );
+        models.add_hooks(Arc::new(SteerAndArchive {
+            sessions: Arc::clone(&sessions),
+            handle: handle.clone(),
+            done: std::sync::atomic::AtomicBool::new(false),
+        }));
+        let runtime = AgentRuntime {
+            model: Arc::new(crate::adapters::LlmModel::new(models)),
+            session: Arc::new(crate::adapters::Sessions::new(Arc::clone(&sessions))),
+            context: Arc::new(crate::adapters::tests::SessionMessages {
+                sessions: Arc::clone(&sessions),
+            }),
+            tools: registry_with(vec![answering_tool("note_tool", "TOOLRAN-208")]),
+            hooks: Arc::new(crate::ports::NoTurnHooks),
+            turns: Some(TurnRegistry::new()),
+            presets: None,
+        };
+        let mut options = RunTurnOptions::new(handle.clone(), "scripted", "write the file");
+        options.max_rounds = RoundLimit::Rounds(4);
+        let result = run_turn(&runtime, options).await.unwrap();
+        assert_eq!(count_of(&sessions, &handle, "model/request"), 1);
+        assert_eq!(result.finish_reason, "blocked", "{:?}", result.ended);
+        assert!(
+            result.ended.contains(&BLOCKED.to_owned()),
+            "{:?}",
+            result.ended
+        );
+        assert!(
+            result.ended.contains(&MAX_TOKENS_NOTICE.to_owned()),
+            "{:?}",
+            result.ended
+        );
+        assert_eq!(
+            result.denials.len(),
+            1,
+            "the cut call is answered as not run"
+        );
+        assert_eq!(result.denials[0].code, MAX_TOKENS_CODE);
     }
 
     #[tokio::test]
