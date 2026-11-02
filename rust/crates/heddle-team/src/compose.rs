@@ -172,6 +172,7 @@ impl TeamStore for SessionTeamStore {
             cwd: Some(meta.cwd().to_owned()),
             endpoint: meta.endpoint().map(str::to_owned),
             model: meta.model().map(str::to_owned),
+            reasoning_effort: meta.reasoning_effort().map(str::to_owned),
             team_id: meta.team_id().map(str::to_owned),
             preset: meta.preset().map(str::to_owned),
         })
@@ -192,6 +193,7 @@ impl TeamStore for SessionTeamStore {
                 cwd: child.cwd.clone(),
                 endpoint: child.endpoint.clone(),
                 model: child.model.clone(),
+                reasoning_effort: child.reasoning_effort.clone(),
                 title: Some(child.title.clone()),
                 parent_session: Some(child.parent_session.clone()),
                 origin: Some(SessionOrigin::Subagent),

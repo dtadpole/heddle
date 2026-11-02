@@ -64,6 +64,7 @@ impl TeamStore for SessionTeamStore {
             cwd: Some(meta.cwd().to_owned()),
             endpoint: meta.endpoint().map(str::to_owned),
             model: meta.model().map(str::to_owned),
+            reasoning_effort: meta.reasoning_effort().map(str::to_owned),
             team_id: meta.team_id().map(str::to_owned),
             preset: meta.preset().map(str::to_owned),
         })
