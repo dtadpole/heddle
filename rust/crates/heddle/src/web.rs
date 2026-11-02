@@ -301,6 +301,8 @@ impl TurnRunner for Turns {
                 .collect();
             options.model = request.model;
             options.reasoning_effort = request.reasoning_effort;
+            // A queued row's claim wrote its user message with the claim (#162); the turn answers it.
+            options.answer_pending = request.answer_pending;
             // The page's rule is DSH's: no round cap unless the server was started with one.
             options.max_rounds = match request.max_rounds {
                 Some(rounds) => heddle_agent::RoundLimit::Rounds(rounds),
