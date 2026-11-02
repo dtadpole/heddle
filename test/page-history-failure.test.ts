@@ -106,7 +106,7 @@ function harness(deferredCommands = false) {
     let followTail = false, ledgerRefetchTimer = null;
     const QUEUE_KEY_NONE = ''; let activeFolder = 'workspace', workspaceRoutes = 'present'; const firstTreeReady = Promise.resolve();
     let directTurnPending = 0, directPendingKey = null, stopRequested = false;
-    ${['historyFailureText', 'adoptViewSelection', 'selectionForSeat', 'showSession', 'keptToDraw', 'drawKeptEvents', 'drawSessionEvent', 'runTurn',
+    ${['historyFailureText', 'adoptViewSelection', 'selectionForSeat', 'showSession', 'keptToDraw', 'drawKeptEvents', 'drawSessionEvent', 'runTurn', 'recordedEnd',
       'liveRoundsOf', 'countOwnSessionTurn', 'holdLooseTurn', 'holdLooseEvent', 'adoptLooseEvents'].map(source).join('\n')}
     ${lifecycleSource}
     ${listener};

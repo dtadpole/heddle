@@ -55,6 +55,7 @@ interface Union {
   unavailable(id: string): void
   state(): string
   turn(): Promise<unknown>
+  hasRecordedEnd(): boolean
 }
 
 function harness(): Union {
@@ -131,6 +132,9 @@ function harness(): Union {
     ${verdicts}
     /** main's #186: a replacement copy (a pruned tool result) is not drawn; drawSessionEvent asks this. */
     ${optional('isReplacementCopy')}
+    /** main's #201: a recorded early end, drawn on every page attached to the session (drawSessionEvent asks this). */
+    ${optional('recordedEnd')}
+    function markTurnEnded(ended) { rows.push('ended:' + ended.join('|')) }
     ${source('drawSessionEvent')}
     ${listener()}
     /** The no-session turn's 202, released by the test with the session it created; its verdict later on the stream. */
@@ -151,6 +155,7 @@ function harness(): Union {
       unavailable: (id) => { current = null; composerKey = QUEUE_KEY_NONE; unavailableSession = id; rows.length = 0; rows.push('notice:Failed to load history: offline'); updateStatusBar() },
       state: () => JSON.stringify({ turnError, current, unavailable: unavailableSession, rows, dockHidden: statusBar.hidden, turnsText: cells.get('[data-stat="turns"]')?.textContent ?? null, counts: [...liveTurns], opened, holding: looseTurnEvents !== null }),
       turn: () => running,
+      hasRecordedEnd: () => typeof recordedEnd === 'function',
     })
     `,
     { JSON, Promise, TextEncoder, TextDecoder, performance, Error, Array, Object, String, Number, Set, Map, WeakSet, WeakMap, Math, Date, setTimeout, clearTimeout },
@@ -189,6 +194,8 @@ test('the union: a blank page draws only its own first turn, counts each turn on
   page.stream(THEIRS, { type: 'model/request', seq: 2 })
   page.stream(MINE, { type: 'model/request', seq: 2 })
   page.stream(THEIRS, chunk('their answer', 3))
+  /** main's #201: another session's recorded early end reaches every page; a blank page draws none of it. */
+  page.stream(THEIRS, { type: 'assistant/completed', seq: 4, ended: ['stopped by the caller'] })
   const before = read()
   assert.deepEqual(before.rows, [], 'nothing is drawn before the turn names its session')
   assert.equal(before.dockHidden, true, 'and the dock stays hidden')
@@ -210,11 +217,15 @@ test('the union: a blank page draws only its own first turn, counts each turn on
   page.stream(MINE, chunk('the answer', 3))
   page.stream(THEIRS, user('their second prompt', 4))
   page.stream(THEIRS, chunk('their second answer', 5))
-  page.stream(MINE, { type: 'turn/completed', seq: 4 })
+  page.stream(THEIRS, { type: 'assistant/completed', seq: 6, ended: ['stopped after the round limit of 8'] })
+  /** Its own recorded end is drawn, once, through the drawing half (markTurnEnded, #201). */
+  page.stream(MINE, { type: 'assistant/completed', seq: 4, ended: ['stopped by the caller'] })
+  page.stream(MINE, { type: 'turn/completed', seq: 5 })
   page.ended()
   assert.equal(String(await page.turn() ?? ''), '', 'its runTurn ends without an error (a binding the drawing half needs shows here)')
   const done = read()
-  assert.deepEqual(done.rows, ['user:mine', 'assistant:the answer'], `each of its events once, none of theirs\nsaw: ${JSON.stringify(done)}`)
+  const ownEnd = page.hasRecordedEnd() ? ['ended:stopped by the caller'] : []
+  assert.deepEqual(done.rows, ['user:mine', 'assistant:the answer', ...ownEnd], `each of its events once, none of theirs, no other session's end\nsaw: ${JSON.stringify(done)}`)
   assert.equal(new Map(done.counts).get(MINE), 1, 'still one turn for its own session')
   assert.equal(new Map(done.counts).get(THEIRS), 2, 'theirs counted under their own id only')
 

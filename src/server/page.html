@@ -5309,6 +5309,48 @@ function markStopped() {
 }
 
 /**
+ * Draw a turn's recorded end where a reload draws it. The record is the `ended` on the turn's `assistant/completed`. The
+ * notice goes on the turn's answer when the last row is one, before its usage row, and otherwise as a row of its own.
+ *
+ * Every page attached to the session gets that record on the event stream. So a page that did not send the turn marks
+ * it too: a reloaded page, a second tab, or a turn the CLI or a goal round ran. DSH likewise draws a turn's end from the
+ * session's events, whoever sent it. #34's fix read the stop only from the sending page's own stream, so a reloaded page
+ * drew no "Stopped by the caller" until another reload (#201).
+ *
+ * The sending page gets the reason on both streams, so a turn already marked takes the recorded words in place of the
+ * notice it drew, rather than a second one.
+ */
+function markTurnEnded(ended) {
+  const notice = turnNotice(ended)
+  const last = lastTurnRow()
+  if (last !== null && last.dataset.kind === 'assistant') {
+    const drawn = last.querySelector(':scope > .turn-notice')
+    if (drawn !== null) drawn.replaceWith(notice)
+    else last.insertBefore(notice, last.querySelector(':scope > .turn-usage'))
+    return
+  }
+  if (last !== null && last.classList.contains('turn-notice')) last.replaceWith(notice)
+  else {
+    log.append(notice)
+    keepRunningLast()
+  }
+}
+
+/* recorded-end:begin */
+/**
+ * The reasons a recorded `assistant/completed` gives for ending early, or null when it gives none or the turn failed.
+ * A failed turn is drawn by its failure row, from `turn/failed` or the turn's own `error`. Its "failed: …" reason is not
+ * drawn a second time.
+ */
+function recordedEnd(event) {
+  if (event === null || typeof event !== 'object' || event.type !== 'assistant/completed') return null
+  if (event.error !== undefined || !Array.isArray(event.ended)) return null
+  const ended = event.ended.filter((reason) => typeof reason === 'string' && reason.length > 0)
+  return ended.length > 0 ? ended : null
+}
+/* recorded-end:end */
+
+/**
  * A completed turn's token usage, DSH's per-Turn usage row: closed it reads the total, open it lists the buckets the
  * provider reported, and a bucket nobody reported is left out rather than shown as zero.
  */
@@ -10392,6 +10434,12 @@ function drawSessionEvent(payload) {
     }
   }
   /**
+   * Why a turn ended early is drawn from its record on every page attached to the session, so a page that did not send
+   * the turn says it too. Before, a reloaded page showed nothing after its Stop until the next reload (#201).
+   */
+  const recorded = recordedEnd(event)
+  if (recorded !== null) markTurnEnded(recorded)
+  /**
    * The ledger is a projection and is refetched rather than appended to, so following it means asking for it
    * again — and only when the reader has not scrolled away.
    */
@@ -11826,9 +11874,11 @@ async function runTurn(text, key, attachments = [], onAccepted) {
        */
       const turnSession = typeof payload.session === 'string' ? payload.session : (adopted ?? target)
       if (placement === 'answer' && turnSession === current) {
-        const last = lastTurnRow()
-        if (last !== null && last.dataset.kind === 'assistant') last.append(turnNotice(payload.ended))
-        else log.append(turnNotice(payload.ended))
+        /**
+         * Through markTurnEnded (#201): the recorded end also reaches this page on the event stream, through the drawing
+         * half, so whichever lands second takes the place of the notice the first drew, rather than adding another.
+         */
+        markTurnEnded(payload.ended)
       } else if (placement === 'row') {
         /**
          * The archived-session gate blocked the message before any step (#139's B1): the server accepted it, dropped it
@@ -12868,7 +12918,8 @@ function messageAttachments(attachments) {
  * path travels with the message.
  */
 async function addPickedFiles(files) {
-  const added = []
+  // Each upload owns its result: a later refusal must not discard an already admitted file (#42).
+  const refused = []
   for (const file of files) {
     try {
       const response = await fetch(`/api/uploads?name=${encodeURIComponent(file.name)}`, { method: 'POST', body: file })
@@ -12879,23 +12930,24 @@ async function addPickedFiles(files) {
       const saved = await response.json()
       // The page's own preview of an image, for the queue's thumbnail before the message reaches the log.
       const preview = /^image\//.test(String(file.type ?? '')) ? URL.createObjectURL(file) : undefined
-      added.push({ path: saved.path, name: file.name, bytes: saved.bytes, ...(preview !== undefined ? { preview } : {}) })
+      pendingAttachments = [...pendingAttachments, { path: saved.path, name: file.name, bytes: saved.bytes, ...(preview !== undefined ? { preview } : {}) }]
+      renderPendingAttachments()
     } catch (error) {
-      showAttachFailure(files, error)
-      return
+      refused.push({ name: file.name, reason: (error && error.message) || String(error) })
+      showAttachFailure(refused)
     }
   }
-  pendingAttachments = [...pendingAttachments, ...added]
-  renderPendingAttachments()
 }
 
-/** Say why a chosen file could not be added, in the menu the person opened. */
-function showAttachFailure(files, error) {
+/** Say why each refused file could not be added, one line per file. */
+function showAttachFailure(refused) {
   attachMenu.replaceChildren()
-  const note = document.createElement('div')
-  note.className = 'meta'
-  note.textContent = `could not add ${files.map((file) => file.name).join(', ')}: ${(error && error.message) || error}`
-  attachMenu.append(note)
+  for (const { name, reason } of refused) {
+    const note = document.createElement('div')
+    note.className = 'meta'
+    note.textContent = `could not add ${name}: ${reason}`
+    attachMenu.append(note)
+  }
   attachMenu.hidden = false
   attachButton.setAttribute('aria-expanded', 'true')
 }

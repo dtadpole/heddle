@@ -74,7 +74,10 @@ function finish(options: { open: string | null; turn: string; payload: Record<st
     const cleared = []
     /** The log: rows the page drew, each a { kind, text, notices } with the DOM calls the done branch makes. */
     function row(kind, text) {
-      const node = { kind, text, notices: [], dataset: { kind }, append(child) { node.notices.push(child.textContent) }, before() {} }
+      const node = { kind, text, notices: [], dataset: { kind }, append(child) { node.notices.push(child.textContent) }, before() {},
+        /** What main's markTurnEnded (#201) asks of the answer row: no notice drawn yet, and where the notice goes. */
+        querySelector() { return null }, insertBefore(child) { node.notices.push(child.textContent) },
+        classList: { contains: (name) => kind === 'notice' && name === 'turn-notice' } }
       return node
     }
     const log = { children: OPTIONS.open === null ? [] : [row('assistant', 'the previous answer')], append(child) { this.children.push(child.kind === undefined ? row('notice', child.textContent) : child) }, replaceChildren() { this.children = [] } }
@@ -118,6 +121,9 @@ function finish(options: { open: string | null; turn: string; payload: Record<st
     function clearMain() { if (current === null) return; cleared.push(current); current = null; composerKey = QUEUE_KEY_NONE; log.replaceChildren() }
     ${block('turn-failure')}
     ${source('turnNotice')}
+    /** main's #201: the done branch draws an early end through markTurnEnded, which keeps a running row last. */
+    function keepRunningLast() {}
+    ${page.search(/\nfunction markTurnEnded\(/) >= 0 ? source('markTurnEnded') : ''}
     ${page.search(/\nfunction liveRoundsOf\(/) >= 0 ? source('liveRoundsOf') : ''}
     const frames = 'event: done\\ndata: ' + JSON.stringify({ session: OPTIONS.turn, ...OPTIONS.payload }) + '\\n\\n'
     /** #128's detached answer: 202 at acceptance, and the turn's verdict later on the event stream. */
