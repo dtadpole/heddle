@@ -153,6 +153,19 @@ test('#175: a teammate’s model switch is refused as session/agent-busy, and a 
     const meta = await s.metaOf(s.mate.id)
     assert.equal(meta?.endpoint, 'scripted', `the teammate keeps its own endpoint\nmeta: ${JSON.stringify(meta)}`)
     assert.notEqual(meta?.model, 'other-model', 'and model')
+
+    // #239 beside #175: a model its endpoint does not offer is not judged for a teammate, since the teammate does not
+    // run on it. The turn runs on the teammate's own model, with no 400, and nothing is recorded.
+    const unoffered = await fetch(new URL('/api/turn', s.server.url), {
+      method: 'POST',
+      headers: { cookie: s.cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ session: s.mate.id, prompt: 'another message for the teammate', model: 'a-model-nobody-offers' }),
+    })
+    const answer = await unoffered.text()
+    assert.equal(unoffered.status, 200, `a turn naming an unoffered model runs on the teammate's own\n${answer.slice(0, 300)}`)
+    const after = await s.metaOf(s.mate.id)
+    assert.equal(after?.endpoint, 'scripted', 'the teammate keeps its endpoint')
+    assert.notEqual(after?.model, 'a-model-nobody-offers', 'and records no model it was not going to use')
   } finally {
     s.close()
   }
