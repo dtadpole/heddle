@@ -49,6 +49,23 @@ impl ImageMediaType {
     }
 }
 
+/// Ordinary files may be zero bytes; an empty raster cannot be valid image content.
+pub fn validate_upload_content(
+    name: &str,
+    bytes: u64,
+    content_type: &str,
+) -> Result<(), AttachmentInputError> {
+    let extension = crate::node_path::extname(name).to_lowercase();
+    let is_image = ImageMediaType::for_extension(&extension).is_some()
+        || content_type.to_ascii_lowercase().starts_with("image/");
+    if bytes == 0 && is_image {
+        return Err(AttachmentInputError(
+            "an empty image is not valid".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// One attachment, as the user message's content records it.
 ///
 /// Serializes to exactly the `image` and `file` content parts of the TypeScript session log —
@@ -175,6 +192,7 @@ pub fn read_attachment(
             crate::uploads::MAX_UPLOAD_BYTES / (1024 * 1024)
         )));
     }
+    validate_upload_content(&canonical_text, metadata.len(), "")?;
     let bytes = std::fs::read(&canonical).map_err(|_| {
         AttachmentInputError(format!(
             "the attached file could not be read: {canonical_text}"
@@ -422,6 +440,36 @@ mod tests {
                 assert_eq!(bytes, 4);
             }
             other => panic!("expected a file part, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn ordinary_empty_files_are_admitted_but_empty_rasters_are_refused() {
+        let base = scratch("empty-admission");
+        let directory = base.join("uploads");
+        let path = directory.join("empty.txt");
+        std::fs::write(&path, b"").unwrap();
+        let part = read_attachment(&directory, &serde_json::json!(path.to_string_lossy())).unwrap();
+        match part {
+            AttachmentPart::File { bytes, sha256, .. } => {
+                assert_eq!(bytes, 0);
+                assert_eq!(
+                    sha256,
+                    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                );
+            }
+            other => panic!("expected an ordinary file, got {other:?}"),
+        }
+        for extension in ["png", "PNG", "jpg", "jpeg", "webp", "gif"] {
+            let path = directory.join(format!("empty.{extension}"));
+            std::fs::write(&path, b"").unwrap();
+            assert_eq!(
+                read_attachment(&directory, &serde_json::json!(path.to_string_lossy()))
+                    .unwrap_err()
+                    .to_string(),
+                "an empty image is not valid"
+            );
         }
         let _ = std::fs::remove_dir_all(&base);
     }

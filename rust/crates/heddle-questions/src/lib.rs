@@ -253,6 +253,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_fork_cut_inside_a_waiting_question_answers_only_itself() {
+        // #245: a fork copies `question/*` events with their request ids; the source's waiter is not the fork's.
+        let fixture = fixture("fork");
+        let questions = service(&fixture, Mode::Legacy, 120);
+        let asking = tokio::spawn({
+            let questions = Arc::clone(&questions);
+            let session = fixture.session.clone();
+            async move { questions.ask(&session, &one(), None, None).await }
+        });
+        let waiting = first_open(&questions, &fixture.session).await;
+        assert_eq!(waiting["state"], "waiting");
+        let id = waiting["id"].as_str().unwrap().to_owned();
+        let handle = fixture.store.open(&fixture.session).unwrap();
+        let last = fixture
+            .store
+            .read(&handle)
+            .unwrap()
+            .iter()
+            .filter_map(|event| event.to_value()["seq"].as_u64())
+            .max()
+            .unwrap();
+        let fork = fixture
+            .store
+            .fork_at(
+                &fixture.session,
+                heddle_session::ForkAttribution::default(),
+                Some(last),
+            )
+            .unwrap()
+            .unwrap()
+            .id;
+        let copy = Value::Object(questions.list(&fork, true).unwrap().remove(0));
+        assert_eq!(
+            copy["id"],
+            json!(id),
+            "the fork copies the request with its id"
+        );
+        assert_eq!(
+            copy["state"], "continued",
+            "but no turn of the fork waits on it"
+        );
+
+        let outcome = questions
+            .answer(&fork, &id, &json!([{ "id": "q", "selected": ["Go"] }]))
+            .unwrap();
+        assert!(outcome.late, "so the fork's answer is late");
+        assert!(
+            outcome
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("answer_to_pending_question")),
+            "a message for the fork's next turn"
+        );
+        let source = questions.get(&fixture.session, &id).unwrap().unwrap();
+        assert_eq!(source["state"], "waiting", "the source's turn still waits");
+        assert_eq!(
+            question_events(&fixture),
+            vec!["question/asked".to_owned()],
+            "and the source's log records no answer"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            !asking.is_finished(),
+            "the fork's answer never reached the source's turn"
+        );
+
+        questions
+            .answer(
+                &fixture.session,
+                &id,
+                &json!([{ "id": "q", "selected": ["Go"] }]),
+            )
+            .unwrap();
+        assert_eq!(
+            asking.await.unwrap().unwrap(),
+            AskOutcome::Answered(vec![Answer {
+                id: "q".to_owned(),
+                selected: vec!["Go".to_owned()],
+                custom: None,
+            }]),
+            "an answer in the source still does"
+        );
+    }
+
+    #[tokio::test]
     async fn a_question_asked_before_a_restart_is_answerable_after_it() {
         let fixture = fixture("restart");
         let before = service(&fixture, Mode::Legacy, 120);
