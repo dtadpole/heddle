@@ -40,7 +40,7 @@
     }
   },
   "plugins/model": {
-    "uid": 28,
+    "uid": 30,
     "refs": {
       "1": {
         "type": "string",
@@ -190,12 +190,20 @@
         "meta": {}
       },
       "27": {
+        "type": "string",
+        "meta": {}
+      },
+      "28": {
+        "type": "string",
+        "meta": {}
+      },
+      "29": {
         "type": "boolean",
         "meta": {
           "default": true
         }
       },
-      "28": {
+      "30": {
         "type": "object",
         "meta": {
           "default": {}
@@ -203,7 +211,9 @@
         "dict": {
           "endpoints": 25,
           "default": 26,
-          "readLocalConfig": 27
+          "defaultModel": 27,
+          "defaultEffort": 28,
+          "readLocalConfig": 29
         }
       }
     }
