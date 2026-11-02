@@ -290,6 +290,18 @@ fn write_file_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
                     ));
                 }
                 let target = sandbox.assert_writable(&path, context.mode())?;
+                // An existing target that is not a regular file, such as a folder, is refused and named before
+                // anything is written, as DSH's writeText probes it (`dsh-fs-local`): not the platform's unnamed
+                // `Is a directory (os error 21)` (live-testing issue #237).
+                if let Ok(info) = tokio::fs::metadata(&target).await
+                    && !info.is_file()
+                {
+                    let shown = requested_display_path(&context.cwd, &path);
+                    return Ok(ToolResult::refused(
+                        codes::FS_NOT_REGULAR_FILE,
+                        format!("cannot write \"{shown}\": not a regular file"),
+                    ));
+                }
                 tokio::fs::create_dir_all(parent_of(&target)).await?;
                 let content = string_arg(&args, "content");
                 tokio::fs::write(&target, &content).await?;
@@ -382,7 +394,14 @@ fn read_file_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
                     }
                     Err(error) => return Err(error.into()),
                 }
-                let text = tokio::fs::read_to_string(&target).await?;
+                // Bytes that are not UTF-8 text are refused and the file named, as DSH's fatal decode does (`dsh-fs-local`
+                // decodeUtf8): not the platform's unnamed `stream did not contain valid UTF-8` (live-testing issue #234).
+                let Ok(text) = String::from_utf8(tokio::fs::read(&target).await?) else {
+                    return Ok(ToolResult::refused(
+                        codes::FS_NOT_TEXT,
+                        format!("cannot read \"{shown}\": invalid UTF-8 text"),
+                    ));
+                };
                 let data = serde_json::Map::from_iter([
                     ("path".to_owned(), json!(target)),
                     ("bytes".to_owned(), json!(text.len())),
@@ -1086,6 +1105,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_write_aimed_at_a_folder_is_fs_not_regular_file_and_leaves_it_as_it_was() {
+        // Live-testing issue #237: the raw `Is a directory (os error 21)` named no path and came back as TOOL_FAILED;
+        // DSH's writeText probes the target and refuses a non-file as FS_NOT_REGULAR_FILE (`dsh-fs-local`).
+        let root = tempdir();
+        std::fs::create_dir_all(root.path().join("folder")).unwrap();
+        std::fs::write(root.path().join("folder/plain.txt"), "preserved").unwrap();
+        let write = tool("write_file", sandbox(root.path()));
+        let result = write
+            .run(
+                args(json!({ "path": "./folder", "content": "ordinary text" })),
+                context_in(root.path(), SandboxMode::DangerFullAccess),
+            )
+            .await
+            .expect("a refusal, not a tool failure");
+        let error = result.error.as_ref().expect("refused");
+        assert_eq!(error.code, codes::FS_NOT_REGULAR_FILE);
+        assert_eq!(
+            error.message,
+            format!(
+                "cannot write \"{}/folder\": not a regular file",
+                root.path().display()
+            )
+        );
+        assert_eq!(result.output, "");
+        assert!(root.path().join("folder").is_dir());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("folder/plain.txt")).unwrap(),
+            "preserved"
+        );
+
+        let result = write
+            .run(
+                args(json!({ "path": "folder/plain.txt", "content": "recovered" })),
+                context_in(root.path(), SandboxMode::DangerFullAccess),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.error, None);
+        assert!(
+            result.output.starts_with("wrote 9 bytes to ")
+                && result.output.ends_with("folder/plain.txt"),
+            "{}",
+            result.output
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("folder/plain.txt")).unwrap(),
+            "recovered"
+        );
+    }
+
+    #[tokio::test]
     async fn a_sandbox_denial_is_the_sandbox_refusal_and_never_a_write() {
         let root = tempdir();
         let write = tool("write_file", Arc::new(FakeSandbox::refusing(root.path())));
@@ -1360,6 +1430,50 @@ mod tests {
             .unwrap();
         assert!(result.error.is_none());
         assert_eq!(result.output, "hello");
+    }
+
+    #[tokio::test]
+    async fn a_file_that_is_not_utf8_text_is_fs_not_text_and_names_the_file() {
+        // Live-testing issue #234: the platform's `stream did not contain valid UTF-8` named no file and came back as
+        // TOOL_FAILED; DSH's fatal decode refuses it as FS_NOT_TEXT (`dsh-fs-local` decodeUtf8).
+        let root = tempdir();
+        std::fs::create_dir_all(root.path().join("notes")).unwrap();
+        std::fs::write(root.path().join("notes/binary.dat"), [0xc3, 0x28]).unwrap();
+        let read = tool("read_file", sandbox(root.path()));
+        let result = read
+            .run(
+                args(json!({ "path": "notes/binary.dat" })),
+                context_in(root.path(), SandboxMode::DangerFullAccess),
+            )
+            .await
+            .expect("a refusal, not a tool failure");
+        let error = result.error.as_ref().expect("refused");
+        assert_eq!(error.code, codes::FS_NOT_TEXT);
+        assert_eq!(
+            error.message,
+            format!(
+                "cannot read \"{}/notes/binary.dat\": invalid UTF-8 text",
+                root.path().display()
+            )
+        );
+        assert_eq!(result.output, "");
+    }
+
+    #[tokio::test]
+    async fn a_utf8_file_of_several_byte_characters_still_reads_exactly() {
+        let root = tempdir();
+        let text = "caf\u{e9} \u{4e2d}\u{6587} \u{1f600}";
+        std::fs::write(root.path().join("wide.txt"), text).unwrap();
+        let read = tool("read_file", sandbox(root.path()));
+        let result = read
+            .run(
+                args(json!({ "path": "wide.txt" })),
+                context_in(root.path(), SandboxMode::DangerFullAccess),
+            )
+            .await
+            .unwrap();
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(result.output, text);
     }
 
     #[tokio::test]
