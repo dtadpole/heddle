@@ -76,7 +76,16 @@ pub struct CommandServices {
     pub turn_running: Option<TurnRunning>,
     /// A manual compaction's hold on its session in the same registry (#140); `None` when the profile has none.
     pub turn_hold: Option<TurnHold>,
+    /// The tool schemas the profile's registry offers, so `/compact`'s summary carries the tools the session's last
+    /// request offered (#209); `None` sends none.
+    pub tool_specs: Option<ToolSpecs>,
 }
+
+/// The registry's tool schemas, asked when a manual compaction runs (#209).
+pub type ToolSpecs = Arc<dyn Fn() -> Vec<heddle_context::ToolSpec> + Send + Sync>;
+
+/// The log event a model request is recorded as; it names the tools the request offered.
+const MODEL_REQUEST_EVENT: &str = "model/request";
 
 /// Whether a session has a running turn, by session id.
 pub type TurnRunning = Arc<dyn Fn(&str) -> bool + Send + Sync>;
@@ -135,6 +144,7 @@ impl Commands {
                 models: services.models.clone(),
                 turn_running: services.turn_running.clone(),
                 turn_hold: services.turn_hold.clone(),
+                tool_specs: services.tool_specs.clone(),
                 compacting: Mutex::new(HashSet::new()),
             })),
             feedback_command(log, anonymous),
@@ -332,8 +342,37 @@ struct ServiceCompaction {
     models: Option<Arc<ModelService>>,
     turn_running: Option<TurnRunning>,
     turn_hold: Option<TurnHold>,
+    tool_specs: Option<ToolSpecs>,
     /// Sessions with a manual compaction in flight in this process.
     compacting: Mutex<HashSet<String>>,
+}
+
+impl ServiceCompaction {
+    /// The tool schemas the session's last model request offered, in its order (#209): DSH's summary call sends the
+    /// request header's tools, so the summary is a prefix of what the provider last saw and its cache is reused. The
+    /// log records the request's tool names; the registry gives their schemas. No request yet, or no registry: none.
+    fn last_request_tools(&self, session: &SessionHandle) -> Vec<heddle_context::ToolSpec> {
+        let Some(specs) = self.tool_specs.as_ref() else {
+            return Vec::new();
+        };
+        let Ok(events) = self.sessions.events(session) else {
+            return Vec::new();
+        };
+        let Some(names) = events
+            .iter()
+            .rev()
+            .find(|event| event.kind == MODEL_REQUEST_EVENT)
+            .and_then(|event| event.get("tools").and_then(Value::as_array).cloned())
+        else {
+            return Vec::new();
+        };
+        let offered = specs();
+        names
+            .iter()
+            .filter_map(Value::as_str)
+            .filter_map(|name| offered.iter().find(|spec| spec.name == name).cloned())
+            .collect()
+    }
 }
 
 /// A session's place in `compacting`, given back when the compaction ends, however it ends.
@@ -432,6 +471,7 @@ impl CompactionHost for ServiceCompaction {
             let model = meta
                 .as_ref()
                 .and_then(|meta| meta.model().map(str::to_owned));
+            let tools = self.last_request_tools(session);
             let report = context
                 .prepare(
                     session,
@@ -439,7 +479,7 @@ impl CompactionHost for ServiceCompaction {
                         cwd: Path::new(&cwd),
                         endpoint: &endpoint,
                         model: model.as_deref(),
-                        tools: &[],
+                        tools: &tools,
                         system: None,
                         summarizer: None,
                         force: true,
@@ -571,6 +611,7 @@ mod tests {
         CommandServices {
             turn_running: None,
             turn_hold: None,
+            tool_specs: None,
             sessions: Arc::new(SessionService::from_store(fixture.store.clone())),
             goals: None,
             context: None,

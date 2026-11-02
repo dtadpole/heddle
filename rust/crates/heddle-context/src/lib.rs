@@ -63,8 +63,8 @@ pub use prune::{PruneConfig, PruneOutcome, ToolResultPruner};
 pub use runtime::RuntimeContextSection;
 pub use service::{
     AssembleOptions, BaselineOutcome, Breakdown, ContextConfig, ContextDependencies, ContextReport,
-    ContextService, ContextSummary, ContextView, ModelAccess, OverflowRequest, PrepareOptions,
-    RecoveryDecision, SummaryRequest,
+    ContextService, ContextSummary, ContextView, ModelAccess, NO_SUMMARY_TEXT, OverflowRequest,
+    PrepareOptions, RecoveryDecision, SummaryRequest,
 };
 pub use store::{
     AppendOptions, ContextStore, LogEvent, SeqRange, StoreError, SurfaceNode, SurfaceOp,
