@@ -119,15 +119,20 @@ pub enum ContextEvent {
         /// After.
         after: u64,
     },
-    /// A refused compaction; the surface is unchanged.
+    /// A refused or stopped compaction; the surface is unchanged.
     #[serde(rename = "compaction/failed")]
     Failed {
         /// The span's first seq.
         from_seq: u64,
         /// The span's last seq.
         through_seq: u64,
-        /// Always `true`: the refusal was a decision, not a crash.
+        /// `true` for a refusal, which was a decision, not a crash; absent for a stopped compaction.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         refused: bool,
+        /// `true` when the turn's Stop cancelled the summary (#154); absent otherwise. Not `refused`, which
+        /// `/compact` reports as an error.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        stopped: bool,
         /// Why.
         reason: String,
     },
@@ -232,10 +237,27 @@ mod tests {
             from_seq: 1,
             through_seq: 2,
             refused: true,
+            stopped: false,
             reason: "no".to_string(),
         };
         assert_eq!(failed.kind(), "compaction/failed");
         assert_eq!(failed.to_value()["refused"], json!(true));
+        // The bytes both builds write for a refusal and for a stopped compaction (#154).
+        assert_eq!(
+            serde_json::to_string(&failed.to_value()).expect("serialises"),
+            r#"{"type":"compaction/failed","fromSeq":1,"throughSeq":2,"refused":true,"reason":"no"}"#
+        );
+        let stopped = ContextEvent::Failed {
+            from_seq: 1,
+            through_seq: 2,
+            refused: false,
+            stopped: true,
+            reason: "stopped by the caller".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_string(&stopped.to_value()).expect("serialises"),
+            r#"{"type":"compaction/failed","fromSeq":1,"throughSeq":2,"stopped":true,"reason":"stopped by the caller"}"#
+        );
     }
 
     /// The service's own events, key for key in the order the TypeScript literals write them

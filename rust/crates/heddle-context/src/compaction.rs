@@ -129,6 +129,13 @@ pub struct CompactOptions<'a> {
     /// Overflow recovery: ignore the trigger and the retained tail and take one maximal balanced
     /// reduction. Read by [`CompactionEngine::compact_if_needed`] only.
     pub force: bool,
+    /// The turn's stop token, for a compaction that runs as a turn's pre-step (#154).
+    ///
+    /// The summary call is raced against it: a Stop or a shutdown drops the call, lands nothing, and records the span
+    /// as stopped rather than refused. DSH's `dsh-compaction-basic` has the same rule ("Cancellation stays
+    /// authoritative throughout"). A summary that had already returned is committed, as DSH's automatic compaction
+    /// commits it; the turn's own check then stops it before its model request. The TypeScript build's `signal`.
+    pub cancel: Option<&'a tokio_util::sync::CancellationToken>,
 }
 
 /// Wrap a summary the way the model should read it: one user message,
@@ -320,8 +327,25 @@ impl CompactionEngine {
             AppendOptions::default(),
         )?;
 
-        let summary = match options.summarizer.summarize(messages).await {
+        let summarized = match options.cancel {
+            None => options.summarizer.summarize(messages).await,
+            Some(cancel) => {
+                let call = options.summarizer.summarize(messages);
+                let stop = Box::pin(cancel.cancelled());
+                // The summary is polled first, so one that is ready when the Stop comes is still committed.
+                match futures::future::select(call, stop).await {
+                    futures::future::Either::Left((summarized, _)) => summarized,
+                    futures::future::Either::Right(_) => {
+                        return self.stopped(store, session, plan, options);
+                    }
+                }
+            }
+        };
+        let summary = match summarized {
             Ok(summary) => summary,
+            Err(_) if options.cancel.is_some_and(|cancel| cancel.is_cancelled()) => {
+                return self.stopped(store, session, plan, options);
+            }
             Err(error) => {
                 return self.refuse(
                     store,
@@ -498,10 +522,48 @@ impl CompactionEngine {
                     summarizer: options.summarizer,
                     measure: options.measure,
                     force: options.force,
+                    cancel: options.cancel,
                 },
             )
             .await?;
         Ok(CompactionOutcome { pruned, ..outcome })
+    }
+
+    /// Record a compaction its turn's Stop cancelled (#154), leaving the surface exactly as it was.
+    ///
+    /// `compaction/failed` closes the span, as a refusal does, but without `refused`: nothing refused it, and
+    /// `/compact` reads `refused: true` as a summary it must report as an error.
+    fn stopped<S: ContextStore>(
+        &self,
+        store: &S,
+        session: &S::Handle,
+        plan: &CompactionPlan,
+        options: &CompactOptions<'_>,
+    ) -> Result<CompactionOutcome, ContextError> {
+        let reason = "stopped by the caller";
+        let reason_seq = store.append(
+            session,
+            ContextEvent::Failed {
+                from_seq: plan.from_seq,
+                through_seq: plan.through_seq,
+                refused: false,
+                stopped: true,
+                reason: reason.to_string(),
+            }
+            .to_value(),
+            AppendOptions::default(),
+        )?;
+        Ok(CompactionOutcome {
+            compacted: false,
+            reason: Some(reason.to_string()),
+            pruned: 0,
+            before: options.measurement.total_tokens,
+            after: options.measurement.total_tokens,
+            plan: Some(plan.clone()),
+            reason_seq: Some(reason_seq),
+            summary_seq: None,
+            replacement_seq: None,
+        })
     }
 
     /// Record a refused compaction and report it, leaving the surface exactly as it was.
@@ -519,6 +581,7 @@ impl CompactionEngine {
                 from_seq: plan.from_seq,
                 through_seq: plan.through_seq,
                 refused: true,
+                stopped: false,
                 reason: reason.to_string(),
             }
             .to_value(),
@@ -758,6 +821,7 @@ mod tests {
                 summarizer: &summarizer,
                 measure: &measure_fn,
                 force: false,
+                cancel: None,
             },
         ))
         .expect("a refusal is a result, not an error");
@@ -822,6 +886,7 @@ mod tests {
                 summarizer: &summarizer,
                 measure: &measure_fn,
                 force: false,
+                cancel: None,
             },
         ))
         .expect("the compaction lands");
@@ -906,6 +971,7 @@ mod tests {
             summarizer: &summarizer,
             measure: &measure_fn,
             force: false,
+            cancel: None,
         };
         block_on(engine.compact(&store, &session, &plan, &options))
             .expect("the first compaction lands");
@@ -932,6 +998,7 @@ mod tests {
             summarizer: &summarizer,
             measure: &measure_fn,
             force: false,
+            cancel: None,
         };
         let outcome = block_on(engine.compact(&store, &session, &plan, &options))
             .expect("the second compaction lands");
@@ -987,6 +1054,7 @@ mod tests {
                 summarizer: &summarizer,
                 measure: &measure_fn,
                 force: false,
+                cancel: None,
             },
         ))
         .expect("the round succeeds");
@@ -1028,6 +1096,7 @@ mod tests {
                 summarizer: &summarizer,
                 measure: &measure_fn,
                 force: true,
+                cancel: None,
             },
         ))
         .expect("the round succeeds");
@@ -1052,5 +1121,140 @@ mod tests {
         assert!(COMPACTION_INSTRUCTION.contains("exact file paths"));
         assert_eq!(SUMMARY_OPEN_TAG, "<compacted-summary>");
         assert_eq!(SUMMARY_CLOSE_TAG, "</compacted-summary>");
+    }
+
+    /// One session with a span to fold, and the plan the engine chooses for it (#154's fixtures).
+    fn foldable() -> (MemoryStore, MemorySession, super::CompactionPlan) {
+        let store = MemoryStore::new();
+        let session = store.open("s");
+        store.message(&session, text_message(Role::System, "be brief"));
+        store.message(&session, text_message(Role::User, "u".repeat(600)));
+        store.message(&session, text_message(Role::Assistant, "a".repeat(600)));
+        let measurement = measure(&store, &session);
+        let plan = CompactionEngine::default()
+            .plan(&store, &session, &budget(10_000), &measurement, Some(0))
+            .expect("the plan resolves")
+            .expect("a plan is chosen");
+        (store, session, plan)
+    }
+
+    /// Compact `plan` with `summarizer` under `cancel`, and answer the outcome and the log's kinds.
+    fn compact_under<F, Fut>(
+        store: &MemoryStore,
+        session: &MemorySession,
+        plan: &super::CompactionPlan,
+        cancel: &tokio_util::sync::CancellationToken,
+        summarizer: F,
+    ) -> (super::CompactionOutcome, Vec<String>)
+    where
+        F: Fn(Vec<Message>) -> Fut + Send + Sync,
+        Fut: std::future::Future<Output = Result<String, SummarizeError>> + Send + 'static,
+    {
+        let measurement = measure(store, session);
+        let measure_fn = || Ok::<Measurement, crate::error::ContextError>(measure(store, session));
+        let outcome = block_on(CompactionEngine::default().compact(
+            store,
+            session,
+            plan,
+            &CompactOptions {
+                budget: budget(10_000),
+                measurement: &measurement,
+                summarizer: &summarizer,
+                measure: &measure_fn,
+                force: false,
+                cancel: Some(cancel),
+            },
+        ))
+        .expect("a stopped compaction is a result, not an error");
+        let kinds = store
+            .read(session)
+            .expect("the log reads")
+            .iter()
+            .map(|event| event.kind.clone())
+            .collect();
+        (outcome, kinds)
+    }
+
+    /// #154: a Stop while the summary call is in flight drops the call, lands nothing, and closes the span as
+    /// stopped, not refused. The TypeScript build's test/compaction-stop.test.ts pins the same.
+    #[test]
+    fn a_stop_while_the_summary_is_in_flight_lands_nothing_and_is_recorded_as_stopped() {
+        let (store, session, plan) = foldable();
+        let generation = store.surface(&session).expect("folds").replace_generation;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let stop = cancel.clone();
+        let (outcome, kinds) = compact_under(&store, &session, &plan, &cancel, move |_messages| {
+            // The Stop comes while the call is still out; the call itself never answers.
+            stop.cancel();
+            futures::future::pending::<Result<String, SummarizeError>>()
+        });
+        assert!(!outcome.compacted);
+        assert_eq!(outcome.reason.as_deref(), Some("stopped by the caller"));
+        assert_eq!(
+            store.surface(&session).expect("folds").replace_generation,
+            generation,
+            "no replacement landed"
+        );
+        assert!(
+            !kinds
+                .iter()
+                .any(|kind| kind == "compaction/summary" || kind == "compaction/end"),
+            "{kinds:?}"
+        );
+        let failed = store
+            .read(&session)
+            .expect("the log reads")
+            .iter()
+            .find(|event| event.kind == "compaction/failed")
+            .map(|event| serde_json::to_string(&event.fields).expect("serialises"))
+            .expect("the span is closed");
+        assert!(
+            failed.contains(
+                r#""fromSeq":1,"throughSeq":1,"stopped":true,"reason":"stopped by the caller""#
+            ),
+            "{failed}"
+        );
+        assert!(!failed.contains("refused"), "{failed}");
+    }
+
+    /// A summary that had already returned when the Stop came is committed, as DSH's automatic compaction commits it;
+    /// the turn's own check stops the turn before its model request.
+    #[test]
+    fn a_summary_that_returned_before_the_stop_is_committed() {
+        let (store, session, plan) = foldable();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let stop = cancel.clone();
+        let (outcome, kinds) = compact_under(&store, &session, &plan, &cancel, move |_messages| {
+            stop.cancel();
+            async { Ok::<String, SummarizeError>("brief".to_string()) }
+        });
+        assert!(outcome.compacted, "{kinds:?}");
+        assert!(kinds.iter().any(|kind| kind == "compaction/end"));
+    }
+
+    /// A summary that failed once the Stop had come is stopped, not refused; one that failed with no Stop is refused.
+    #[test]
+    fn a_failure_after_the_stop_is_stopped_and_one_without_it_is_refused() {
+        let (store, session, plan) = foldable();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let stop = cancel.clone();
+        let (outcome, _) = compact_under(&store, &session, &plan, &cancel, move |_messages| {
+            stop.cancel();
+            async { Err::<String, SummarizeError>(SummarizeError("aborted".to_string())) }
+        });
+        assert_eq!(outcome.reason.as_deref(), Some("stopped by the caller"));
+
+        let (store, session, plan) = foldable();
+        let quiet = tokio_util::sync::CancellationToken::new();
+        let (outcome, _) = compact_under(&store, &session, &plan, &quiet, |_messages| async {
+            Err::<String, SummarizeError>(SummarizeError("the gateway answered 502".to_string()))
+        });
+        assert!(
+            outcome.reason.as_deref().is_some_and(
+                |reason| reason.starts_with("the summariser failed — the gateway answered 502")
+            ),
+            "{:?}",
+            outcome.reason
+        );
     }
 }

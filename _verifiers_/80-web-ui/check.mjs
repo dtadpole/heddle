@@ -429,8 +429,8 @@ test('the page is served under a strict script policy that allows its own inline
   /**
    * The page-level Content-Security-Policy (defence in depth behind the sanitizer, live issues developer-two-6 and -7),
    * approved by the coordinator as option (1). Both builds compute it from the page as served: 'self' and the sha256
-   * of each inline script for scripts; https: for images, styles, fonts and media only because the HTML preview's
-   * srcdoc frame inherits the policy (issue #50).
+   * of each inline script for scripts. Markdown images render in the main DOM, retaining HTTPS image permission;
+   * remote styles, fonts and media use the fixed HTML shell's separate response policy (issue #50).
    */
   const server = await startServer('csp')
   const browser = await openBrowser({ width: 1280, height: 900 })
@@ -446,10 +446,10 @@ test('the page is served under a strict script policy that allows its own inline
     const expected = [
       "default-src 'self'",
       ["script-src 'self'", ...scripts.map((code) => `'sha256-${createHash('sha256').update(code, 'utf8').digest('base64')}'`)].join(' '),
-      "style-src 'self' 'unsafe-inline' https:",
+      "style-src 'self' 'unsafe-inline'",
       "img-src 'self' data: blob: https:",
-      "font-src 'self' data: https:",
-      "media-src 'self' https:",
+      "font-src 'self' data:",
+      "media-src 'self'",
       "frame-src 'self'",
       "object-src 'none'",
       "base-uri 'self'",
@@ -497,7 +497,7 @@ test('the page is served under a strict script policy that allows its own inline
     /** textContent, not innerText: the document's heading is drawn in capitals, and innerText reads what is drawn. */
     assert.ok(await browser.waitFor('document.getElementById("file-body")?.textContent.includes("Notes")', 15_000), 'a markdown file opens')
     await browser.evaluate(`${fileRow('page.html')}.click()`)
-    assert.ok(await browser.waitFor('document.getElementById("html-view") !== null && !document.getElementById("html-view").hidden && (document.getElementById("html-view").srcdoc ?? "").includes("Preview")', 15_000), 'and an HTML preview')
+    assert.ok(await browser.waitFor('document.getElementById("html-view") !== null && !document.getElementById("html-view").hidden && (document.getElementById("html-view").contentDocument?.body?.textContent ?? "").includes("Preview")', 15_000), 'and an HTML preview')
     assert.deepEqual(JSON.parse(await browser.evaluate('JSON.stringify(window.__csp ?? null)')), [], 'a turn, a file and a preview break no directive')
     await browser.evaluate(`(() => { const element = document.createElement('script'); element.textContent = 'window.__injected = true'; document.body.append(element) })()`)
     await browser.waitFor('Array.isArray(window.__csp) && window.__csp.length > 0', 5_000)

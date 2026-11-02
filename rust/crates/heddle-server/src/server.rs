@@ -125,6 +125,7 @@ pub const CORE_ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/todo"),
     ("GET", "/api/team"),
     ("GET", "/api/html"),
+    ("GET", "/api/html/frame"),
     ("GET", "/vendor/purify.js"),
     ("GET", "/vendor/highlight/core.js"),
 ];
@@ -481,6 +482,7 @@ impl ServerBuilder {
             .route("/api/todo", get(get_todo))
             .route("/api/team", get(get_team))
             .route("/api/html", get(html_preview))
+            .route("/api/html/frame", get(html_frame))
             .route("/vendor/purify.js", get(purify))
             .route("/vendor/highlight/core.js", get(highlight_core))
             .route(
@@ -1201,6 +1203,9 @@ async fn create_session(State(state): State<AppState>, body: JsonBody) -> Respon
                 "log": created.log,
             }),
         ),
+        // A session the store could not record is DSH's `gateway/internal`, answered `500` as web.ts answers it (#149):
+        // it was a `400` carrying the store's absolute path.
+        Err(error) if is_write_failure(&error) => store_write_failure(error),
         Err(error) => service_refusal(error, StatusCode::BAD_REQUEST),
     }
 }
@@ -1239,6 +1244,8 @@ async fn folder_session(State(state): State<AppState>, body: JsonBody) -> Respon
                 &json!({"folder": folder.display().to_string(), "session": session}),
             )
         }
+        // A session the store could not record is DSH's `gateway/internal`, answered `500` (#149).
+        Err(error) if is_write_failure(&error) => store_write_failure(error),
         Err(error) => service_refusal(error, StatusCode::BAD_REQUEST),
     }
 }
@@ -1509,8 +1516,8 @@ fn is_write_failure(error: &ServiceError) -> bool {
     error.code.as_deref() == Some(heddle_session::WRITE_FAILED_CODE)
 }
 
-/// `500 {"error", "code": "gateway/internal"}`: a change the store could not save, in the adapter's words (#149), as
-/// web.ts's `respondWriteFailure` answers it.
+/// `500 {"error", "code": "gateway/internal"}`: a change the store could not save, or a session it could not create, in
+/// the adapter's words (#149), as web.ts's `respondWriteFailure` answers it.
 fn store_write_failure(error: ServiceError) -> Response {
     service_refusal(error, StatusCode::INTERNAL_SERVER_ERROR)
 }
@@ -2165,6 +2172,19 @@ async fn post_goal(State(state): State<AppState>, body: JsonBody) -> Response {
     }
 }
 
+/// Fixed shell behind the same door layer; no query extractor, harness or filesystem access.
+async fn html_frame() -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/html; charset=utf-8")
+        .header("x-content-type-options", "nosniff")
+        .header("cache-control", "no-store")
+        .header("referrer-policy", "no-referrer")
+        .header("content-security-policy", preview::frame_policy())
+        .body(Body::from(preview::PREVIEW_SHELL))
+        .expect("a response builder with static preview headers")
+}
+
 async fn html_preview(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
@@ -2433,6 +2453,9 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
     };
     let session = match session {
         Ok(session) => session,
+        // A session this turn would create that the store could not record is DSH's `gateway/internal`, answered `500`
+        // as web.ts answers it (#149): it was a `400` carrying the store's absolute path.
+        Err(error) if is_write_failure(&error) => return store_write_failure(error),
         Err(error) => return service_refusal(error, StatusCode::BAD_REQUEST),
     };
     if let Some(folder) = folder.as_ref()
@@ -3143,7 +3166,8 @@ mod tests {
     }
 
     /// A flags write's outcome: the record, no such session, the store's refusal of a pin on an archived session, or
-    /// a write the store could not save (#149), as the adapter reports it. A rename answers `Failed` the same way.
+    /// a write the store could not save (#149), as the adapter reports it. A rename answers `Failed` the same way, and
+    /// so does every creation (`start` without a resume, `open_at`, `create_at`), with the adapter's creation sentence.
     #[derive(Clone, Copy, Debug)]
     enum FlagsAnswer {
         Written,
@@ -3156,6 +3180,15 @@ mod tests {
     fn write_failed(verb: &str, id: &str) -> ServiceError {
         ServiceError::with_code(
             format!("failed to {verb} session \"{id}\": permission denied"),
+            "gateway/internal",
+        )
+    }
+
+    /// The adapter's report of a session the store could not create: DSH's code beside heddle-session's creation
+    /// sentence (#149).
+    fn create_failed() -> ServiceError {
+        ServiceError::with_code(
+            "failed to create session: permission denied",
             "gateway/internal",
         )
     }
@@ -3196,10 +3229,16 @@ mod tests {
         fn events(&self, id: &str) -> Option<Vec<Value>> {
             self.events.get(id).cloned().or(Some(Vec::new()))
         }
-        fn start(&self, _options: StartSession) -> Result<String, ServiceError> {
+        fn start(&self, options: StartSession) -> Result<String, ServiceError> {
+            if options.resume.is_none() && matches!(self.flags, FlagsAnswer::Failed) {
+                return Err(create_failed());
+            }
             Ok(self.metas[0].id.clone())
         }
         fn open_at(&self, _folder: &Path, _options: OpenAt) -> Result<String, ServiceError> {
+            if matches!(self.flags, FlagsAnswer::Failed) {
+                return Err(create_failed());
+            }
             Ok(self.metas[0].id.clone())
         }
         fn create_at(
@@ -3208,6 +3247,9 @@ mod tests {
             _title: Option<&str>,
             _preset: Option<&str>,
         ) -> Result<CreatedSession, ServiceError> {
+            if matches!(self.flags, FlagsAnswer::Failed) {
+                return Err(create_failed());
+            }
             Ok(CreatedSession {
                 session: self.metas[0].id.clone(),
                 name: "test".into(),
@@ -6030,6 +6072,59 @@ mod tests {
         }
     }
 
+    /// #149 (J180): a session the store could not create is DSH's `gateway/internal` with DSH's creation sentence
+    /// (`rejectCreation`, dsh-api-session-controller lib/index.js:1085), answered `500` as web.ts answers it, in the
+    /// adapter's words, on every route that creates one: New session, the folder route with `new`, and a turn with a
+    /// folder and `new` or with no folder. It was a `400` carrying the store's absolute path.
+    #[tokio::test]
+    async fn a_session_the_store_could_not_create_is_a_500_with_dshs_code_on_every_creating_route()
+    {
+        let mut sessions = Sessions::with_one();
+        sessions.flags = FlagsAnswer::Failed;
+        let mut harness = Harness::new(
+            Arc::new(sessions),
+            Arc::new(Models),
+            Arc::new(Turns),
+            Arc::new(Sandbox),
+            PathBuf::from("/work"),
+        );
+        harness.workspaces = Some(Arc::new(ViewWorkspaces));
+        let (router, _state) = ServerBuilder::new(
+            harness,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("create-failed")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        for (route, body) in [
+            ("/api/sessions", r#"{"branch":"/work"}"#),
+            ("/api/folders/session", r#"{"folder":"/work","new":true}"#),
+            (
+                "/api/turn",
+                r#"{"prompt":"hello","folder":"/work","new":true}"#,
+            ),
+            ("/api/turn", r#"{"prompt":"hello"}"#),
+        ] {
+            let (status, bytes) = post_json(&router, route, &cookie, body).await;
+            assert_eq!(
+                status,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{route} {body}: {}",
+                body_text(&bytes)
+            );
+            assert_eq!(
+                body_text(&bytes),
+                "{\"error\":\"failed to create session: permission denied\",\"code\":\"gateway/internal\"}\n",
+                "{route} {body}: the compact {{error, code}} web.ts writes"
+            );
+        }
+    }
+
     /// One raw HTTP/1.1 exchange, because the verifiers speak over a socket rather than through
     /// `tower::ServiceExt`: the door's handshake and the refusal headers are judged on the wire.
     async fn raw_request(port: u16, request: &str) -> String {
@@ -6139,6 +6234,34 @@ mod tests {
         assert!(fenced.starts_with("HTTP/1.1 403"), "{fenced}");
 
         server.close().await;
+    }
+
+    #[tokio::test]
+    async fn the_fixed_html_shell_is_authenticated_empty_and_has_its_own_policy() {
+        let (router, _) = app("html-frame");
+        let (status, _, bytes) = call(&router, Method::GET, "/api/html/frame", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body_text(&bytes), "unauthorized\n");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        for uri in [
+            "/api/html/frame",
+            "/api/html/frame?path=%2Fprivate%2Fsecret.html",
+            "/api/html/frame?path=%00&file=../../private.html",
+            "/api/html/frame?path=%FF",
+        ] {
+            let (status, headers, bytes) = call(&router, Method::GET, uri, Some(&cookie)).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(headers["content-type"], "text/html; charset=utf-8");
+            assert_eq!(headers["x-content-type-options"], "nosniff");
+            assert_eq!(headers["cache-control"], "no-store");
+            assert_eq!(headers["referrer-policy"], "no-referrer");
+            assert_eq!(headers["content-security-policy"], preview::frame_policy());
+            assert_eq!(body_text(&bytes), preview::PREVIEW_SHELL);
+            assert!(!body_text(&bytes).contains("private"));
+        }
+        let (status, _, _) = call(&router, Method::POST, "/api/html/frame", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

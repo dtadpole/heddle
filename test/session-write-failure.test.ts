@@ -15,6 +15,11 @@ import { fileURLToPath } from 'node:url'
  * `gateway/internal` (dsh-api-session-controller lib/index.js:839, dsh-api-gateway lib/index.js:1673-1690), so both builds
  * answer it `500 { error: 'failed to <verb> session "<id>": <reason>', code: 'gateway/internal' }`, the reason in words
  * and never the store's path. The store is made read-only the way the issue does it, `chmod -R a-w` on the session root.
+ *
+ * Creating a session failed the same raw way (J180): New session in a workspace whose store folder is at mode 000 answered
+ * `500 internal error: EACCES … '<absolute store path>/session-<id>.json'` here and a `400` with the path in the Rust build.
+ * Both answer it `500 { error: 'failed to create session: <reason>', code: 'gateway/internal' }`, DSH's `rejectCreation`
+ * (dsh-api-session-controller lib/index.js:1085), on every route that creates one.
  */
 
 const repoRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
@@ -100,6 +105,39 @@ test('a write the store cannot save is reasoned in words, never with a path, and
   assert.equal(failure.flagVerb({ archived: true, pinned: true }), 'archive', 'an archive change names a write that changes both')
 })
 
+test('a session the store cannot create is DSH\'s creation sentence in words, and a branch heddle cannot write is not one', async () => {
+  const failure = await import('../src/session/write-failure.ts')
+  const { SessionUnwritableError } = await import('../src/session/definition.ts')
+  const errno = (code: string, syscall: string) => Object.assign(new Error(`${code}: something, ${syscall} '/home/someone/.heddle/sessions/x'`), { code, syscall })
+  const created = failure.storeCreateFailure(errno('EACCES', 'open'))
+  assert.ok(created instanceof failure.SessionWriteError)
+  assert.equal(created.message, 'failed to create session: permission denied', "DSH's rejectCreation sentence, which names no session")
+  assert.equal(created.code, 'gateway/internal')
+  assert.equal(failure.storeCreateFailure(errno('ENOSPC', 'write'))?.message, 'failed to create session: no space left on device')
+  assert.equal(failure.storeCreateFailure(errno('EACCES', 'mkdir'))?.message, 'failed to create session: permission denied', 'a store folder that cannot be made')
+  assert.equal(failure.storeCreateFailure(new SessionUnwritableError('work')), undefined, "#106's refusal keeps its own code and sentence")
+  assert.equal(failure.storeCreateFailure(new Error("no session 'x' under /home/someone/.heddle/sessions")), undefined)
+})
+
+test('a store root that cannot take a new workspace folder fails a creation the route reads as one (#149)', { skip: asRoot ? 'root ignores a read-only folder' : false }, async () => {
+  const { SessionStore } = await import('../src/session/store.ts')
+  const failure = await import('../src/session/write-failure.ts')
+  const root = join(scratch, 'readonly-root')
+  mkdirSync(root, { recursive: true })
+  chmodSync(root, 0o555)
+  let thrown: unknown
+  try {
+    new SessionStore(root).create({ cwd: join(scratch, 'elsewhere') })
+  } catch (error) {
+    thrown = error
+  } finally {
+    chmodSync(root, 0o755)
+  }
+  assert.ok(thrown !== undefined, 'the store could not make the folder')
+  assert.equal(failure.storeCreateFailure(thrown)?.message, 'failed to create session: permission denied')
+  assert.deepEqual(readdirSync(root), [], 'and nothing was recorded')
+})
+
 test('Rename, Pin, Unpin, Archive and Unarchive on a read-only store answer 500 gateway/internal in words, and change nothing (#149)', { skip: asRoot ? 'root ignores a read-only folder' : false }, async () => {
   const { url, child } = await startServer()
   try {
@@ -145,6 +183,55 @@ test('Rename, Pin, Unpin, Archive and Unarchive on a read-only store answer 500 
     const renamed = await post(`/api/sessions/${id}/title`, { title: 'A new name' })
     assert.equal(renamed.status, 200, `once the store is writable again the same rename is saved\n${await renamed.text()}`)
   } finally {
+    child.kill('SIGKILL')
+  }
+})
+
+test('New session, the folder route and a new turn in a workspace whose store folder is mode 000 answer 500 gateway/internal in words, and record nothing (#149, J180)', { skip: asRoot ? 'root ignores a mode-000 folder' : false }, async () => {
+  const { url, child } = await startServer()
+  let storeFolder: string | undefined
+  try {
+    const handshake = await fetch(url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]!
+    const post = (path: string, body: object) =>
+      fetch(new URL(path, url), { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    const list = async () => (await (await fetch(new URL('/api/sessions', url), { headers: { cookie } })).json()) as { id: string; cwd: string }[]
+
+    const registered = await post('/api/workspaces', { path: work })
+    assert.equal(registered.status, 200, `the workspace is registered\n${await registered.text()}`)
+    const first = await post('/api/sessions', { branch: work })
+    assert.equal(first.status, 200, `a session made the workspace's store folder\n${await first.text()}`)
+    const before = (await list()).map((meta) => meta.id).sort()
+    const folders = readdirSync(sessionRoot).filter((name) => statSync(join(sessionRoot, name)).isDirectory())
+    assert.equal(folders.length, 1, `one store folder: ${folders.join(', ')}`)
+    storeFolder = join(sessionRoot, folders[0]!)
+
+    chmodSync(storeFolder, 0o000)
+    const answers: { name: string; status: number; type: string; text: string }[] = []
+    try {
+      for (const [name, path, body] of [
+        ['New session', '/api/sessions', { branch: work }],
+        ['the folder route with new', '/api/folders/session', { folder: work, new: true }],
+        ['a turn with new', '/api/turn', { prompt: 'a new conversation', folder: work, new: true }],
+        ['a turn with no folder', '/api/turn', { prompt: 'a new conversation' }],
+      ] as const) {
+        const response = await post(path, body)
+        answers.push({ name, status: response.status, type: String(response.headers.get('content-type')), text: await response.text() })
+      }
+    } finally {
+      chmodSync(storeFolder, 0o755)
+    }
+    for (const { name, status, type, text } of answers) {
+      assert.equal(status, 500, `${name}: the store could not record it, which is not the caller's fault\n${text}`)
+      assert.match(type, /^application\/json/, `${name}: answered as JSON\n${text}`)
+      assert.deepEqual(JSON.parse(text), { error: 'failed to create session: permission denied', code: 'gateway/internal' }, `${name}: DSH's code and creation sentence`)
+      assert.ok(!text.includes(scratch) && !text.includes('/sessions/'), `${name}: no path into the store\n${text}`)
+    }
+    assert.deepEqual((await list()).map((meta) => meta.id).sort(), before, 'no session was recorded')
+    const again = await post('/api/sessions', { branch: work })
+    assert.equal(again.status, 200, `once the store folder is writable again, New session is saved\n${await again.text()}`)
+  } finally {
+    if (storeFolder !== undefined) chmodSync(storeFolder, 0o755)
     child.kill('SIGKILL')
   }
 })

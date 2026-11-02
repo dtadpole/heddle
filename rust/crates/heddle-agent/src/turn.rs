@@ -706,9 +706,22 @@ async fn run_turn_body(
                     model: options.model.clone(),
                     tools: tools.clone(),
                     system: system.clone(),
+                    // The turn's stop token reaches the automatic compaction's summary call (#154): a Stop or a
+                    // shutdown during it drops the call and lands no replacement, as DSH's pre-step compaction runs
+                    // with the turn's signal.
+                    cancel: cancel.clone(),
                 },
             )
             .await?;
+        // A turn stopped while it compacted ends here, before its model request (#154). Live, the summary landed after
+        // the Stop and a `model/request` was then logged and cut; DSH's loop stops at its own check after the
+        // pre-step. No model call was made, so this is not a round: the closers count the same way.
+        if stopped() {
+            rounds -= 1;
+            progress.rounds = rounds;
+            ended.push("stopped by the caller".to_owned());
+            break;
+        }
 
         last_context = Some(ContextSummary {
             estimated_tokens: report.estimated_tokens,
@@ -769,6 +782,7 @@ async fn run_turn_body(
                     endpoint: request.endpoint.clone(),
                     model: request.model.clone(),
                     reasoning_effort: request.reasoning_effort.clone(),
+                    reasoning_effort_default: request.reasoning_effort_default,
                     messages: request.messages.len(),
                     tools: request.tools.iter().map(|tool| tool.name.clone()).collect(),
                     estimated_tokens: report.estimated_tokens,
@@ -846,6 +860,7 @@ async fn run_turn_body(
                     model: options.model.clone(),
                     cwd: instruction_cwd.clone(),
                     tools: tools.clone(),
+                    cancel: cancel.clone(),
                 })
                 .await;
             if action != Some(RequestErrorAction::Retry) {
@@ -860,6 +875,7 @@ async fn run_turn_body(
                     model: options.model.clone(),
                     tools: tools.clone(),
                     system: system.clone(),
+                    cancel: None,
                 },
             )?;
             report = retried;
@@ -2474,6 +2490,83 @@ pub(crate) mod tests {
             completed.fields["ended"],
             serde_json::json!(["stopped by the caller"])
         );
+    }
+
+    /// #154: the Stop lands while the round's context is prepared, which is where the automatic compaction's summary
+    /// call runs. The double cancels the turn's token from inside `prepare`, as a Stop during the summary does.
+    struct StoppingContext {
+        inner: SurfaceContext,
+        saw_token: Mutex<bool>,
+    }
+
+    impl ContextPort for StoppingContext {
+        fn record_runtime_context(
+            &self,
+            session: &SessionHandle,
+            sections: &[RuntimeContextSection],
+        ) -> Result<(), PortError> {
+            self.inner.record_runtime_context(session, sections)
+        }
+
+        fn prepare<'a>(
+            &'a self,
+            session: &'a SessionHandle,
+            options: PrepareOptions,
+        ) -> BoxFuture<'a, Result<ContextReport, PortError>> {
+            if let Some(token) = options.cancel.as_ref() {
+                *self.saw_token.lock().unwrap() = true;
+                token.cancel();
+            }
+            self.inner.prepare(session, options)
+        }
+
+        fn assemble(
+            &self,
+            session: &SessionHandle,
+            options: PrepareOptions,
+        ) -> Result<ContextReport, PortError> {
+            self.inner.assemble(session, options)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stop_during_the_rounds_compaction_ends_the_turn_before_its_model_request() {
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![]);
+        let context = Arc::new(StoppingContext {
+            inner: SurfaceContext {
+                session: Arc::clone(&session),
+            },
+            saw_token: Mutex::new(false),
+        });
+        let runtime = AgentRuntime {
+            model: Arc::clone(&model) as Arc<dyn ModelPort>,
+            session: Arc::clone(&session) as Arc<dyn SessionPort>,
+            context: Arc::clone(&context) as Arc<dyn ContextPort>,
+            tools: registry_with(Vec::new()),
+            hooks: Arc::new(crate::ports::NoTurnHooks),
+            turns: None,
+            presets: None,
+        };
+        let mut options = RunTurnOptions::new(session_handle(), "scripted", "go");
+        options.cancel = Some(CancellationToken::new());
+        let result = run_turn(&runtime, options).await.unwrap();
+        assert!(
+            *context.saw_token.lock().unwrap(),
+            "the turn's stop token reached the preparation"
+        );
+        assert!(
+            model.requests().is_empty(),
+            "no model call followed the stop"
+        );
+        assert!(
+            session.event("model/request").is_none(),
+            "and no model/request was recorded"
+        );
+        assert_eq!(result.rounds, 0, "a round that sent nothing is not a round");
+        assert_eq!(result.ended, ["stopped by the caller"]);
+        let completed = session.event(events::ASSISTANT_COMPLETED).unwrap();
+        assert_eq!(completed.fields["rounds"], serde_json::json!(0));
     }
 
     #[tokio::test]
