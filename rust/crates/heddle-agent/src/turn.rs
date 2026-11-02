@@ -267,11 +267,41 @@ pub struct BegunTurn {
     /// The session's event count before the prompt, so the result counts the turn's own writes.
     started: usize,
     live: Option<LiveTurn>,
+    /// The session's steer gate, held open for this turn; dropping it shuts the gate. `None` for a turn the
+    /// archived-session gate blocked: it claims what waits and ends without a step, so it opens no gate.
+    gate: Option<SteerGate>,
     /// The result of a turn the archived-session gate rejected at its first step: its record is already written,
     /// and [`BegunTurn::run`] answers it without a step.
     blocked: Option<TurnResult>,
     /// The agent preset the turn runs under, resolved before anything was written; `None` without a roster.
     preset: Option<PresetDefinition>,
+}
+
+/// The steer gate (#31) for one turn: opened when the turn begins, shut when this is dropped.
+///
+/// A guard rather than explicit closes (developer-five's review of 433f619d): every way out shuts it, including an
+/// early error in `begin_turn` (the claim or the prompt write) and a [`BegunTurn`] that is dropped without ever
+/// being run, so no gate stays open with no loop left to claim what it accepts. The loop's final "nothing pending"
+/// decision shuts it earlier; a second close is harmless.
+struct SteerGate {
+    session: Arc<dyn SessionPort>,
+    handle: SessionHandle,
+}
+
+impl SteerGate {
+    fn open(session: &Arc<dyn SessionPort>, handle: &SessionHandle) -> SteerGate {
+        session.open_steering(handle);
+        SteerGate {
+            session: Arc::clone(session),
+            handle: handle.clone(),
+        }
+    }
+}
+
+impl Drop for SteerGate {
+    fn drop(&mut self) {
+        self.session.close_steering(&self.handle);
+    }
 }
 
 impl std::fmt::Debug for BegunTurn {
@@ -303,6 +333,7 @@ impl BegunTurn {
             cancel,
             started,
             live,
+            gate,
             blocked,
             preset,
         } = self;
@@ -334,6 +365,9 @@ impl BegunTurn {
                 &progress,
             );
         }
+        // However the turn ended (a stop, a failure, the round limit), a steer from now on waits for a turn of
+        // its own; one accepted before stays in the inbox for the next turn to claim, as DSH keeps its inbox.
+        drop(gate);
         if let Some(live) = &live {
             live.settle();
         }
@@ -496,10 +530,15 @@ fn begin_registered(
             cancel,
             started,
             live,
+            gate: None,
             blocked: Some(blocked),
             preset,
         });
     }
+    // The steer gate opens with the turn and closes at its final "nothing pending" decision (#31), or when this
+    // guard is dropped: on an early return here, or with a BegunTurn that is never run. It opens after the
+    // archived-session gate, so a blocked turn, which claims what waits and runs no step, accepts no steer.
+    let gate = Some(SteerGate::open(&runtime.session, &options.session));
     // A steer a stopped turn left in the inbox is DSH's next-step input, and DSH's boundary claims next-step
     // input before the queued prompt, so it is written ahead of this turn's prompt.
     if let Err(error) = runtime.session.claim_pending_input(&options.session) {
@@ -529,6 +568,7 @@ fn begin_registered(
         cancel,
         started,
         live,
+        gate,
         blocked: None,
         preset,
     })
@@ -1019,7 +1059,7 @@ async fn run_turn_body(
                 &input_before,
                 &user_input_seqs(runtime.session.as_ref(), session),
             )
-            && !runtime.session.has_pending_input(session)
+            && !runtime.session.has_pending_input_or_close(session)
         {
             break;
         }
@@ -1494,6 +1534,8 @@ pub(crate) mod tests {
         fail_user_content: AtomicBool,
         /// The folder the session was opened in, `None` for a record with none.
         folder: Mutex<Option<PathBuf>>,
+        /// The steer gate (#31), as `open_steering` / `close_steering` leave it.
+        steering_open: AtomicBool,
         /// The agent preset the record carries (inventory A96), `None` until one is recorded.
         preset: Mutex<Option<String>>,
     }
@@ -1504,6 +1546,7 @@ pub(crate) mod tests {
                 sources: Mutex::new(Vec::new()),
                 fail_user_content: AtomicBool::new(false),
                 folder: Mutex::new(None),
+                steering_open: AtomicBool::new(false),
                 preset: Mutex::new(None),
                 state: Mutex::new(SessionState {
                     events: Vec::new(),
@@ -1605,6 +1648,14 @@ pub(crate) mod tests {
     impl SessionPort for RecordingSession {
         fn count(&self, _: &SessionHandle) -> usize {
             self.state.lock().unwrap().events.len()
+        }
+
+        fn open_steering(&self, _: &SessionHandle) {
+            self.steering_open.store(true, Ordering::SeqCst);
+        }
+
+        fn close_steering(&self, _: &SessionHandle) {
+            self.steering_open.store(false, Ordering::SeqCst);
         }
 
         fn user_content(
@@ -3336,6 +3387,65 @@ pub(crate) mod tests {
         assert_eq!(completed.fields["text"], "the answer is");
         assert_eq!(completed.fields["rounds"], 2);
         assert_eq!(completed.fields["finishReason"], "error");
+    }
+
+    #[tokio::test]
+    async fn every_way_out_of_a_turn_shuts_the_steer_gate() {
+        // developer-five's review of 433f619d: the gate opens in begin_turn, so a failed prompt write and a
+        // BegunTurn that is never run must shut it too, or a later steer is accepted with no loop to claim it.
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![Step::Chunks(vec![
+            Chunk::TextDelta {
+                text: "done".into(),
+            },
+            done("stop"),
+        ])]);
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            registry_with(Vec::new()),
+            Arc::new(crate::ports::NoTurnHooks),
+        );
+
+        session.fail_user_content.store(true, Ordering::SeqCst);
+        assert!(
+            begin_turn(
+                &runtime,
+                RunTurnOptions::new(session_handle(), "scripted", "go")
+            )
+            .is_err()
+        );
+        assert!(
+            !session.steering_open.load(Ordering::SeqCst),
+            "a prompt write that fails shuts the gate"
+        );
+        session.fail_user_content.store(false, Ordering::SeqCst);
+
+        let begun = begin_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "go"),
+        )
+        .expect("begins");
+        assert!(
+            session.steering_open.load(Ordering::SeqCst),
+            "open while the turn is begun"
+        );
+        drop(begun);
+        assert!(
+            !session.steering_open.load(Ordering::SeqCst),
+            "a begun turn dropped without running shuts the gate"
+        );
+
+        run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "go"),
+        )
+        .await
+        .expect("runs");
+        assert!(
+            !session.steering_open.load(Ordering::SeqCst),
+            "a turn that ran shuts the gate when it ends"
+        );
     }
 
     #[tokio::test]

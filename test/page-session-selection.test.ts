@@ -55,6 +55,7 @@ function harness() {
     slashReady: Promise.resolve(null),
     syncSelectionToSession() {}, paintScheduleHeader() {}, followChatTail() {},
     renderScheduleCards() {}, renderScheduleDrawer() {}, refreshScheduleList() {}, refreshScheduleCatalog() {},
+    reconcileSteers() {}, claimSteer() {},
     refreshSessions: async () => {}, refreshGoal: async () => {}, refreshTodo: async () => {}, showLedger: async () => {},
     log: { get childElementCount() { return rows.length }, scrollTop: 0, dataset: {}, replaceChildren: () => rows.splice(0), append: (note: { textContent: string }) => rows.push(note.textContent) },
     requestAnimationFrame: (callback: () => void) => callback(),
@@ -72,6 +73,7 @@ function harness() {
     const liveTurns = new Map();
     let seat = '', activeFolder = null, selected = null;
     let selectionSeq = 0, chosenEndpoint = null, chosenModel = null, chosenEffort = null;
+    let steerClock = 0;
     const latestSelection = new Map(), serverSeats = new Map(), heldSeats = new Map(), recordedSelections = new Set();
     const pendingSaves = new Set(), QUEUE_KEY_NONE = '', sends = [];
     const performance = { now: () => 0 };
