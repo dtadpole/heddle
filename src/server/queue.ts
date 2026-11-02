@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 
 import type { Context } from '@deepseek-ai/cordis'
 
-import { runTurn } from '../agent/loop.ts'
+import { NOTHING_CLAIMED, runTurn } from '../agent/loop.ts'
 import type { TurnRegistry } from '../agent/turns.ts'
 import type { ContentPart } from '../llm/types.ts'
 import { claimNextTurn, pendingInbox, queuedByRequest, queueTurn, removeQueued, replaceQueued, steerQueued, type InboxMessage } from '../session/inbox.ts'
@@ -209,7 +209,7 @@ export interface QueueOptions {
   /** The selection a turn route would run the session on; `undefined` when none is configured. */
   readonly select?: (session: string) => { readonly endpoint: string; readonly model?: string; readonly reasoningEffort?: string } | undefined
   /** Count the drained turn as the route counts its own; the answer ends it with its verdict. */
-  readonly track?: (session: string) => (verdict: 'done' | 'cancelled' | 'error', data: Record<string, unknown>) => void
+  readonly track?: (session: string) => (verdict: 'done' | 'cancelled' | 'error' | 'none', data: Record<string, unknown>) => void
 }
 const settings = new WeakMap<Context, QueueOptions>()
 
@@ -284,6 +284,12 @@ function drain(ctx: Context, session: string): void {
     .then(
       (result) => {
         const ended = (result as { ended?: readonly string[] } | undefined)?.ended
+        // A turn whose row was gone by the time it held the session ran nothing: no completion mark, no verdict
+        // (developer-ten's nit).
+        if (ended?.includes(NOTHING_CLAIMED) === true) {
+          end?.('none', {})
+          return
+        }
         const stopped = ended?.includes('stopped by the caller') === true
         // A turn a person stopped holds the rest (DSH's keepInbox; the stop route holds it too).
         if (stopped) holdQueue(ctx, session)

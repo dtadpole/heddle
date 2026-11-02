@@ -251,9 +251,10 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
         else {
           running.delete(session)
           runningSince.delete(session)
-          completedAt.set(session, Date.now())
+          // A turn that ran nothing (its queued row was gone) is no completion (#162).
+          if (verdict !== 'none') completedAt.set(session, Date.now())
         }
-        push({ log, subscribers }, 'turn', turnVerdict(turnId, verdict, { session, ...data }))
+        if (verdict !== 'none') push({ log, subscribers }, 'turn', turnVerdict(turnId, verdict, { session, ...data }))
       }
     },
   })
