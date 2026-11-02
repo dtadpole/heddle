@@ -346,7 +346,8 @@ export class GoalDriver extends Service {
         const current = this.goals.get(handle)
         if (current !== undefined && current.id === view!.id && current.phase === 'active') {
           try {
-            this.goals.pause(handle, { id: current.id, revision: current.revision })
+            /** The round is over; a turn that began since (a person's queued message) is not this pause's to end. */
+            this.goals.pause(handle, { id: current.id, revision: current.revision }, { initiator: 'agent' })
           } catch (error) {
             this.goals.disarm(handle)
             return { rounds: rounds + 1, stopped: 'cancelled', error: messageOf(error) }

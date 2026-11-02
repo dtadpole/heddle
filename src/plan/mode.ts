@@ -51,12 +51,17 @@ export type PlanChange = 'committed' | 'noop'
  * The mode event is written first, then — when the model has answered in this session before — the notice, so the
  * next request both carries (or drops) the policy section and reads why. A change to the mode already in effect
  * writes nothing.
+ *
+ * `narrate: false` writes the mode event alone. `exit_plan_mode`'s approval uses it: the person approved a plan, they did
+ * not switch the mode, and the tool's result already tells the model plan mode is over. DSH's controller narrates user
+ * selections and not the exit tool's transition (dsh-plan-mode: `narrate` is "false for the exit tool, whose result
+ * already narrates the transition") (#228).
  */
-export function setPlanMode(log: PlanLog, handle: SessionHandle, active: boolean): PlanChange {
+export function setPlanMode(log: PlanLog, handle: SessionHandle, active: boolean, options: { readonly narrate?: boolean } = {}): PlanChange {
   const events = log.read(handle)
   if (planActive(events) === active) return 'noop'
   log.append(handle, { type: PLAN_EVENT, active })
-  if (events.some((event) => event.type === 'model/request')) {
+  if (options.narrate !== false && events.some((event) => event.type === 'model/request')) {
     log.append(
       handle,
       {

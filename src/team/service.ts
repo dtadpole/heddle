@@ -193,6 +193,12 @@ export class TeamService {
               ...(leadMeta?.cwd !== undefined ? { cwd: leadMeta.cwd } : {}),
               ...(leadMeta?.endpoint !== undefined ? { endpoint: leadMeta.endpoint } : {}),
               ...(leadMeta?.model !== undefined ? { model: leadMeta.model } : {}),
+              /**
+               * And its reasoning effort (issue #174): DSH's child inherits the parent's provider, model and effort
+               * (dsh-subagent `resolveChildAgentOptions`). A fresh teammate used to drop it and run at the model's
+               * default; a fork already took it, as `store.fork` copies it.
+               */
+              ...(leadMeta?.reasoningEffort !== undefined ? { reasoningEffort: leadMeta.reasoningEffort } : {}),
               parentSession: lead.id,
               origin: 'subagent',
               delegationDepth: 1,

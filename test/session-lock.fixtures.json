@@ -1,0 +1,130 @@
+{
+  "about": "Writer lock files (<id>.lock) as either build writes or meets them (#202). Read by test/session-lock.test.ts and by rust/crates/heddle-session/tests/writer_lock.rs: each build parses every 'bytes' to the pid, boot and start given (null: the file names no process), and a case marked 'written' is the exact bytes that build writes for that pid, boot and start.",
+  "locks": [
+    {
+      "name": "pid only, as every build before #202 wrote it",
+      "bytes": "46183\n",
+      "pid": 46183,
+      "boot": null,
+      "start": null,
+      "written": true
+    },
+    {
+      "name": "macOS: kern.bootsessionuuid and the start second (UTC, seconds since 1970)",
+      "bytes": "46183 boot=A16D6C9D-EDEC-4146-9050-6215AF208215 start=1793563380\n",
+      "pid": 46183,
+      "boot": "A16D6C9D-EDEC-4146-9050-6215AF208215",
+      "start": "1793563380",
+      "written": true
+    },
+    {
+      "name": "Linux: boot_id and field 22 of /proc/<pid>/stat (clock ticks after boot)",
+      "bytes": "2201 boot=0e1f2c3d-4b5a-4687-9a8b-7c6d5e4f3a2b start=987654\n",
+      "pid": 2201,
+      "boot": "0e1f2c3d-4b5a-4687-9a8b-7c6d5e4f3a2b",
+      "start": "987654",
+      "written": true
+    },
+    {
+      "name": "a boot and no start: read, though neither build writes it (a writer that cannot read its start writes the pid-only form)",
+      "bytes": "2201 boot=0e1f2c3d-4b5a-4687-9a8b-7c6d5e4f3a2b\n",
+      "pid": 2201,
+      "boot": "0e1f2c3d-4b5a-4687-9a8b-7c6d5e4f3a2b",
+      "start": null,
+      "written": false
+    },
+    {
+      "name": "pid 1, pid only (J178's stand-in for a pid this user may not signal)",
+      "bytes": "1\n",
+      "pid": 1,
+      "boot": null,
+      "start": null,
+      "written": true
+    },
+    {
+      "name": "a part this protocol does not know is ignored, and the first of a repeated part counts",
+      "bytes": "46183 start=17 host=mini boot=B boot=C\n",
+      "pid": 46183,
+      "boot": "B",
+      "start": "17",
+      "written": false
+    },
+    {
+      "name": "surrounding whitespace, as a pid-only lock was always read",
+      "bytes": "  46183 \r\n",
+      "pid": 46183,
+      "boot": null,
+      "start": null,
+      "written": false
+    },
+    {
+      "name": "empty: a lock being created",
+      "bytes": "",
+      "pid": null,
+      "boot": null,
+      "start": null,
+      "written": false
+    },
+    {
+      "name": "not a pid",
+      "bytes": "heddle\n",
+      "pid": null,
+      "boot": null,
+      "start": null,
+      "written": false
+    },
+    {
+      "name": "pid 0 names no process",
+      "bytes": "0 boot=B start=1\n",
+      "pid": null,
+      "boot": null,
+      "start": null,
+      "written": false
+    },
+    {
+      "name": "a pid beyond 32 bits names no process",
+      "bytes": "4294967296\n",
+      "pid": null,
+      "boot": null,
+      "start": null,
+      "written": false
+    }
+  ],
+  "ps": [
+    {
+      "name": "a process of this user",
+      "line": "  501 Sun Nov  1 19:53:07 2026     sleep           \n",
+      "uid": 501,
+      "start": "1793562787",
+      "command": "sleep"
+    },
+    {
+      "name": "launchd, root's",
+      "line": "    0 Sun Oct  4 06:24:29 2026     launchd         \n",
+      "uid": 0,
+      "start": "1791095069",
+      "command": "launchd"
+    },
+    {
+      "name": "a command name with a space",
+      "line": "  501 Tue Feb 29 23:59:59 2028     Google Chrome He\n",
+      "uid": 501,
+      "start": "1835481599",
+      "command": "Google Chrome He"
+    }
+  ],
+  "procStat": [
+    {
+      "name": "a plain name",
+      "line": "2201 (sleep) S 1 2201 2201 0 -1 4194304 97 0 0 0 0 0 0 0 20 0 1 0 987654 5545984 211 18446744073709551615 1 1 0 0 0 0 0 0 0 0 0 0 17 3 0 0 0 0 0\n",
+      "start": "987654",
+      "command": "sleep"
+    },
+    {
+      "name": "a name with a space and a bracket",
+      "line": "77 (a b) c) R 1 77 77 0 -1 4194304 97 0 0 0 0 0 0 0 20 0 1 0 31337 5545984 211 18446744073709551615 1 1 0 0 0 0 0 0 0 0 0 0 17 3 0 0 0 0 0\n",
+      "start": "31337",
+      "command": "a b) c"
+    }
+  ]
+}

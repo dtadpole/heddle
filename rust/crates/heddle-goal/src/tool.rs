@@ -686,8 +686,9 @@ fn update(
                     return Err(reject(messages::RESUME_PAUSED, codes::RESUME_PAUSED));
                 }
             }
+            // The model's own pause, inside its own turn: the turn finishes normally (issue #190, DSH's rule).
             let view = if action == UpdateAction::Pause {
-                goals.pause(session, &reference)?
+                goals.pause_in_turn(session, &reference)?
             } else {
                 goals.resume(session, &reference)?
             };

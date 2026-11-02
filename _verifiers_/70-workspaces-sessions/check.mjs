@@ -1269,6 +1269,220 @@ test('a session interrupted mid-frame still reads, and its next turn lands', asy
   }
 })
 
+test('a full disk fails the turn in words and leaves no torn frame, and a turn answered after space came back survives a restart (#221)', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * Issue #221, journey J183, by its own steps, on a 24 MB HFS+ disk image as the session root. Measured before the fix
+   * on both builds: an append that met ENOSPC left its partial frame in the middle of the log; the turn route reported
+   * nothing the page could draw; t6, answered after the filler was removed, was appended after the partial frame; and
+   * the next start's repair, right for a crash-torn tail (J155), cut the log at the tear and dropped t6.
+   *
+   * DSH truncates a failed append back to the size it had (dsh-session-persistence-jsonl lib/index.js:3299-3335,
+   * appendLines and rollbackAppend), and its checkpoint policy fails the step closed when the session cannot be saved.
+   * So: t4 fails in words, the log is never torn, and t6 is still there after a restart, with nothing dropped.
+   */
+  const { spawnSync } = await import('node:child_process')
+  const { randomBytes } = await import('node:crypto')
+  const fs = await import('node:fs')
+  if (!skipUnless(context, process.platform === 'darwin' && fs.existsSync('/usr/bin/hdiutil'), 'a small disk image needs hdiutil, which only macOS has')) return
+  const h = harness('full-disk')
+  const image = join(h.home, 'small.dmg')
+  const mount = join(h.home, 'small')
+  const root = join(mount, 'sessions')
+  const script = join(h.home, 'script.json')
+  const serverArgs = ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', root]
+  const env = { ...h.env, HOME: h.home }
+  /**
+   * The safety guard (integrator-one, 2026-11-01): the filler below writes until the disk refuses it, so it must only ever
+   * write into the small image. Before it, the mount must be another filesystem than the home it sits in and at most
+   * 64 MiB in all; the filler stops at 32 MiB written whatever the disk says, and the check fails if the disk was not
+   * full by then.
+   */
+  const SMALL_DISK_BYTES = 64 * 1024 * 1024
+  const FILLER_CAP_BYTES = 32 * 1024 * 1024
+  const assertSmallDisk = (when) => {
+    assert.notEqual(fs.statSync(mount).dev, fs.statSync(h.home).dev, `${when}: the mount is the attached image, not a folder of the home's own disk`)
+    const disk = fs.statfsSync(mount)
+    assert.ok(disk.blocks * disk.bsize < SMALL_DISK_BYTES, `${when}: the mount is the small image (${disk.blocks * disk.bsize} bytes in all)`)
+  }
+  /**
+   * An image a killed run of this check left attached is detached first: one whose path is this check's own
+   * (home-full-disk-<pid>-…/small.dmg under the scratch root) and whose pid is no longer a process, so a run of this check
+   * in another checkout at the same time keeps its image.
+   */
+  const info = spawnSync('hdiutil', ['info'], { encoding: 'utf8' })
+  for (const section of String(info.stdout ?? '').split(/^=+$/m)) {
+    const owner = /^image-path\s*:\s*.*\/home-full-disk-(\d+)-[^/]+\/small\.dmg\s*$/m.exec(section)?.[1]
+    const device = /^(\/dev\/disk\d+)\b/m.exec(section)?.[1]
+    if (owner === undefined || device === undefined) continue
+    let alive = true
+    try {
+      process.kill(Number(owner), 0)
+    } catch (error) {
+      alive = error.code !== 'ESRCH'
+    }
+    if (!alive) spawnSync('hdiutil', ['detach', '-force', device], { encoding: 'utf8' })
+  }
+  let live
+  let attached = false
+  try {
+    const made = spawnSync('hdiutil', ['create', '-size', '24m', '-fs', 'HFS+', '-volname', 'heddle-j183', image], { encoding: 'utf8' })
+    assert.equal(made.status, 0, `the disk image was created\n${made.stdout}${made.stderr}`)
+    fs.mkdirSync(mount, { recursive: true })
+    const mounted = spawnSync('hdiutil', ['attach', '-nobrowse', '-mountpoint', mount, image], { encoding: 'utf8' })
+    attached = mounted.status === 0
+    assert.equal(mounted.status, 0, `the disk image was attached\n${mounted.stdout}${mounted.stderr}`)
+    assertSmallDisk('after the attach')
+
+    const connect = async () => {
+      live = await startServer(serverArgs, env)
+      const cookie = String((await fetch(live.url, { redirect: 'manual' })).headers.get('set-cookie') ?? '').split(';')[0]
+      return cookie
+    }
+    let cookie = await connect()
+    /** One streamed turn, its answer in the script; the frames are read back by name. */
+    const turn = async (body, answer) => {
+      fs.writeFileSync(script, JSON.stringify({ steps: [{ text: answer }] }))
+      const response = await fetch(new URL('/api/turn', live.url), {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const text = await response.text()
+      const frames = text
+        .split('\n\n')
+        .map((block) => ({ event: /^event: (.*)$/m.exec(block)?.[1], data: /^data: (.*)$/m.exec(block)?.[1] }))
+        .filter((frame) => frame.event !== undefined)
+        .map((frame) => {
+          try {
+            return { event: frame.event, data: JSON.parse(frame.data ?? 'null') }
+          } catch {
+            return { event: frame.event, data: frame.data }
+          }
+        })
+      return { status: response.status, text, frames }
+    }
+    /** About 30 KB of text that compresses poorly, as J183's long prompts: a frame far larger than a block's slack. */
+    const long = (label) => `${label} ${randomBytes(22_000).toString('base64')}`
+    /** About 80 KB of the same, whose frame (about 60 KB) is larger than the room t5 is given. */
+    const longer = (label) => `${label} ${randomBytes(60_000).toString('base64')}`
+    const view = async (id) => {
+      const response = await fetch(new URL(`/api/sessions/${id}`, live.url), { headers: { cookie } })
+      assert.equal(response.status, 200, 'the session is served')
+      return (await response.json()).turns ?? []
+    }
+    const usersOf = (turns) => turns.filter((row) => row.kind === 'user').map((row) => String(row.text ?? '').slice(0, 24))
+
+    const t1 = await turn({ prompt: 't1 remember the word loom', folder: h.work }, 'answer one')
+    assert.equal(t1.status, 200, `t1 ran\n${t1.text}`)
+    assert.ok(t1.frames.some((frame) => frame.event === 'done') && !t1.frames.some((frame) => frame.event === 'error'), `t1 answered\n${t1.text.slice(0, 2000)}`)
+    const id = t1.frames.find((frame) => typeof frame.data?.session === 'string')?.data.session
+    assert.ok(typeof id === 'string', `t1 names its session\n${t1.text.slice(0, 2000)}`)
+    const log = transcriptFile(join(root, id))
+    assert.ok(log.startsWith(mount), `the session's log is on the small disk: ${log}`)
+    for (const [label, answer] of [['t2', 'answer two'], ['t3', 'answer three']]) {
+      const done = await turn({ session: id, prompt: long(label) }, answer)
+      assert.ok(done.status === 200 && done.frames.some((frame) => frame.event === 'done'), `${label} answered\n${done.text.slice(0, 2000)}`)
+    }
+
+    /**
+     * The disk is filled: the filler grows until the disk refuses it, in ever smaller writes, and never past the cap. A
+     * write the disk takes only in part is followed by one it refuses.
+     */
+    assertSmallDisk('before the filler')
+    const filler = join(mount, 'filler')
+    let written = 0
+    let full = false
+    const fd = fs.openSync(filler, 'w')
+    try {
+      for (const size of [1 << 20, 1 << 16, 1 << 12, 1 << 9]) {
+        const chunk = Buffer.alloc(size, 0x5a)
+        while (written + size <= FILLER_CAP_BYTES) {
+          try {
+            written += fs.writeSync(fd, chunk)
+          } catch (error) {
+            if (error.code !== 'ENOSPC') throw error
+            full = true
+            break
+          }
+        }
+      }
+    } finally {
+      fs.closeSync(fd)
+    }
+    assert.ok(full, `the filler reached ENOSPC within its ${FILLER_CAP_BYTES}-byte cap (wrote ${written} bytes)`)
+    const free = fs.statfsSync(mount)
+    assert.ok(free.bavail * free.bsize < 64 * 1024, `the disk is full: ${free.bavail * free.bsize} bytes free`)
+
+    /** t4 fails, visibly and in words, and the log keeps only whole frames. */
+    const t4 = await turn({ session: id, prompt: long('t4') }, 'answer four')
+    assert.equal(t4.status, 200, `the turn route answered t4\n${t4.text.slice(0, 2000)}`)
+    const failed = t4.frames.find((frame) => frame.event === 'error')
+    assert.ok(failed !== undefined, `t4's stream ends in an error frame the page draws, not an empty body or a done\n${t4.text.slice(0, 2000)}`)
+    assert.equal(failed.data?.message, 'the session could not be saved: no space left on device', 'and the frame says why, in words')
+    assert.equal(failed.data?.session, id, 'and names its session')
+    assert.ok(!t4.frames.some((frame) => frame.event === 'done'), 't4 is not reported as done')
+    const afterFailure = decodeTranscript(readFileSync(log))
+    assert.equal(afterFailure.torn, false, `the failed append left no partial frame behind (${readFileSync(log).length - afterFailure.readableBytes} stray bytes)`)
+    assert.ok(!usersOf(await view(id)).some((text) => text.startsWith('t4')), 'and the view does not show t4, which is not on disk')
+
+    /**
+     * t5, developer-four's case on aac6797b: a short prompt the disk still takes, and an answer it does not. A few blocks
+     * are given back, so the prompt and the model request land and the answer's frame, far larger, is refused part-way,
+     * mid-turn. The stream must end in the same error frame (Rust's closed after the model request with none), the answer
+     * that was not saved is not sent as if it were, and the prompt stays on disk with its turn ended.
+     */
+    const kept = fs.statSync(filler).size
+    fs.truncateSync(filler, Math.max(0, Math.floor(kept / 4096) * 4096 - 16 * 1024))
+    const room = fs.statfsSync(mount)
+    assert.ok(room.bavail * room.bsize >= 8 * 1024 && room.bavail * room.bsize < 40 * 1024, `t5 has a few blocks of room: ${room.bavail * room.bsize} bytes`)
+    const t5 = await turn({ session: id, prompt: 't5 a short prompt' }, longer('answer-five'))
+    assert.equal(t5.status, 200, `the turn route answered t5\n${t5.text.slice(0, 2000)}`)
+    const t5Failed = t5.frames.find((frame) => frame.event === 'error')
+    assert.ok(t5Failed !== undefined, `t5's stream ends in an error frame when its answer cannot be saved\n${t5.text.slice(0, 3000)}`)
+    assert.equal(t5Failed.data?.message, 'the session could not be saved: no space left on device', 't5\'s frame says why, in words')
+    assert.equal(t5Failed.data?.session, id)
+    assert.ok(!t5.frames.some((frame) => frame.event === 'done'), 't5 is not reported as done')
+    assert.ok(!t5.text.includes('answer-five'), 'the answer that was not saved is not sent as a saved event')
+    assert.equal(decodeTranscript(readFileSync(log)).torn, false, 'the answer\'s partial frame was cut away')
+    assert.ok(usersOf(await view(id)).some((text) => text.startsWith('t5')), 't5\'s prompt is on disk, and the view shows it')
+
+    /** Space comes back; t6 answers, lands right after the whole frames, and outlives a restart. */
+    fs.unlinkSync(filler)
+    const t6 = await turn({ session: id, prompt: 't6 after the space came back' }, 'answer six')
+    assert.ok(t6.status === 200 && t6.frames.some((frame) => frame.event === 'done') && !t6.frames.some((frame) => frame.event === 'error'), `t6 answered\n${t6.text.slice(0, 2000)}`)
+    const beforeRestart = decodeTranscript(readFileSync(log))
+    assert.equal(beforeRestart.torn, false, 'the log holds only whole frames before the restart')
+    assert.ok(beforeRestart.lines.some((line) => line.includes('t6 after the space came back')), 't6 is in the log')
+
+    live.kill()
+    live = undefined
+    await new Promise((done) => setTimeout(done, 500))
+    cookie = await connect()
+    const restarted = await view(id)
+    const users = usersOf(restarted)
+    assert.deepEqual(
+      users.map((text) => text.slice(0, 2)),
+      ['t1', 't2', 't3', 't5', 't6'],
+      `after the restart every turn on disk is there, t6 included\nsaw: ${users.join(' | ')}`,
+    )
+    assert.ok(restarted.some((row) => row.kind === 'assistant' && row.text === 'answer six'), 'and t6 keeps its answer')
+    const events = readTranscript(log)
+    const repaired = events.filter((event) => event.type === 'transcript/repaired')
+    assert.deepEqual(repaired, [], `the restart's repair dropped nothing\n${JSON.stringify(repaired)}`)
+    assert.deepEqual(events.map((event) => event.seq), events.map((_, index) => index), 'every seq is written once, in order')
+  } finally {
+    live?.kill()
+    await new Promise((done) => setTimeout(done, 300))
+    if (attached) {
+      const detached = spawnSync('hdiutil', ['detach', mount], { encoding: 'utf8' })
+      if (detached.status !== 0) spawnSync('hdiutil', ['detach', '-force', mount], { encoding: 'utf8' })
+    }
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 test('a session one process is writing refuses a second writer, so its log never holds a seq twice', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()) && (await supportsWeb()), CAPABILITY)) return
   /**
@@ -1465,6 +1679,121 @@ test('a turn cut by a server restart reads as interrupted at once, and is closed
     assert.ok(!later.some((turn) => turn.state === 'running'), `and nothing as running\n${describe(later)}`)
   } finally {
     live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test('after a crash, a session whose lock names a pid now another live process\'s, or pid 1, takes the next turn; a live holder is refused in words (#202)', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * Issue #202 by J178's steps (j178/run.sh): make sessions with the server, kill -9 it, so each lock still names the dead
+   * server; then write into one lock the pid of a live unrelated process (a sleep) and into another pid 1, the way a
+   * pid that comes round again looks, and start the server again. Measured before the fix, on both builds: the crashed
+   * one took its turn, but the other two answered "session ... is already owned by an active write handle (process N)"
+   * for as long as that process lived (pid 1: for good), and nothing said what to do.
+   *
+   * DSH's lock is a kernel flock, which dies with its holder (dsh-session-persistence-jsonl lib/index.js:692-716), so a
+   * dead holder never blocks a session. The rewritten locks are the pid-only form every build before #202 wrote, and
+   * they are dated ten minutes back, as a lock the crash left before the pid came round again. A fourth session's lock
+   * names the same sleep, written after it started: that process may be the holder, so its turn is refused, and the
+   * sentence names the process and the lock file and says how to clear it, in the stream and in the server's output.
+   */
+  const { spawn, execFileSync } = await import('node:child_process')
+  const { utimesSync } = await import('node:fs')
+  const h = harness('lock-identity')
+  const serverArgs = ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')]
+  let live
+  let sleeper
+  try {
+    let cookie = ''
+    const connect = async () => {
+      live = await startServer(serverArgs, { ...h.env, HOME: h.home })
+      const handshake = await fetch(live.url, { redirect: 'manual' })
+      cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    }
+    const webTurn = async (body) => {
+      const response = await fetch(new URL('/api/turn', live.url), {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      return { status: response.status, text: await response.text() }
+    }
+    const said = (id) =>
+      readTranscript(join(h.home, 'sessions', id))
+        .filter((event) => event.type === 'message' && event.message?.role === 'user')
+        .map((event) => event.message.content?.[0]?.text)
+    const lockOf = (id) => join(dirname(transcriptFile(join(h.home, 'sessions', id))), `${id}.lock`)
+
+    /** Four sessions, each written by the server, so it holds a lock on each. */
+    await connect()
+    const names = ['crash', 'reuse', 'root', 'held']
+    const ids = {}
+    for (const name of names) {
+      const made = await runCli(adminArgs(h, ['session', 'new', h.work, '--json']), { env: h.env, cwd: h.work })
+      assert.equal(made.code, 0, `the ${name} session was created\n${made.stdout}${made.stderr}`)
+      ids[name] = parseJson(made.stdout)?.session
+      assert.ok(typeof ids[name] === 'string', `it has an id\n${made.stdout}`)
+      const turn = await webTurn({ session: ids[name], prompt: `the ${name} session` })
+      assert.equal(turn.status, 200, `the server's turn in the ${name} session ran\n${turn.text}`)
+      assert.ok(!turn.text.includes('event: error'), `and did not fail\n${turn.text}`)
+    }
+    assert.equal(new Set(Object.values(ids)).size, names.length, 'four sessions')
+    const crashed = live.pid
+    live.kill()
+    live = undefined
+    await new Promise((done) => setTimeout(done, 300))
+    for (const name of names) {
+      const lock = lockOf(ids[name])
+      assert.ok(existsSync(lock), `the killed server left the ${name} session's lock behind`)
+      assert.equal(readFileSync(lock, 'utf8').split(/\s+/)[0], String(crashed), `and it names the dead server, process ${crashed}`)
+    }
+
+    /** The dead server's pid, come round again: a live process that is not heddle, and pid 1. */
+    sleeper = spawn('sleep', ['120'], { stdio: 'ignore' })
+    await new Promise((done, fail) => {
+      sleeper.once('spawn', done)
+      sleeper.once('error', fail)
+    })
+    const tenMinutesAgo = Date.now() / 1000 - 600
+    writeFileSync(lockOf(ids.reuse), `${sleeper.pid}\n`)
+    utimesSync(lockOf(ids.reuse), tenMinutesAgo, tenMinutesAgo)
+    const asRoot = process.getuid?.() === 0
+    if (!asRoot) {
+      writeFileSync(lockOf(ids.root), '1\n')
+      utimesSync(lockOf(ids.root), tenMinutesAgo, tenMinutesAgo)
+    }
+    /** Written after the sleep started, so the sleep may be its holder. */
+    writeFileSync(lockOf(ids.held), `${sleeper.pid}\n`)
+
+    await connect()
+    for (const name of ['crash', 'reuse', ...(asRoot ? [] : ['root'])]) {
+      const turn = await webTurn({ session: ids[name], prompt: `after the restart, ${name}` })
+      assert.equal(turn.status, 200, `the turn into the ${name} session was answered\n${turn.text}`)
+      assert.ok(!turn.text.includes('event: error'), `and accepted: the lock its dead holder left does not block it\n${turn.text}`)
+      assert.deepEqual(said(ids[name]), [`the ${name} session`, `after the restart, ${name}`], `the ${name} session's log holds the turn`)
+      assert.equal(readFileSync(lockOf(ids[name]), 'utf8').split(/\s+/)[0], String(live.pid), 'and the restarted server holds its lock')
+    }
+
+    /** The live holder: refused, and the sentence says which process, which file, and what to do. */
+    const command = process.platform === 'linux'
+      ? readFileSync(`/proc/${sleeper.pid}/comm`, 'utf8').trim()
+      : execFileSync('/bin/ps', ['-o', 'ucomm=', '-p', String(sleeper.pid)], { encoding: 'utf8', env: { LC_ALL: 'C' } }).trim()
+    const sentence =
+      `session "${ids.held}" is already owned by an active write handle (process ${sleeper.pid}, ${command}). ` +
+      `Its lock file is ${ids.held}.lock, beside the session's log; if process ${sleeper.pid} is not heddle, delete that file and try again.`
+    const refused = await webTurn({ session: ids.held, prompt: 'after the restart, held' })
+    assert.equal(refused.status, 200, `the refused turn is answered on its stream\n${refused.text}`)
+    assert.ok(refused.text.includes('event: error'), `with an error frame\n${refused.text}`)
+    assert.ok(refused.text.includes(JSON.stringify(sentence).slice(1, -1)), `whose message names the process and the lock file, and says how to clear it\nwanted: ${sentence}\n${refused.text}`)
+    assert.deepEqual(said(ids.held), ['the held session'], 'and nothing was written to the held session')
+    const line = `heddle web: the failed turn could not be recorded: ${sentence}`
+    for (let waited = 0; waited < 3_000 && !live.output().includes(line); waited += 100) await new Promise((done) => setTimeout(done, 100))
+    assert.ok(live.output().includes(line), `the server says it in its own output, one line\nwanted: ${line}\n${live.output()}`)
+  } finally {
+    live?.kill()
+    sleeper?.kill('SIGKILL')
     removeDir(h.home)
     removeDir(h.work)
   }
@@ -1846,7 +2175,7 @@ function startServer(args, env) {
         const match = /heddle web: (http:\/\/\S+)/.exec(output)
         if (match && !settled) {
           settled = true
-          resolvePromise({ url: match[1], kill: () => child.kill('SIGKILL'), output: () => output })
+          resolvePromise({ url: match[1], pid: child.pid, kill: () => child.kill('SIGKILL'), output: () => output })
         }
       }
       child.stdout.on('data', onData)
@@ -4216,6 +4545,146 @@ test("a conversation started through the turn route is titled by the session's o
     assert.equal(cliTitle, fallback, `--new --turn: the first message wrote the fallback at a word, which a failed call leaves\nsaw: ${JSON.stringify(cliTitle)}`)
   } finally {
     live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+/**
+ * A local chat endpoint that keeps **every** request body, a session's title request included, and answers each in
+ * kind: the title request with a title, a turn with a short answer. The scripted endpoint keeps no bodies, and the
+ * other doubles here refuse the title request, so neither can show what effort the title asked for.
+ */
+async function bodyKeepingChatDouble(title) {
+  const bodies = []
+  const server = createServer((request, response) => {
+    let body = ''
+    request.on('data', (chunk) => {
+      body += chunk
+    })
+    request.on('end', () => {
+      if (new URL(request.url ?? '/', 'http://x').pathname.endsWith('/models')) {
+        response.writeHead(404, { 'content-type': 'application/json' })
+        response.end(JSON.stringify({ error: 'no model list' }))
+        return
+      }
+      bodies.push(body)
+      const content = isTitleRequest(body) ? title : 'a turn answer'
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      response.write(`data: ${JSON.stringify({ choices: [{ delta: { role: 'assistant', content }, finish_reason: null }] })}\n\n`)
+      response.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`)
+      response.write('data: [DONE]\n\n')
+      response.end()
+    })
+  })
+  await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', () => resolvePromise()))
+  return {
+    baseUrl: `http://127.0.0.1:${server.address().port}/ds`,
+    bodies,
+    close: () =>
+      new Promise((resolvePromise) => {
+        server.close(() => resolvePromise())
+        server.closeAllConnections()
+      }),
+  }
+}
+
+test("a session's title request asks for its route's least reasoning level, while its turn runs at the session's", async (context) => {
+  /**
+   * #215 (found by developer-four, J168/J173). DSH's first-prompt title provider asks for the route's least supported
+   * effort, selectReasoningEffort = (model) => model.reasoning?.efforts[0]?.id (dsh-session-title-first-prompt-llm
+   * lib/index.js:41-42), laid over the call's controls (dsh-session-title-llm lib/index.js:184-190); a route that declares
+   * no levels gets none. Measured before on both builds: the title call carried the session's id, so the server's
+   * selection rule and the default fill (#157) sent it at the session's level (max for a session at Max, xhigh for an
+   * Opus session that names none) for a five-word title. Each session here is set from the page's model seat, its first
+   * prompt runs, and both bodies are read off the wire.
+   */
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  const h = harness('title-effort')
+  const generated = 'Effort ladder title'
+  const double = await bodyKeepingChatDouble(generated)
+  const levels = ['low', 'medium', 'high', 'xhigh', 'max'].map((id) => ({ id, name: id, value: id }))
+  writeFileSync(
+    h.config,
+    JSON.stringify({
+      default: 'gateway',
+      exclude: ['scripted'],
+      endpoints: [{
+        name: 'gateway', kind: 'openai-chat', baseUrl: double.baseUrl, model: 'opus', stream: true,
+        models: [{ id: 'opus', name: 'Opus', reasoning: { default: 'xhigh', levels } }, { id: 'plain', name: 'Plain' }],
+      }],
+    }),
+  )
+  const prompt = 'Please summarise the quarterly revenue figures for the northern region and compare them with last year, thanks.'
+  let live
+  try {
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const listed = async () => (await (await fetch(new URL('/api/sessions', live.url), { headers: { cookie } })).json())
+    /** One new session set from the model seat, then its first prompt; answers the bodies its turn and title sent. */
+    const firstPrompt = async (label, selection) => {
+      const folder = join(h.work, `ws-${label}`)
+      mkdirSync(folder, { recursive: true })
+      const made = await runCli(adminArgs(h, ['session', 'new', folder, '--json']), { env: h.env, cwd: h.work })
+      assert.equal(made.code, 0, `${label}: the session was created\n${made.stdout}${made.stderr}`)
+      const id = parseJson(made.stdout).session
+      const set = await fetch(new URL(`/api/sessions/${encodeURIComponent(id)}/model`, live.url), {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ endpoint: 'gateway', ...selection }),
+      })
+      assert.equal(set.status, 200, `${label}: the model seat took ${JSON.stringify(selection)}\n${await set.text()}`)
+      const from = double.bodies.length
+      const turn = await fetch(new URL('/api/turn', live.url), {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ session: id, prompt }),
+      })
+      const stream = await turn.text()
+      assert.equal(turn.status, 200, `${label}: the first turn ran\n${stream}`)
+      assert.match(stream, /a turn answer/, `${label}: the turn was answered by the turn's request`)
+      let sent = double.bodies.slice(from)
+      for (let attempt = 0; attempt < 40 && !sent.some(isTitleRequest); attempt += 1) {
+        await new Promise((done) => setTimeout(done, 250))
+        sent = double.bodies.slice(from)
+      }
+      const titleBody = sent.find(isTitleRequest)
+      const turnBody = sent.find((body) => !isTitleRequest(body))
+      assert.ok(titleBody, `${label}: the first prompt started a title request\nsent: ${sent.length} bodies`)
+      assert.ok(turnBody, `${label}: and the turn sent its own`)
+      let title
+      for (let attempt = 0; attempt < 40 && title !== generated; attempt += 1) {
+        if (attempt > 0) await new Promise((done) => setTimeout(done, 250))
+        title = (await listed()).find((meta) => meta.id === id)?.title
+      }
+      assert.equal(title, generated, `${label}: the title answer replaced the fallback\nsaw: ${JSON.stringify(title)}`)
+      const meta = (await listed()).find((one) => one.id === id)
+      return { title: JSON.parse(titleBody), turn: JSON.parse(turnBody), meta }
+    }
+
+    const atMax = await firstPrompt('max', { model: 'opus', reasoningEffort: 'max' })
+    assert.equal(atMax.turn.reasoning_effort, 'max', 'a session at Max: its turn asks for max')
+    assert.equal(atMax.title.reasoning_effort, 'low', `and its title asks for the route's least level\ntitle body effort: ${JSON.stringify(atMax.title.reasoning_effort)}`)
+    assert.equal(atMax.title.model, 'opus', 'on the turn\'s own model')
+    assert.equal(atMax.meta?.reasoningEffort, 'max', 'the session still runs at max')
+    assert.equal(atMax.meta?.model, 'opus')
+
+    const atDefault = await firstPrompt('default', { model: 'opus' })
+    assert.equal(atDefault.turn.reasoning_effort, 'xhigh', 'a session that names no level: its turn runs at the model default')
+    assert.equal(atDefault.title.reasoning_effort, 'low', `its title, at the least level\ntitle body effort: ${JSON.stringify(atDefault.title.reasoning_effort)}`)
+    assert.equal(atDefault.meta?.reasoningEffort, undefined, 'and the session still names none')
+
+    const plain = await firstPrompt('plain', { model: 'plain' })
+    assert.equal(plain.title.model, 'plain')
+    assert.equal(plain.title.reasoning_effort, undefined, 'a route that declares no levels: the title sends no effort')
+    assert.equal(plain.turn.reasoning_effort, undefined)
+  } finally {
+    live?.kill()
+    await double.close()
     removeDir(h.home)
     removeDir(h.work)
   }
