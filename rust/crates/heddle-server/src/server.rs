@@ -2544,33 +2544,29 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
         let already = request_id
             .as_deref()
             .and_then(|request| sessions.queued_by_request(&session, request));
-        let busy = state.runs().is_running(&session) || state.harness().turns.is_live(&session);
-        if already.is_some() || busy || !sessions.queued(&session).is_empty() {
-            let duplicate = already.is_some();
-            let row = match already {
-                Some(row) => row,
-                None => {
-                    let mut content = vec![json!({"type": "text", "text": prompt})];
-                    content.extend(attachments.iter().cloned());
-                    match sessions.queue_turn(&session, content, request_id) {
-                        Ok(row) => row,
-                        Err(error) => {
-                            return respond::error(
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                &error.message,
-                            );
-                        }
+        // Always into the queue, even on a free session, where the drain runs it at once (developer-twelve's review):
+        // every such send is keyed by its requestId, so a page whose answer was lost can post it again safely.
+        let duplicate = already.is_some();
+        let row = match already {
+            Some(row) => row,
+            None => {
+                let mut content = vec![json!({"type": "text", "text": prompt})];
+                content.extend(attachments.iter().cloned());
+                match sessions.queue_turn(&session, content, request_id) {
+                    Ok(row) => row,
+                    Err(error) => {
+                        return respond::error(StatusCode::INTERNAL_SERVER_ERROR, &error.message);
                     }
                 }
-            };
-            kick_queue(&state, &session);
-            let mut answer =
-                json!({"session": session, "queued": true, "id": row.id, "duplicate": duplicate});
-            if let Some(request) = row.request_id {
-                answer["requestId"] = Value::String(request);
             }
-            return respond::json(StatusCode::ACCEPTED, &answer);
+        };
+        kick_queue(&state, &session);
+        let mut answer =
+            json!({"session": session, "queued": true, "id": row.id, "duplicate": duplicate});
+        if let Some(request) = row.request_id {
+            answer["requestId"] = Value::String(request);
         }
+        return respond::json(StatusCode::ACCEPTED, &answer);
     }
 
     // Checked again here: the shutdown may have begun while the session was opened. A turn that slips past this
