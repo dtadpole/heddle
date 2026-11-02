@@ -150,6 +150,16 @@ export interface RunTurnOptions {
    * notice is in the log once, and the turn that answers it must not write it a second time.
    */
   readonly answerPending?: boolean
+  /**
+   * The turn's input is a queued row, claimed when the turn holds its session (#162): called **once**, at the point
+   * where the prompt would be written - after the slot is held and after pending steers are written, as DSH claims the
+   * next-turn row at the turn's first step. It records the row as the turn's user message (the queue's one-write claim)
+   * and answers its parts, or `undefined` when the row is gone (removed or steered meanwhile). Then, with no steer to
+   * answer either, the turn ends at once: no message written, no model request. `prompt` and `attachments` are not
+   * written when this is set. Claiming here, not before the turn waits for its slot, is what keeps a direct turn that
+   * takes the slot first from answering the row.
+   */
+  readonly claim?: () => readonly ContentPart[] | undefined
   /** A system prompt, written to the surface as its first node when the session has none. */
   readonly system?: string
   /** The model id, overriding the endpoint's default. */
@@ -245,6 +255,9 @@ export async function runTurn(ctx: Context, options: RunTurnOptions): Promise<Tu
     live?.settle()
   }
 }
+
+/** Why a claimed turn ended before its first step: its queued row was gone by the time it held the session (#162). */
+export const NOTHING_CLAIMED = 'nothing to answer: the queued message was no longer waiting'
 
 /** Why a turn the archived-session gate rejected ended, in the loop's words (`TurnResult.ended`). */
 export const ARCHIVED_BLOCKED = 'blocked: an archived session runs no model step until it is unarchived'
@@ -367,7 +380,8 @@ async function runTurnBody(
    * reminder and a teammate's mail all start their turns here.
    */
   if (archivedGate(ctx, options.session)) {
-    if (options.answerPending !== true) {
+    // A claimed turn has no prompt of its own: the gate's claim takes its queued row and drops it, as DSH's rejected step does.
+    if (options.answerPending !== true && options.claim === undefined) {
       queueTurn(ctx.session.store, options.session, [{ type: 'text', text: options.prompt }, ...(options.attachments ?? [])], options.source)
     }
     claimRejected(ctx.session.store, options.session, 'next-turn')
@@ -410,12 +424,29 @@ async function runTurnBody(
    * prompt, because a steer that a stopped turn left pending is DSH's next-step input, and DSH's boundary
    * claims next-step input before the queued prompt.
    */
-  const claimSteered = (): void => {
-    claimNextStep(ctx.session.store, options.session, (content, source) => ctx.session.userContent(options.session, content, source))
-  }
-  claimSteered()
+  const claimSteered = (): number =>
+    claimNextStep(ctx.session.store, options.session, (content, source) => ctx.session.userContent(options.session, content, source)).length
+  const steered = claimSteered()
 
-  if (options.answerPending !== true) {
+  if (options.claim !== undefined) {
+    /**
+     * A turn a person stopped while it waited for its slot claims nothing: the row stays queued, held by the Stop. A row
+     * gone by now (and no steer written above) leaves nothing to answer: the turn ends with nothing written.
+     */
+    const claimed = signal?.aborted === true ? undefined : options.claim()
+    if (claimed === undefined && steered === 0) {
+      return {
+        text: '',
+        reasoning: '',
+        toolCalls: [],
+        denials: [],
+        finishReason: signal?.aborted === true ? 'cancelled' : 'stop',
+        events: ctx.session.store.count(options.session) - started,
+        rounds: 0,
+        ended: [signal?.aborted === true ? 'stopped by the caller' : NOTHING_CLAIMED],
+      }
+    }
+  } else if (options.answerPending !== true) {
     ctx.session.userContent(
       options.session,
       [{ type: 'text', text: options.prompt }, ...(options.attachments ?? [])],
