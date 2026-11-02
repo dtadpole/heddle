@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { closeSync, mkdirSync, openSync, rmSync, writeFileSync, writeSync, type Dirent } from 'node:fs'
-import { readFile as readFileText, readdir, stat } from 'node:fs/promises'
+import { readFile as readFileBytes, readdir, stat } from 'node:fs/promises'
 import { StringDecoder } from 'node:string_decoder'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
@@ -259,14 +259,29 @@ export interface ShellEnd {
 }
 
 /**
- * `bash`'s answer for a command that ended: the combined output cut to `outputLimit`, then the stop, the wall time,
- * the sandbox's reading (a runner failure outranks a denial) or a nonzero exit, each with the sandbox facts. Shared by
- * the foreground run and the jobs row's promoting run, so a call answers the same however it was run.
+ * A finished command's stdout, then its stderr in a `[stderr]` section, as DSH's bash renders a run (`dsh-tool-bash`
+ * renderResult): when stdout has text that does not end in a newline, one is added before the marker; with no stderr,
+ * stdout alone. The jobs row's `job_output` reads mark stderr the same way. Live-testing issue #246: both builds glued
+ * the streams, so `printf out; printf err >&2` came back as `outerr` and a warning read as ordinary output. Stated
+ * differences kept: heddle cuts the combined text (`tailOutput`), keeps its error line first, and keeps its own answer
+ * for a run that printed nothing.
+ */
+export function markedStreams(stdout: string, stderr: string): string {
+  if (stderr.length === 0) return stdout
+  const separator = stdout.length > 0 && !stdout.endsWith('\n') ? '\n' : ''
+  return `${stdout}${separator}[stderr]\n${stderr}`
+}
+
+/**
+ * `bash`'s answer for a command that ended: stdout and the marked stderr (`markedStreams`) cut to `outputLimit`, then
+ * the stop, the wall time, the sandbox's reading (a runner failure outranks a denial) or a nonzero exit, each with the
+ * sandbox facts. Shared by the foreground run and the jobs row's promoting run, so a call answers the same however it
+ * was run.
  */
 export function shellResult(end: ShellEnd, launch: ShellLaunch, mode: ToolRunContext['mode'], outputLimit: number): ToolResult {
   const { stdout, stderr, code } = end
   const { confined } = launch
-  const combined = stdout + stderr
+  const combined = markedStreams(stdout, stderr)
   const trimmed = tailOutput(combined, outputLimit)
   /** The facts a reader (and the model) is told: which mode ran, and what the runner actually governed. */
   const sandboxFacts = confined === null ? { mode } : { mode, enforcement: confined.enforcement }
@@ -400,6 +415,15 @@ export function builtinTools(
       const path = String(args.path ?? '')
       if (path.length === 0) return { output: '', error: { code: 'BAD_ARGS', message: 'write_file needs a path' } }
       const target = sandbox.assertWritable(path, context.mode, context.cwd)
+      /**
+       * An existing target that is not a regular file, such as a folder, is refused and named before anything is
+       * written, as DSH's writeText probes it (`dsh-fs-local`): not Node's raw `EISDIR: … open` text (live-testing
+       * issue #237).
+       */
+      const existing = await stat(target).catch(() => undefined)
+      if (existing !== undefined && !existing.isFile()) {
+        return { output: '', error: { code: 'FS_NOT_REGULAR_FILE', message: `cannot write "${displayPath(context.cwd, path)}": not a regular file` } }
+      }
       mkdirSync(dirname(target), { recursive: true })
       const content = String(args.content ?? '')
       writeFileSync(target, content)
@@ -449,7 +473,18 @@ export function builtinTools(
       if (info === undefined) return { output: '', error: { code: 'FS_NOT_FOUND', message: `cannot read "${shown}": not found` } }
       if (!info.isFile()) return { output: '', error: { code: 'FS_NOT_REGULAR_FILE', message: `cannot read "${shown}": not a regular file` } }
       // Read without blocking the event loop, so the other reads of a parallel group run alongside this one.
-      const text = await readFileText(target, 'utf8')
+      const bytes = await readFileBytes(target)
+      /**
+       * Bytes that are not UTF-8 text are refused and the file named, as DSH's fatal decode does (`dsh-fs-local`
+       * decodeUtf8), not read with replacement characters and reported as a success (live-testing issue #234). A
+       * leading byte-order mark is kept, as Node's 'utf8' read kept it.
+       */
+      let text: string
+      try {
+        text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)
+      } catch {
+        return { output: '', error: { code: 'FS_NOT_TEXT', message: `cannot read "${shown}": invalid UTF-8 text` } }
+      }
       return { output: text, data: { path: target, bytes: text.length } }
     },
   }
@@ -489,7 +524,9 @@ export function builtinTools(
           // does, rather than failing the whole listing with a raw `ENOENT: … stat` (issue #223).
           const stats = await stat(join(target, entry.name)).catch(() => undefined)
           if (stats === undefined) return entry.isDirectory() ? `${entry.name}/` : entry.isSymbolicLink() ? entry.name : `${entry.name} (0B)`
-          return `${entry.isDirectory() ? `${entry.name}/` : entry.name}${entry.isDirectory() ? '' : ` (${stats.size}B)`}`
+          // The followed `stat` decides, as DSH's probe and the Rust build's metadata do: a link to a folder is a folder,
+          // not a file of the folder's size, which the unfollowed directory entry made it (issue #229).
+          return stats.isDirectory() ? `${entry.name}/` : `${entry.name} (${stats.size}B)`
         }),
       )
       return { output: entries.join('\n'), data: { path: target, entries: entries.length } }
