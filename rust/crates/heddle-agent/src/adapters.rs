@@ -199,6 +199,16 @@ impl SessionPort for Sessions {
         }
     }
 
+    fn node_message(&self, session: &SessionHandle, seq: u64) -> Option<Message> {
+        match self.service.node(session, seq) {
+            Ok(message) => message,
+            Err(error) => {
+                read_failed(session, "reading a surface node", error);
+                None
+            }
+        }
+    }
+
     fn folder(&self, session: &SessionHandle) -> Option<PathBuf> {
         self.service.folder(session).map(PathBuf::from)
     }

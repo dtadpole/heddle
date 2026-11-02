@@ -156,6 +156,10 @@ pub trait SessionPort: Send + Sync {
     /// The role of the message at one surface position, if it is a message.
     fn node_role(&self, session: &SessionHandle, seq: u64) -> Option<Role>;
 
+    /// The message at one surface position, if it is one: what a request derives from that node. A provider retry
+    /// adds the messages that landed during its wait to the request it sends again (#250).
+    fn node_message(&self, session: &SessionHandle, seq: u64) -> Option<Message>;
+
     /// The conversation's own folder, where instruction files are read; `None` falls back to the workspace.
     fn folder(&self, session: &SessionHandle) -> Option<PathBuf>;
 

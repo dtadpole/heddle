@@ -1996,6 +1996,9 @@ mod tests {
         fn node_role(&self, _: &SessionHandle, _: u64) -> Option<Role> {
             unreachable!()
         }
+        fn node_message(&self, _: &SessionHandle, _: u64) -> Option<crate::upstream::Message> {
+            unreachable!()
+        }
         fn folder(&self, _: &SessionHandle) -> Option<std::path::PathBuf> {
             unreachable!()
         }
