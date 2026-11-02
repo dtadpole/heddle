@@ -338,24 +338,41 @@ pub fn derive_node_message<E: Borrow<SessionEvent>>(events: &[E], seq: u64) -> O
     derive_message(&index_by_seq(events), seq)
 }
 
-/// The events a fork inherits: everything up to and including the **last** `turn/completed`.
+/// The events a fork inherits: everything up to and including the **last** `turn/completed`, and the standalone
+/// events after it until the next turn begins (issue #232).
 ///
-/// A log with no `turn/completed` comes back whole; whether that is forkable is the caller's call.
+/// DSH's `latestCompletedPrefixBoundary` is "the latest completed-turn prefix, including standalone events before the
+/// next turn begins": it walks past the last `turn/end` until a turn starts, a user message is appended or the inbox is
+/// spliced (dsh-api-session-controller). So a `/permission`, `/plan` or `/compact` made after the last turn reaches the
+/// branch, and a dangling user message (a turn that never finished) does not. A log with no `turn/completed` comes back
+/// whole; whether that is forkable is the caller's call.
 pub fn completed_prefix<E: Borrow<SessionEvent> + Clone>(events: &[E]) -> Vec<E> {
-    let mut boundary: Option<u64> = None;
-    for event in events {
-        let event = E::borrow(event);
-        if event.kind == "turn/completed" {
-            boundary = Some(event.seq);
+    let Some(boundary) = events
+        .iter()
+        .rposition(|event| E::borrow(event).kind == "turn/completed")
+    else {
+        return events.to_vec();
+    };
+    let end = events[boundary + 1..]
+        .iter()
+        .position(|event| begins_turn(E::borrow(event)))
+        .map_or(events.len(), |offset| boundary + 1 + offset);
+    events[..end].to_vec()
+}
+
+/// Whether an event begins a turn, where the fork cut's walk past the last completed turn stops: DSH's turn start,
+/// appended user message and inbox splice.
+fn begins_turn(event: &SessionEvent) -> bool {
+    match event.kind.as_str() {
+        "message" => {
+            event
+                .get("message")
+                .and_then(|message| message.get("role"))
+                .and_then(Value::as_str)
+                == Some("user")
         }
-    }
-    match boundary {
-        None => events.to_vec(),
-        Some(last) => events
-            .iter()
-            .filter(|event| E::borrow(*event).seq <= last)
-            .cloned()
-            .collect(),
+        "agent/inbox/spliced" | "model/request" | "assistant/chunk" => true,
+        _ => false,
     }
 }
 
@@ -899,6 +916,44 @@ mod tests {
         // No boundary at all: the log comes back whole, and the caller decides.
         let unfinished = vec![message(0, "user")];
         assert_eq!(completed_prefix(&unfinished).len(), 1);
+    }
+
+    /// #232: the cut walks past the last `turn/completed` over standalone events (a mode switch, a compaction) and
+    /// stops where the next turn begins: a user message, an inbox splice or a model request.
+    #[test]
+    fn the_completed_prefix_keeps_standalone_events_until_the_next_turn_begins() {
+        let events = vec![
+            message(0, "user"),
+            message(1, "assistant"),
+            event(2, "turn/completed", &[]),
+            event(3, "command/run", &[]),
+            event(4, "permission/mode", &[("mode", json!("read-only"))]),
+            event(5, "plan/mode", &[("active", json!(true))]),
+            event(6, "command/done", &[]),
+            message(7, "user"),
+            event(8, "plan/mode", &[("active", json!(false))]),
+        ];
+        let seqs =
+            |events: Vec<SessionEvent>| events.iter().map(|event| event.seq).collect::<Vec<_>>();
+        assert_eq!(seqs(completed_prefix(&events)), vec![0, 1, 2, 3, 4, 5, 6]);
+        let spliced = vec![
+            message(0, "user"),
+            event(1, "turn/completed", &[]),
+            event(2, "permission/mode", &[]),
+            event(3, "agent/inbox/spliced", &[]),
+            event(4, "plan/mode", &[]),
+        ];
+        assert_eq!(seqs(completed_prefix(&spliced)), vec![0, 1, 2]);
+        let trailing = vec![
+            message(0, "user"),
+            event(1, "turn/completed", &[]),
+            event(2, "compaction/end", &[]),
+        ];
+        assert_eq!(
+            seqs(completed_prefix(&trailing)),
+            vec![0, 1, 2],
+            "nothing begins a turn: all of it"
+        );
     }
 
     #[test]
