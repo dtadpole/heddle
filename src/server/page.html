@@ -4715,6 +4715,8 @@ const MESSAGES = Object.freeze({
     'file.sanitiserMissing': 'the sanitiser did not load, so this document is shown as its source instead',
     'composer.attachUp': '↑ up',
     'composer.attachEmpty': 'nothing to insert here',
+    'chat.turn.notSent': 'the message could not be sent: {reason}',
+    'chat.turn.dropped': 'the connection dropped while the answer was arriving ({reason}); the message itself was delivered',
     'header.thisSession': 'this session',
     'header.more': 'More actions',
     'header.download': 'Download session log',
@@ -5402,6 +5404,8 @@ const MESSAGES = Object.freeze({
     'file.sanitiserMissing': '净化器未能加载，因此此文档以源码显示',
     'composer.attachUp': '↑ 上一级',
     'composer.attachEmpty': '这里没有可插入的内容',
+    'chat.turn.notSent': '消息未能发送：{reason}',
+    'chat.turn.dropped': '回答传输时连接中断（{reason}）；消息本身已送达',
     'header.thisSession': '此会话',
     'header.more': '更多操作',
     'header.download': '下载会话日志',
@@ -12532,11 +12536,11 @@ async function sendNow(text, attachments = []) {
     })
   } catch (error) {
     if (accepted) {
-      add('denied', `the connection dropped while the answer was arriving (${(error && error.message) || error}); the message itself was delivered`)
+      add('denied', t('chat.turn.dropped', { reason: (error && error.message) || error }))
     } else {
       if (keyOfQueue(sentQueue, sentKey) === composerKey && field.value.trim() === '') field.value = text
       growComposer()
-      add('denied', `the message could not be sent: ${(error && error.message) || error}`)
+      add('denied', t('chat.turn.notSent', { reason: (error && error.message) || error }))
     }
   } finally {
     directTurnsByQueue.set(sentQueue, Math.max(0, (directTurnsByQueue.get(sentQueue) ?? 1) - 1))
@@ -12880,7 +12884,7 @@ async function pumpQueue(key = composerKey) {
           const at = queue.findIndex((entry) => entry.id === item.id)
           if (at !== -1) queue.splice(at, 1)
         }
-        add('denied', `the message could not be sent: ${(error && error.message) || error}`)
+        add('denied', t('chat.turn.notSent', { reason: (error && error.message) || error }))
       } finally {
         queueTurnOut.delete(queue)
         renderComposerState()
@@ -13020,7 +13024,7 @@ async function runTurn(text, key, attachments = [], onAccepted) {
      * not a diagnosis; the body is.
      */
     const detail = await response.text().catch(() => '')
-    throw new Error(detail.trim().replace(/\s+/g, ' ').slice(0, 300) || `the server refused it (${response.status})`)
+    throw new Error(detail.trim().replace(/\s+/g, ' ').slice(0, 300) || t('tree.note.serverRefused', { status: response.status }))
   }
   /**
    * Accepted: the message is in the log and the turn is running. DSH retires a local submission echo when the host
