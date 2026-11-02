@@ -425,6 +425,7 @@ mod tests {
                 system: None,
                 summarizer: None,
                 force: false,
+                cancel: None,
             },
         ))
         .expect("the preparation succeeds");
@@ -480,6 +481,7 @@ mod tests {
                 system: None,
                 summarizer: None,
                 force: false,
+                cancel: None,
             },
         ))
         .expect("the preparation succeeds");
@@ -610,6 +612,7 @@ mod tests {
                 summarizer: &summarizer,
                 measure: &measure_fn,
                 force: false,
+                cancel: None,
             },
         ))
         .expect("the compaction lands");

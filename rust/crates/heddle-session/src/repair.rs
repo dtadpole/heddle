@@ -82,7 +82,12 @@ fn text_of(message: &Value) -> String {
 ///
 /// heddle writes no turn-start event, so a turn is known to have begun at its first `model/request` or
 /// streamed `assistant/chunk` after the last turn end (`turn/completed` or `turn/failed`) — the markers the
-/// goal driver reads a turn in flight from. A prompt with no model call after it is not closed. A call is open
+/// goal driver reads a turn in flight from. A prompt with no model call after it is not closed, with one exception:
+/// a turn's automatic compaction, its pre-step. A `compaction/start` after a prompt that has had no turn end opens
+/// the turn too (#154): a process killed while that summary ran left the prompt unanswered with nothing saying why,
+/// and DSH, which appends `turn/start` before the pre-step, closes such a turn as interrupted. A `/compact` on its
+/// own has no prompt after the last turn end and stays as it was. The span needs no closer: a compaction is log-only
+/// until its replacement note, so a `compaction/start` with no end leaves the surface unchanged. A call is open
 /// from its `tool-call` chunk until a tool message names it; a turn end forgets the calls it leaves, as DSH's
 /// recovery does at its boundaries, so an old turn is never reopened.
 pub fn open_turn_closers(events: &[Arc<SessionEvent>], cause: CloserCause) -> Vec<SessionEvent> {
@@ -96,10 +101,13 @@ pub fn open_turn_closers(events: &[Arc<SessionEvent>], cause: CloserCause) -> Ve
     let mut requests: u64 = 0;
     let mut retries: u64 = 0;
     let mut errors: u64 = 0;
+    // A prompt was recorded since the last turn end, so a compaction now is that turn's pre-step (#154).
+    let mut prompted = false;
     for event in events {
         match event.kind.as_str() {
             "turn/completed" | "turn/failed" => {
                 open = false;
+                prompted = false;
                 pending.clear();
                 text.clear();
                 reasoning.clear();
@@ -141,10 +149,18 @@ pub fn open_turn_closers(events: &[Arc<SessionEvent>], cause: CloserCause) -> Ve
                     _ => {}
                 }
             }
+            "compaction/start" => {
+                if prompted {
+                    open = true;
+                }
+            }
             "message" => {
                 let Some(message) = event.get("message") else {
                     continue;
                 };
+                if message["role"] == "user" {
+                    prompted = true;
+                }
                 if message["role"] != "tool" {
                     continue;
                 }
@@ -414,5 +430,82 @@ mod tests {
             .chunk(json!({"type": "done", "finishReason": "tool_calls"}), 0)
             .push("turn/failed", json!({"reason": "boom"}), 0);
         assert!(interrupted_turn_closers(&log.0).is_empty());
+    }
+
+    /// #154: a server killed while a turn's automatic summary ran left the log at `compaction/start`, and nothing
+    /// closed it at the next open. The two lines are the ones `test/session-turn-closers.test.ts` pins for the
+    /// TypeScript build.
+    #[test]
+    fn a_turn_cut_while_its_automatic_compaction_ran_is_closed_and_a_compact_alone_is_not() {
+        let balanced = || {
+            let mut log = Log::new();
+            log.event("session/created")
+                .user("hi")
+                .event("model/request")
+                .chunk(json!({"type": "text-delta", "text": "hello"}), 0)
+                .push("assistant/completed", json!({"text": "hello"}), 0)
+                .push("turn/completed", json!({"rounds": 1}), 0);
+            log
+        };
+
+        let mut cut = balanced();
+        cut.user("go").push(
+            "compaction/start",
+            json!({"fromSeq": 1, "throughSeq": 4}),
+            3,
+        );
+        assert_eq!(
+            lines(&interrupted_turn_closers(&cut.0)),
+            vec![
+                r#"{"seq":8,"at":"2026-10-30T10:03:00.000Z","type":"assistant/completed","text":"","reasoning":"","rounds":0,"denials":0,"ended":["the process exited before this turn finished, so the turn was closed; unfinished tool calls have unknown outcomes"]}"#,
+                r#"{"seq":9,"at":"2026-10-30T10:03:00.000Z","type":"turn/completed","rounds":0,"reason":{"kind":"interrupted"}}"#,
+            ]
+        );
+
+        let kinds = |log: &Log| -> Vec<String> {
+            interrupted_turn_closers(&log.0)
+                .into_iter()
+                .map(|event| event.kind)
+                .collect()
+        };
+        // A compaction that landed before the kill still leaves the prompt unanswered.
+        let mut landed = balanced();
+        landed
+            .user("go")
+            .event("compaction/start")
+            .event("compaction/summary")
+            .push("context/note", json!({"origin": "compaction"}), 0)
+            .event("compaction/end")
+            .event("compaction/measured");
+        assert_eq!(
+            kinds(&landed),
+            vec!["assistant/completed", "turn/completed"]
+        );
+
+        // A model request after the compaction opens the same turn, closed once.
+        let mut requested = balanced();
+        requested
+            .user("go")
+            .event("compaction/start")
+            .event("compaction/end")
+            .event("model/request")
+            .chunk(json!({"type": "text-delta", "text": "half"}), 0);
+        let once = interrupted_turn_closers(&requested.0);
+        assert_eq!(
+            once.iter()
+                .map(|event| event.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["assistant/completed", "turn/completed"]
+        );
+        assert_eq!(once[0].get("rounds"), Some(&json!(1)));
+        assert_eq!(once[0].get("text"), Some(&json!("half")));
+
+        // A /compact after a turn end, with no prompt since, is no turn, finished or not.
+        let mut compact = balanced();
+        compact.event("compaction/start");
+        assert!(interrupted_turn_closers(&compact.0).is_empty());
+        compact.event("compaction/end");
+        assert!(interrupted_turn_closers(&compact.0).is_empty());
+        assert!(interrupted_turn_closers(&balanced().0).is_empty());
     }
 }

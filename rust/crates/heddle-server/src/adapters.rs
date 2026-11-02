@@ -103,6 +103,17 @@ fn write_failure(verb: &str, id: &str, error: heddle_session::SessionError) -> S
     }
 }
 
+/// A session the store could not create (#149, J180): DSH's `gateway/internal` beside `failed to create session:
+/// <reason>`, the reason in words and never the store's path ([`heddle_session::SessionError::create_failure`]). It was
+/// the route's `400 <absolute store path>/session-<id>.json: Permission denied (os error 13)`. A branch heddle cannot
+/// write its definition into stays #106's `session/unwritable`, and any other error is [`failure`]'s.
+fn create_failure(error: heddle_session::SessionError) -> ServiceError {
+    match error.create_failure() {
+        Some(sentence) => ServiceError::with_code(sentence, heddle_session::WRITE_FAILED_CODE),
+        None => failure(error),
+    }
+}
+
 impl SessionService for StoreSessions {
     fn record(&self, id: &str, kind: &str, fields: Value) -> Result<(), ServiceError> {
         let Some(handle) = self.service.open(id) else {
@@ -139,6 +150,7 @@ impl SessionService for StoreSessions {
     }
 
     fn start(&self, options: StartSession) -> Result<String, ServiceError> {
+        let resuming = options.resume.is_some();
         self.service
             .start(heddle_session::StartOptions {
                 resume: options.resume,
@@ -150,7 +162,14 @@ impl SessionService for StoreSessions {
                 preset: options.preset,
             })
             .map(|handle| handle.id)
-            .map_err(failure)
+            // A resume opens a session and writes nothing; only a creation's failure is one the store could not save.
+            .map_err(|error| {
+                if resuming {
+                    failure(error)
+                } else {
+                    create_failure(error)
+                }
+            })
     }
 
     fn open_at(&self, folder: &Path, options: OpenAt) -> Result<String, ServiceError> {
@@ -167,7 +186,7 @@ impl SessionService for StoreSessions {
                 },
             )
             .map(|handle| handle.id)
-            .map_err(failure)
+            .map_err(create_failure)
     }
 
     fn create_at(
@@ -191,7 +210,7 @@ impl SessionService for StoreSessions {
                 definition: created.definition.file,
                 log: created.definition.log,
             })
-            .map_err(failure)
+            .map_err(create_failure)
     }
 
     fn fork(&self, id: &str, at_seq: Option<u64>) -> ForkOutcome {
@@ -794,6 +813,100 @@ mod tests {
         // Writable again, the same rename is saved; an unknown session is still `None`, the route's 404.
         assert!(sessions.rename(&id, "A new name").unwrap().is_some());
         assert_eq!(sessions.rename("no-such-session", "x"), Ok(None));
+    }
+
+    /// #149 (J180): a session the store cannot create — the workspace's store folder at mode 000, or a store root that
+    /// cannot take a new workspace folder — is reported with DSH's `gateway/internal` and `failed to create session:
+    /// permission denied` (`rejectCreation`, dsh-api-session-controller lib/index.js:1085) for every way a session is
+    /// created: a turn with no folder (`start`), a turn or folder click with `new` (`open_at`), and New session
+    /// (`create_at`). It was `<absolute store path>/session-<id>.json: Permission denied (os error 13)`, the route's
+    /// `400`. Nothing is recorded, and root, which ignores the mode, stands the check down.
+    #[cfg(unix)]
+    #[test]
+    fn a_session_the_store_cannot_create_is_dshs_internal_failure_in_words() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &Path, mode: u32| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap()
+        };
+        let scratch = Scratch::new("create-failed");
+        let root = scratch.0.join("sessions");
+        let work = scratch.0.join("work");
+        let other = scratch.0.join("other");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let sessions = store_at(&root, None);
+        let first = sessions
+            .start(StartSession {
+                cwd: Some(work.clone()),
+                ..StartSession::default()
+            })
+            .unwrap();
+        let store_folder = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.is_dir())
+            .expect("the workspace's store folder");
+        let failed = Err(ServiceError::with_code(
+            "failed to create session: permission denied",
+            "gateway/internal",
+        ));
+        let create = |folder: &Path| {
+            [
+                (
+                    "start",
+                    sessions
+                        .start(StartSession {
+                            cwd: Some(folder.to_path_buf()),
+                            ..StartSession::default()
+                        })
+                        .map(|_| ()),
+                ),
+                (
+                    "open_at new",
+                    sessions
+                        .open_at(
+                            folder,
+                            OpenAt {
+                                fresh: true,
+                                title: None,
+                                selection: SessionSelection::default(),
+                                preset: None,
+                            },
+                        )
+                        .map(|_| ()),
+                ),
+                (
+                    "create_at",
+                    sessions.create_at(folder, None, None).map(|_| ()),
+                ),
+            ]
+        };
+
+        // J180: the workspace's store folder at mode 000.
+        mode(&store_folder, 0o000);
+        if std::fs::write(store_folder.join("probe"), "").is_ok() {
+            mode(&store_folder, 0o755);
+            eprintln!("skipped: a mode-000 folder is still writable here (root)");
+            return;
+        }
+        let answers = create(&work);
+        mode(&store_folder, 0o755);
+        for (route, answer) in answers {
+            assert_eq!(answer, failed, "{route}: a mode-000 store folder");
+        }
+
+        // A store root that cannot take the folder a new workspace's sessions go in.
+        mode(&root, 0o555);
+        let answers = create(&other);
+        mode(&root, 0o755);
+        for (route, answer) in answers {
+            assert_eq!(answer, failed, "{route}: a read-only store root");
+        }
+
+        let ids: Vec<String> = sessions.list().into_iter().map(|meta| meta.id).collect();
+        assert_eq!(ids, [first], "no session was recorded");
+        // Writable again, the same creation is saved.
+        assert!(sessions.create_at(&work, None, None).is_ok());
     }
 
     #[test]

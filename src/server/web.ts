@@ -24,7 +24,7 @@ import { createDirectory, DirectoryError, listDirectory } from './directories.ts
 import { contextBreakdownWithFallback, projectLedger, projectRows, projectSessionStats, projectTimeline } from './ledger.ts'
 import { catalogOf } from './tool-catalog.ts'
 import { inspectTool } from './tool-inspector.ts'
-import { isHtmlDocument, NOT_AN_HTML_DOCUMENT, PREVIEW_CSP, rewriteResources } from './html.ts'
+import { isHtmlDocument, NOT_AN_HTML_DOCUMENT, PREVIEW_CSP, PREVIEW_FRAME_CSP, PREVIEW_SHELL, rewriteResources } from './html.ts'
 import { renderMarkdownOffThread } from './markdown.ts'
 import { acceptedLanguages, documentLanguage, negotiateLocale, type Locale } from '../config/locale.ts'
 import { presetRoster, type PresetDefinition, type PresetResolution } from '../config/presets.ts'
@@ -40,7 +40,7 @@ import { SessionSearchQueryError, searchSessions } from '../session/search.ts'
 import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.ts'
 import { SessionFlagError } from '../session/store.ts'
 import { normalizeSessionTitle, TITLE_INVALID } from '../session/title-text.ts'
-import { flagVerb, storeWriteFailure, type SessionWriteError } from '../session/write-failure.ts'
+import { flagVerb, storeCreateFailure, storeWriteFailure, type SessionWriteError } from '../session/write-failure.ts'
 import { activitySessions, refusalSentence, rowActivity, sessionActivity, stopRowActivity } from '../session/activity.ts'
 import { handleScheduleRoute } from '../schedule/http.ts'
 import type { ScheduleService } from '../schedule/service.ts'
@@ -809,6 +809,16 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     return
   }
 
+  // Behind the existing auth door; deliberately no query parsing, workspace lookup or file read.
+  if (url.pathname === '/api/html/frame' && request.method === 'GET') {
+    respond(response, 200, 'text/html; charset=utf-8', PREVIEW_SHELL, {
+      'x-content-type-options': 'nosniff',
+      'referrer-policy': 'no-referrer',
+      'content-security-policy': PREVIEW_FRAME_CSP,
+    })
+    return
+  }
+
   /**
    * An HTML document, prepared to be shown as a page.
    *
@@ -944,7 +954,8 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
 
   if (url.pathname === '/api/endpoints' && request.method === 'GET') {
     const endpoints = ctx.model.list()
-    const described = describeEndpoints(endpoints, ctx.model.defaultEndpoint())
+    // The default selection rides along, so a composer opening a fresh session shows and sends it (DSH parity A104).
+    const described = describeEndpoints(endpoints, ctx.model.defaultEndpoint(), ctx.model.defaultSelection())
     /**
      * A provider that lists its models already knows each one's context window, and the composer's gauge needs
      * it. The declarative configuration always wins; only an endpoint that declares none asks its provider, and
@@ -1047,7 +1058,8 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    * the token and must not be a way to read the whole machine — and the path that is checked is the
    * **canonical** one, so a symlink that resolves outside a root is refused rather than followed. What
    * cannot be shown is a status rather than an empty panel: `404` for a path that is not a file, and
-   * `415` for a file that is not UTF-8 text, each with the sentence the reader produced.
+   * `415` for a file that is not UTF-8 text. Text-read permission denial is a basename-only `400`, like the folder picker (#106);
+   * unexpected filesystem I/O is a named, path-free `500` (#45, scoped Heddle policy).
    */
   if (url.pathname === '/api/file' && request.method === 'GET') {
     const workspaces = ctx.workspace
@@ -1094,9 +1106,18 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
         `${JSON.stringify({ ...reading, ...(await renderSourceOffThread(reading.path, reading.text)) }, null, 2)}\n`,
       )
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      const status = message.includes('is not a file') ? 404 : 415
-      respond(response, status, 'application/json', `${JSON.stringify({ error: message })}\n`)
+      const code = (error as { code?: unknown } | null)?.code
+      if (code === 'workspace-file/unreadable' || code === 'workspace-file/read-failed') {
+        // Scoped Heddle policy (#45), not DSH status parity; never return raw host errors.
+        const denied = code === 'workspace-file/unreadable'
+        respond(response, denied ? 400 : 500, 'application/json', `${JSON.stringify({
+          error: denied ? `cannot read "${basename(canonicalPath(wanted))}": permission denied` : 'cannot read file: I/O error', code,
+        })}\n`)
+      } else {
+        const message = error instanceof Error ? error.message : String(error)
+        const status = message.includes('is not a file') ? 404 : 415
+        respond(response, status, 'application/json', `${JSON.stringify({ error: message })}\n`)
+      }
     }
     return
   }
@@ -2055,7 +2076,11 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     const preset = newSessionPreset(ctx, named.preset)
-    /** A branch heddle cannot write is `400` with its code and the session layer's sentence (#106), not a raw `500`. */
+    /**
+     * A branch heddle cannot write is `400` with its code and the session layer's sentence (#106), not a raw `500`. A
+     * session store that cannot record the session is DSH's `gateway/internal`, `failed to create session: <reason>` in
+     * words and never the store's path (#149, `respondWriteFailure`).
+     */
     let created
     try {
       created = ctx.session.createAt(wanted, {
@@ -2063,8 +2088,13 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
         ...(preset !== undefined ? { preset } : {}),
       })
     } catch (error) {
-      if ((error as { code?: unknown }).code !== 'session/unwritable') throw error
-      respond(response, 400, 'application/json', `${JSON.stringify({ error: (error as Error).message, code: 'session/unwritable' })}\n`)
+      if ((error as { code?: unknown }).code === 'session/unwritable') {
+        respond(response, 400, 'application/json', `${JSON.stringify({ error: (error as Error).message, code: 'session/unwritable' })}\n`)
+        return
+      }
+      const failed = storeCreateFailure(error)
+      if (failed === undefined) throw error
+      respondWriteFailure(response, failed)
       return
     }
     const { handle, definition } = created
@@ -2098,7 +2128,16 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'the folder must be under a workspace root' })}\n`)
       return
     }
-    const handle = ctx.session.openAt(folder, body.new === true ? { fresh: true } : {})
+    /** A session the store cannot record is DSH's `gateway/internal` in words, never the store's path (#149). */
+    let handle: SessionHandle
+    try {
+      handle = ctx.session.openAt(folder, body.new === true ? { fresh: true } : {})
+    } catch (error) {
+      const failed = storeCreateFailure(error)
+      if (failed === undefined) throw error
+      respondWriteFailure(response, failed)
+      return
+    }
     const meta = ctx.session.list().find((entry) => entry.id === handle.id)
     respond(
       response,
@@ -2967,12 +3006,26 @@ export function unknownTurnSession(
    * the session layer's title coordinator asks the model for the title (`../session/title.ts`). A title given here would
    * read as a person's name, and no title would ever be generated.
    */
-  const handle: SessionHandle =
-    typeof body.session === 'string' && body.session.length > 0
-      ? ctx.session.start({ resume: body.session })
-      : folder !== null
-        ? ctx.session.openAt(folder, { ...(body.new === true ? { fresh: true } : {}), ...born })
-        : ctx.session.start({ cwd: process.cwd(), ...born })
+  /**
+   * A session this turn would create that the store cannot record is DSH's `gateway/internal`, `failed to create session:
+   * <reason>` in words and never the store's path (#149): it was Node's raw `500 internal error: EACCES … <absolute store
+   * path>`. A resumed session is opened, not created, so its failure is not read as one.
+   */
+  const resuming = typeof body.session === 'string' && body.session.length > 0
+  let handle: SessionHandle
+  try {
+    handle =
+      resuming && typeof body.session === 'string'
+        ? ctx.session.start({ resume: body.session })
+        : folder !== null
+          ? ctx.session.openAt(folder, { ...(body.new === true ? { fresh: true } : {}), ...born })
+          : ctx.session.start({ cwd: process.cwd(), ...born })
+  } catch (error) {
+    const failed = resuming ? undefined : storeCreateFailure(error)
+    if (failed === undefined) throw error
+    respondWriteFailure(response, failed)
+    return
+  }
   if (folder !== null) ctx.workspace?.ensureOwner(folder)
   /**
    * The same rule for a folder's existing session, which is only known once it is opened: another preset named for it
@@ -3597,7 +3650,10 @@ function respond(
   response.end(body)
 }
 
-/** `500 { error, code: 'gateway/internal' }`: a change the session store could not save (#149, `../session/write-failure.ts`). */
+/**
+ * `500 { error, code: 'gateway/internal' }`: a change the session store could not save, or a session it could not create
+ * (#149, `../session/write-failure.ts`).
+ */
 function respondWriteFailure(response: ServerResponse, failed: SessionWriteError): void {
   respond(response, 500, 'application/json', `${JSON.stringify({ error: failed.message, code: failed.code })}\n`)
 }
@@ -4193,20 +4249,19 @@ export function inlineScripts(html: string): string[] {
  *
  * Defence in depth behind the sanitizer (live issues developer-two-6 and -7). Approved by the coordinator as option (1):
  * `script-src` is strict ('self' and the sha256 of each inline script, computed from the page as served, so the policy
- * follows every page change); images, stylesheets, fonts and media may also come over `https:` only because the HTML
- * preview is a `srcdoc` frame, which inherits this policy, and a previewed document may load remote assets under its own
- * `PREVIEW_CSP`. Serving the preview at its own URL (issue #50) would let these drop `https:`. The Rust `page_policy`
- * writes the same.
+ * follows every page change). The HTML preview loads a fixed shell with its own response policy (#50), separate
+ * from this main DOM policy. Markdown images render in the main DOM and retain HTTPS; remote styles, fonts and
+ * media belong to the HTML shell policy, not this page. Rust `page_policy` agrees.
  */
 export function pagePolicy(html: string, browserEnabled = false): string {
   const hashes = inlineScripts(html).map((code) => `'sha256-${createHash('sha256').update(code, 'utf8').digest('base64')}'`)
   return [
     "default-src 'self'",
     ["script-src 'self'", ...hashes].join(' '),
-    "style-src 'self' 'unsafe-inline' https:",
+    "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob: https:",
-    "font-src 'self' data: https:",
-    "media-src 'self' https:",
+    "font-src 'self' data:",
+    "media-src 'self'",
     browserEnabled ? 'frame-src http: https:' : "frame-src 'self'",
     "object-src 'none'",
     "base-uri 'self'",
