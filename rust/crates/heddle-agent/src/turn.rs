@@ -5058,7 +5058,8 @@ pub(crate) mod tests {
         let mut options = RunTurnOptions::new(session_handle(), "scripted", "");
         options.claim = Some(counting_claim(&session, &calls, Some("QUEUED-ROW")));
         let turn = tokio::spawn(async move { run_turn(&runtime, options).await });
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // The test runtime is single-threaded: yielding lets the spawned turn run until it waits for the slot.
+        yield_until_parked().await;
         assert_eq!(
             calls.load(Ordering::SeqCst),
             0,
@@ -5130,7 +5131,8 @@ pub(crate) mod tests {
         options.claim = Some(counting_claim(&session, &calls, Some("KEPT-ROW")));
         options.cancel = Some(stop.clone());
         let turn = tokio::spawn(async move { run_turn(&runtime, options).await });
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // The test runtime is single-threaded: yielding lets the spawned turn run until it waits for the slot.
+        yield_until_parked().await;
         stop.cancel();
         holder.settle();
         let result = turn.await.unwrap().unwrap();
@@ -5142,5 +5144,186 @@ pub(crate) mod tests {
         assert_eq!(result.ended, ["stopped by the caller"]);
         assert!(model.requests.lock().unwrap().is_empty());
         assert!(!turns.is_running("s"));
+    }
+
+    /// Let every spawned task run until it waits: on the single-threaded test runtime this is a deterministic barrier,
+    /// not a timing guess.
+    async fn yield_until_parked() {
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// The real store and model service: a claimed turn queued behind a held slot claims only when the slot frees, and a
+    /// direct turn queued after it never answers the row.
+    #[tokio::test]
+    async fn a_direct_turn_behind_a_claimed_turn_never_answers_the_queued_row() {
+        let (sessions, _sessions_dir) = crate::adapters::tests::sessions_at("claim-order");
+        let handle = sessions
+            .store()
+            .create(heddle_session::CreateOptions::default())
+            .unwrap();
+        heddle_session::inbox::queue_turn(
+            sessions.store(),
+            &handle,
+            vec![ContentPart::text("QUEUED-ROW")],
+            None,
+        )
+        .unwrap();
+        let (service, _scripted) = crate::adapters::tests::scripted_service(
+            "claim-order",
+            serde_json::json!([{ "text": "answered" }]),
+        );
+        let turns = TurnRegistry::new();
+        let runtime = AgentRuntime {
+            model: Arc::new(crate::adapters::LlmModel::new(service)),
+            session: Arc::new(crate::adapters::Sessions::new(Arc::clone(&sessions))),
+            context: Arc::new(crate::adapters::tests::SessionMessages {
+                sessions: Arc::clone(&sessions),
+            }),
+            tools: registry_with(Vec::new()),
+            hooks: Arc::new(crate::ports::NoTurnHooks),
+            turns: Some(turns.clone()),
+            presets: None,
+        };
+        let holder = turns.begin(&handle.id, None);
+        let claims = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (store, claimed, count) = (
+            Arc::clone(sessions.store()),
+            handle.clone(),
+            Arc::clone(&claims),
+        );
+        let mut drained = RunTurnOptions::new(handle.clone(), "scripted", "");
+        drained.claim = Some(TurnClaim::new(move || {
+            count.fetch_add(1, Ordering::SeqCst);
+            heddle_session::inbox::claim_next_turn(&store, &claimed)
+                .map(|row| row.map(|row| row.content))
+                .map_err(|error| PortError(error.to_string()))
+        }));
+        let first = {
+            let runtime = runtime.clone();
+            tokio::spawn(async move { run_turn(&runtime, drained).await })
+        };
+        yield_until_parked().await;
+        let second = {
+            let runtime = runtime.clone();
+            let direct = RunTurnOptions::new(handle.clone(), "scripted", "DIRECT-TURN");
+            tokio::spawn(async move { run_turn(&runtime, direct).await })
+        };
+        yield_until_parked().await;
+        assert_eq!(
+            claims.load(Ordering::SeqCst),
+            0,
+            "nothing is claimed while the slot is held"
+        );
+        holder.settle();
+        let (first, second) = (
+            first.await.unwrap().unwrap(),
+            second.await.unwrap().unwrap(),
+        );
+        assert_eq!((first.rounds, second.rounds), (1, 1));
+        assert_eq!(
+            claims.load(Ordering::SeqCst),
+            1,
+            "the claim ran exactly once"
+        );
+        let events = sessions.events(&handle).unwrap();
+        let user_text = |event: &heddle_session::SessionEvent| -> Option<String> {
+            let message = event.get("message")?;
+            (event.kind == "message" && message.get("role")?.as_str()? == "user").then(|| {
+                message["content"][0]["text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+        };
+        let users: Vec<(u64, String)> = events
+            .iter()
+            .filter_map(|event| user_text(event).map(|text| (event.seq, text)))
+            .collect();
+        assert_eq!(
+            users
+                .iter()
+                .map(|(_, text)| text.as_str())
+                .collect::<Vec<_>>(),
+            ["QUEUED-ROW", "DIRECT-TURN"],
+            "the row is answered by its own turn, first, once"
+        );
+        let requests: Vec<u64> = events
+            .iter()
+            .filter(|event| event.kind == "model/request")
+            .map(|event| event.seq)
+            .collect();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests[0] > users[0].0 && requests[0] < users[1].0,
+            "the drained turn asked after its claim and before the direct turn wrote anything"
+        );
+        assert!(!turns.is_running(&handle.id));
+    }
+
+    /// A pending steer is still answered when the claimed row is gone, and no empty prompt is written beside it.
+    #[tokio::test]
+    async fn a_pending_steer_is_answered_when_the_claimed_row_is_gone() {
+        let (sessions, _sessions_dir) = crate::adapters::tests::sessions_at("claim-steer");
+        let handle = sessions
+            .store()
+            .create(heddle_session::CreateOptions::default())
+            .unwrap();
+        heddle_session::inbox::queue_steer(
+            sessions.store(),
+            &handle,
+            vec![ContentPart::text("STEER-WAITING")],
+            None,
+        )
+        .unwrap();
+        let (service, _scripted) = crate::adapters::tests::scripted_service(
+            "claim-steer",
+            serde_json::json!([{ "text": "answered" }]),
+        );
+        let runtime = AgentRuntime {
+            model: Arc::new(crate::adapters::LlmModel::new(service)),
+            session: Arc::new(crate::adapters::Sessions::new(Arc::clone(&sessions))),
+            context: Arc::new(crate::adapters::tests::SessionMessages {
+                sessions: Arc::clone(&sessions),
+            }),
+            tools: registry_with(Vec::new()),
+            hooks: Arc::new(crate::ports::NoTurnHooks),
+            turns: Some(TurnRegistry::new()),
+            presets: None,
+        };
+        let mut options = RunTurnOptions::new(handle.clone(), "scripted", "");
+        options.claim = Some(TurnClaim::new(|| Ok(None)));
+        let result = run_turn(&runtime, options).await.unwrap();
+        assert_eq!(
+            result.rounds, 1,
+            "the steer written at the turn start is answered"
+        );
+        let users: Vec<String> = sessions
+            .events(&handle)
+            .unwrap()
+            .iter()
+            .filter(|event| {
+                event.kind == "message"
+                    && event
+                        .get("message")
+                        .and_then(|message| message.get("role"))
+                        .and_then(|role| role.as_str())
+                        == Some("user")
+            })
+            .map(|event| {
+                event
+                    .get("message")
+                    .map(|message| &message["content"][0]["text"])
+                    .and_then(|text| text.as_str())
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(
+            users,
+            ["STEER-WAITING"],
+            "and no empty prompt is written beside it"
+        );
     }
 }
