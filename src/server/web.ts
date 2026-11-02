@@ -218,7 +218,45 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
   const heartbeatMs = heartbeatInterval()
 
   // The session queue's drain (#162): a prompt queued while its session was busy runs as the next turn.
-  installQueue(ctx, { maxRounds: options.maxRounds ?? DEFAULT_WEB_MAX_ROUNDS })
+  installQueue(ctx, {
+    maxRounds: options.maxRounds ?? DEFAULT_WEB_MAX_ROUNDS,
+    /** A drained turn runs on the selection a turn route would give it: the record, then the server's default (#162). */
+    select: (session) => {
+      const record = ctx.session.list().find((entry) => entry.id === session)
+      const nominated = ctx.model.defaultEndpoint()
+      const endpoint = resolveTurnEndpoint({
+        ...(record?.endpoint !== undefined ? { recorded: record.endpoint } : {}),
+        ...(options.defaultEndpoint !== undefined ? { serverDefault: options.defaultEndpoint } : {}),
+        ...(nominated !== undefined ? { serviceDefault: nominated } : {}),
+      })
+      if (endpoint === undefined || !ctx.model.names().includes(endpoint)) return undefined
+      const runEndpoint = ctx.model.endpoint(endpoint)
+      const model = record?.model
+      const effort = record?.reasoningEffort
+      const reasoningEffort = runEndpoint !== undefined && effort !== undefined && reasoningLevelFor(runEndpoint, model, effort) !== undefined ? effort : undefined
+      return { endpoint, ...(model !== undefined ? { model } : {}), ...(reasoningEffort !== undefined ? { reasoningEffort } : {}) }
+    },
+    /**
+     * A drained turn is counted as a turn the route started (developer-ten's review): the listing reads it as running,
+     * the steer route steers into it, its end sets completedAt, and its verdict goes out on the stream as a `turn` frame.
+     */
+    track: (session) => {
+      const active = running.get(session) ?? 0
+      running.set(session, active + 1)
+      if (active === 0) runningSince.set(session, Date.now())
+      const turnId = newClientId()
+      return (verdict, data) => {
+        const left = (running.get(session) ?? 1) - 1
+        if (left > 0) running.set(session, left)
+        else {
+          running.delete(session)
+          runningSince.delete(session)
+          completedAt.set(session, Date.now())
+        }
+        push({ log, subscribers }, 'turn', turnVerdict(turnId, verdict, { session, ...data }))
+      }
+    },
+  })
 
   // Every append is pushed to whoever is listening, from the one write path.
   ctx.on('session/event', (payload) => {
@@ -3096,15 +3134,8 @@ export function unknownTurnSession(
    */
   // Checked again here, after the awaits above: the shutdown may have begun while the request was read.
   if (refuseWhileClosing(response, state)) return
-  const activeTurns = state.running.get(handle.id) ?? 0
-  state.running.set(handle.id, activeTurns + 1)
-  if (activeTurns === 0) state.runningSince.set(handle.id, Date.now())
-  /**
-   * A prompt the page queued (`queue: true`) for a session that is busy, or already has prompts waiting, goes into the
-   * session's durable next-turn queue and is answered at once (#162): DSH queues it on the host, so a reload, another tab
-   * and another device see it, and the host runs it when the running turn ends. A retry with the same `requestId`
-   * answers the row it queued. On a free session it runs now, as any turn does.
-   */
+  // Above the running mark (developer-ten's review): a send that is queued and answered here starts no turn, so it
+  // must not count one, or the session would read as running forever.
   /**
    * A queued send to an archived session is refused as any turn into it is, before anything reaches its log (developer-
    * three's review); the archived gate inside the turn would otherwise splice the row into a log that runs nothing.
@@ -3132,6 +3163,15 @@ export function unknownTurnSession(
       return
     }
   }
+  const activeTurns = state.running.get(handle.id) ?? 0
+  state.running.set(handle.id, activeTurns + 1)
+  if (activeTurns === 0) state.runningSince.set(handle.id, Date.now())
+  /**
+   * A prompt the page queued (`queue: true`) for a session that is busy, or already has prompts waiting, goes into the
+   * session's durable next-turn queue and is answered at once (#162): DSH queues it on the host, so a reload, another tab
+   * and another device see it, and the host runs it when the running turn ends. A retry with the same `requestId`
+   * answers the row it queued. On a free session it runs now, as any turn does.
+   */
   /**
    * The turn's abort handle, registered before the stream opens so a stop arriving immediately after the
    * request still finds it. The `finally` below removes it either way, which is what keeps a finished

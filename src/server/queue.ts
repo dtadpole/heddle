@@ -204,12 +204,20 @@ export function holdQueue(ctx: Context, session: string): void {
 export function releaseQueue(ctx: Context, session: string): void {
   if (held.get(ctx)?.delete(session) === true) kick(ctx, session)
 }
-/** The server's round budget for a drained turn, as the turn route gives its own. */
-const budgets = new WeakMap<Context, number | undefined>()
+/** What the server gives a drained turn. */
+export interface QueueOptions {
+  /** The round budget, as the turn route gives its own. */
+  readonly maxRounds?: number
+  /** The selection a turn route would run the session on; `undefined` when none is configured. */
+  readonly select?: (session: string) => { readonly endpoint: string; readonly model?: string; readonly reasoningEffort?: string } | undefined
+  /** Count the drained turn as the route counts its own; the answer ends it with its verdict. */
+  readonly track?: (session: string) => (verdict: 'done' | 'cancelled' | 'error', data: Record<string, unknown>) => void
+}
+const settings = new WeakMap<Context, QueueOptions>()
 
-/** Install the drain for this server: how many rounds a drained turn gets. */
-export function installQueue(ctx: Context, options: { readonly maxRounds?: number } = {}): void {
-  budgets.set(ctx, options.maxRounds)
+/** Install the drain for this server. */
+export function installQueue(ctx: Context, options: QueueOptions = {}): void {
+  settings.set(ctx, options)
   waiting.set(ctx, new Set())
   held.set(ctx, new Set())
 }
@@ -246,31 +254,43 @@ function drain(ctx: Context, session: string): void {
   if (handle === null) return
   const claimed = claimNextTurn(store, handle)
   if (claimed === undefined) return
+  const options = settings.get(ctx) ?? {}
   const meta = ctx.session.list().find((one) => one.id === session)
-  const endpoint = meta?.endpoint ?? ctx.model.defaultEndpoint()
-  if (endpoint === undefined) {
+  const selection =
+    options.select?.(session) ??
+    ((meta?.endpoint ?? ctx.model.defaultEndpoint()) !== undefined
+      ? { endpoint: (meta?.endpoint ?? ctx.model.defaultEndpoint())!, ...(meta?.model !== undefined ? { model: meta.model } : {}), ...(meta?.reasoningEffort !== undefined ? { reasoningEffort: meta.reasoningEffort } : {}) }
+      : undefined)
+  if (selection === undefined) {
     ctx.logger.warn('queue: no endpoint is configured for the queued turn in session %s', session)
     return
   }
   const text = textOf(claimed.content)
   const attachments = claimed.content.filter((part) => part.type !== 'text')
-  const maxRounds = budgets.get(ctx)
+  const maxRounds = options.maxRounds
+  const end = options.track?.(session)
+  // The claim wrote the user message with it (one write); the turn answers that message instead of writing it again.
   const turn = runTurn(ctx, {
     session: handle,
-    endpoint,
+    endpoint: selection.endpoint,
     prompt: text,
+    answerPending: true,
     ...(attachments.length > 0 ? { attachments } : {}),
-    ...(meta?.model !== undefined ? { model: meta.model } : {}),
-    ...(meta?.reasoningEffort !== undefined ? { reasoningEffort: meta.reasoningEffort } : {}),
+    ...(selection.model !== undefined ? { model: selection.model } : {}),
+    ...(selection.reasoningEffort !== undefined ? { reasoningEffort: selection.reasoningEffort } : {}),
     ...(maxRounds !== undefined ? { maxRounds } : {}),
   })
   void turn
     .then(
       (result) => {
+        const ended = (result as { ended?: readonly string[] } | undefined)?.ended
+        const stopped = ended?.includes('stopped by the caller') === true
         // A turn a person stopped holds the rest (DSH's keepInbox; the stop route holds it too).
-        if ((result as { ended?: readonly string[] } | undefined)?.ended?.includes('stopped by the caller') === true) holdQueue(ctx, session)
+        if (stopped) holdQueue(ctx, session)
+        end?.(stopped ? 'cancelled' : 'done', stopped ? { message: 'stopped' } : { text: (result as { text?: string }).text ?? '' })
       },
       (error: unknown) => {
+        end?.('error', { message: error instanceof Error ? error.message : String(error) })
         /**
          * DSH's driver goes idle after an error without waking for pending input (developer-ten's review): the rest of
          * the queue waits for the person's next send instead of meeting the same failure.
