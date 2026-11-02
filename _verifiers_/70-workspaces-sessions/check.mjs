@@ -4,12 +4,13 @@
  * words in those comments, never backticks.
  */
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, realpathSync, truncateSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { test } from 'node:test'
 
-import { decodeTranscript } from '../../src/session/transcript.ts'
+import { decodeTranscript, encodeFrame } from '../../src/session/transcript.ts'
 import { chatDouble, fixtureDir, heddleCommand, httpConfig, isolatedHome, isTitleRequest, parseJson, readTranscript, refuseTitleRequest, removeDir, repoRoot, runCli, scriptedConfig, sessionsUnder, skipUnless, transcriptFile } from '../../_tools_/verify-runner/lib.mjs'
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
 
@@ -8088,6 +8089,144 @@ test('opening a session that holds long answers leaves the server answering: /he
       assert.equal(outcome.status, 200, `a follower's render answered\nsaw: ${JSON.stringify(outcome).slice(0, 300)}`)
       assert.match(String(outcome.body.html ?? ''), listed, 'and so did every follower\'s render')
     }
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test('the first content search and the team panel\'s polls over four hundred sessions leave the server answering: /healthz never waits (#257)', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  /**
+   * Issue #257: the live TS server stopped answering for about 12 s and its supervisor killed it as hung. Measured on
+   * scratch servers, the cause is the first content search in a process: it decoded every session log on the event
+   * loop, one zstd call per event frame, 12.9 s on a store the size of the live one (1,670 sessions, 0.9 M events).
+   *
+   * The store here is smaller, so the check stays short: 400 sessions of about a thousand events each, one streamed
+   * answer apiece, written as the store writes them (one zstd frame per event) beside a session the binary made, so
+   * the layout is the binary's own. Measured on main 2ebe8741, the first search held /healthz for seconds.
+   *
+   * Judged from a supervisor's seat: /healthz is probed every 100 ms from the moment the server is up while the first
+   * content search runs, and must answer every probe within 1 s; the search must still answer exactly.
+   *
+   * Hang 5 of #257 (captured) was the team panel's poll: every open tab asks /api/team for its session every 2 s, and
+   * one poll read the whole store four times. So the same server then takes four pages polling /api/team every 200 ms
+   * for three seconds, and /healthz must still answer every probe within 1 s.
+   */
+  const h = harness('search-liveness')
+  const SESSIONS = 400
+  const CHUNKS = 1_000
+  mkdirSync(h.work, { recursive: true })
+  let live
+  try {
+    const made = await runCli([...h.args, '--new', '--turn', 'the session the store is built beside'], { env: h.env, cwd: h.work })
+    assert.equal(made.code, 0, `the binary made a session\n${made.stdout}${made.stderr}`)
+    const [templateId] = sessionsUnder(join(h.home, 'sessions'))
+    const folder = dirname(transcriptFile(join(h.home, 'sessions', templateId)))
+    const template = JSON.parse(readFileSync(join(folder, `${templateId}.json`), 'utf8'))
+    const at = '2026-11-01T17:25:35.000Z'
+    const frame = (event) => encodeFrame(`${JSON.stringify(event)}\n`)
+    /** Every session's answer is the same thousand chunks, so their frames are made once. */
+    const answer = Buffer.concat([
+      frame({ seq: 2, at, type: 'model/request', endpoint: 'scripted', messages: 1, tools: [] }),
+      ...Array.from({ length: CHUNKS }, (_, index) => frame({ seq: 3 + index, at, type: 'assistant/chunk', chunk: { type: 'text-delta', text: ` word${index % 50}` } })),
+      frame({ seq: 3 + CHUNKS, at, type: 'assistant/chunk', chunk: { type: 'done', finishReason: 'stop' } }),
+      frame({ seq: 4 + CHUNKS, at, type: 'assistant/completed', text: 'x', finishReason: 'stop' }),
+      frame({ seq: 5 + CHUNKS, at, type: 'turn/completed' }),
+    ])
+    const ids = []
+    for (let index = 0; index < SESSIONS; index += 1) {
+      const id = `session-${randomUUID()}`
+      ids.push(id)
+      const prefix = Buffer.concat([
+        frame({ seq: 0, at, type: 'session/created', cwd: h.work }),
+        frame({ seq: 1, at, type: 'message', message: { role: 'user', content: [{ type: 'text', text: `please count to a thousand, lantern-${index}` }] } }),
+      ])
+      writeFileSync(join(folder, basename(transcriptFile(join(h.home, 'sessions', templateId))).replace(templateId, id)), Buffer.concat([prefix, answer]))
+      const created = new Date(Date.parse('2026-10-20T00:00:00.000Z') + index * 60_000).toISOString()
+      writeFileSync(join(folder, `${id}.json`), `${JSON.stringify({ ...template, id, created, title: `liveness ${index}`, turns: 1 }, null, 2)}\n`)
+    }
+
+    live = await startServer(['web', '--host', '127.0.0.1', '--port', '0', ...h.args], { ...h.env, HOME: h.home })
+    const origin = new URL(live.url).origin
+    const cookie = String((await fetch(live.url, { redirect: 'manual' })).headers.get('set-cookie') ?? '').split(';')[0]
+    const probes = []
+    let probing = true
+    const prober = (async () => {
+      while (probing) {
+        const started = Date.now()
+        let ok = false
+        try {
+          ok = (await fetch(origin + '/healthz', { signal: AbortSignal.timeout(3000) })).ok
+        } catch {
+          ok = false
+        }
+        probes.push({ ms: Date.now() - started, ok })
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 100))
+      }
+    })()
+    const search = async (query) => {
+      const response = await fetch(`${origin}/api/sessions/search?q=${encodeURIComponent(query)}`, { headers: { cookie }, signal: AbortSignal.timeout(120_000) })
+      return { status: response.status, body: await response.json() }
+    }
+    let found
+    let common
+    let searchMs = 0
+    /** Four pages, each polling /api/team for its own session every 200 ms, as the team panel does every 2 s. */
+    const polls = []
+    let polling = true
+    const poller = async (id) => {
+      while (polling) {
+        const started = Date.now()
+        let status = 0
+        try {
+          const response = await fetch(`${origin}/api/team?session=${encodeURIComponent(id)}`, { headers: { cookie }, signal: AbortSignal.timeout(10_000) })
+          status = response.status
+          await response.text()
+        } catch {
+          status = 0
+        }
+        polls.push({ ms: Date.now() - started, status })
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 200))
+      }
+    }
+    let searchProbes = 0
+    try {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 300))
+      const started = Date.now()
+      found = await search('lantern 7')
+      searchMs = Date.now() - started
+      common = await search('word7 word8')
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 300))
+      searchProbes = probes.length
+      const pollers = [11, 101, 201, 301].map((index) => poller(ids[index]))
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 3_000))
+      polling = false
+      await Promise.all(pollers)
+    } finally {
+      polling = false
+      probing = false
+      await prober
+    }
+
+    const slowest = Math.max(...probes.map((probe) => probe.ms))
+    const missed = probes.filter((probe) => !probe.ok || probe.ms > 1000)
+    const pollTimes = polls.map((poll) => poll.ms).sort((left, right) => left - right)
+    context.diagnostic(`first search ${searchMs} ms; ${probes.length} probes, slowest ${slowest} ms`)
+    context.diagnostic(`team polls: ${polls.length}, median ${pollTimes[Math.floor(pollTimes.length / 2)]} ms, slowest ${pollTimes.at(-1)} ms; probes while polling: ${probes.length - searchProbes}, slowest ${Math.max(0, ...probes.slice(searchProbes).map((probe) => probe.ms))} ms`)
+    assert.equal(
+      missed.length,
+      0,
+      `/healthz waited while the first content search ran (${searchMs} ms) or the team panel polled: ${missed.length} of ${probes.length} probes missed 1 s, the slowest took ${slowest} ms`,
+    )
+    assert.ok(polls.length >= 20, `the four pages polled the team route (${polls.length} polls)`)
+    assert.deepEqual([...new Set(polls.map((poll) => poll.status))], [200], 'and every poll was answered')
+    assert.equal(found.status, 200, `the search answered\n${JSON.stringify(found.body).slice(0, 300)}`)
+    assert.deepEqual(found.body, { items: [{ sessionId: ids[7], snippet: 'please count to a thousand, lantern-7' }], hasMore: false }, 'and found the one session that holds the phrase')
+    assert.equal(common.status, 200)
+    assert.equal(common.body.items.length, 20, 'a phrase every answer holds fills the page')
+    assert.equal(common.body.hasMore, true, 'and says there is more')
   } finally {
     live?.kill()
     removeDir(h.home)

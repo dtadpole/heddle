@@ -1,7 +1,16 @@
-import { readFileSync, statSync } from 'node:fs'
+import { closeSync, openSync, readFileSync, readSync, statSync } from 'node:fs'
+import { performance } from 'node:perf_hooks'
 
-import { foldSurface, indexBySeq, type SessionEvent, type SessionStore } from './store.ts'
-import { decodeTranscript } from './transcript.ts'
+import {
+  foldSurface,
+  indexBySeq,
+  quietsSurface,
+  type SessionEvent,
+  type SessionMeta,
+  type SessionStore,
+  type SurfaceState,
+} from './store.ts'
+import { decodeTranscript, frameEnd, looksCompressed, readFrames } from './transcript.ts'
 import { DIACRITICS, FOLDS, SEPARATORS } from './unicode61.ts'
 
 /**
@@ -29,10 +38,12 @@ import { DIACRITICS, FOLDS, SEPARATORS } from './unicode61.ts'
  *   at most 240 code points, its window starting a third of that before the first match.
  *
  * The choice of a **scan rather than an index** is deliberate and measured against heddle's scale: a session log is
- * read again only when its size or modification time changed, and what is kept between queries is the documents'
- * text and tokens, never the whole event log — the store's own fold is not used, so a search does not load every
- * session into it or take any session's writer lock. The cost is a directory walk and a `stat` per session per query,
- * which a 250 ms debounced sidebar search affords.
+ * read again only when its size or modification time changed, and then only from where the last read stopped, since a
+ * log is append-only frames; what is kept between queries is the documents' text and tokens, never the whole event
+ * log — the store's own fold is not used, so a search does not load every session into it or take any session's
+ * writer lock. The cost is a directory walk and a `stat` per session per query, which a 250 ms debounced sidebar
+ * search affords. The server's search does that work in slices, so it never holds the event loop for long (#257,
+ * {@link SessionSearchIndex}).
  */
 
 /** At most this many sessions in one answer (`SESSION_SEARCH_RESULT_LIMIT`, dsh-api-session-controller lib/client.js:357). */
@@ -250,26 +261,35 @@ export function searchDocuments(events: readonly SessionEvent[]): SearchDocument
   const bySeq = indexBySeq(events)
   const documents: SearchDocument[] = []
   for (const seq of nodes) {
-    const event = bySeq.get(seq)
-    if (event === undefined) continue
-    let type: SearchDocument['type']
-    let parts: string[]
-    let time: string
-    if (event.type === 'message') {
-      const role = stringField(event.message, 'role')
-      if (role !== 'user' && role !== 'assistant') continue
-      type = role === 'user' ? 'user/message' : 'assistant/message'
-      parts = messageParts(event.message)
-      time = typeof event.at === 'string' ? event.at : ''
-    } else if (event.type === 'assistant/chunk') {
-      type = 'assistant/message'
-      ;({ parts, time } = chunkRun(bySeq, seq))
-    } else continue
-    const text = joinText(parts)
-    if (text.length === 0) continue
-    documents.push({ seq, type, time, text: sanitize(text) })
+    const document = documentAt(bySeq, seq)
+    if (document !== null) documents.push(document)
   }
   return documents
+}
+
+/**
+ * The document one surface node is, or null when it is none: a `message` whose role is `user` or `assistant`, or a
+ * streamed answer's chunk run, with some text. It reads the node's event and, for a run, the chunks that follow it.
+ */
+function documentAt(bySeq: ReadonlyMap<number, SessionEvent>, seq: number): SearchDocument | null {
+  const event = bySeq.get(seq)
+  if (event === undefined) return null
+  let type: SearchDocument['type']
+  let parts: string[]
+  let time: string
+  if (event.type === 'message') {
+    const role = stringField(event.message, 'role')
+    if (role !== 'user' && role !== 'assistant') return null
+    type = role === 'user' ? 'user/message' : 'assistant/message'
+    parts = messageParts(event.message)
+    time = typeof event.at === 'string' ? event.at : ''
+  } else if (event.type === 'assistant/chunk') {
+    type = 'assistant/message'
+    ;({ parts, time } = chunkRun(bySeq, seq))
+  } else return null
+  const text = joinText(parts)
+  if (text.length === 0) return null
+  return { seq, type, time, text: sanitize(text) }
 }
 
 /** A document split once, so a query only compares tokens. */
@@ -420,10 +440,22 @@ export function rankSessions(
   sessions: Iterable<{ readonly id: string; readonly documents: readonly PreparedDocument[] }>,
   normalizedQuery: string,
 ): SessionSearchPage {
+  return runNow(rankSteps(sessions, normalizedQuery))
+}
+
+/**
+ * {@link rankSessions} as steps, pausing after each session: the order does not depend on where it paused, because
+ * the sessions' order ends with the id and a session's best document with its seq.
+ */
+function* rankSteps(
+  sessions: Iterable<{ readonly id: string; readonly documents: readonly PreparedDocument[] }>,
+  normalizedQuery: string,
+): Steps<SessionSearchPage> {
   const phrase = queryPhrase(normalizedQuery)
   if (phrase.length === 0) return { items: [], hasMore: false }
   const best: Candidate[] = []
   for (const session of sessions) {
+    yield
     let top: Candidate | undefined
     for (const document of session.documents) {
       const marked = markPhrase(document, phrase)
@@ -451,70 +483,479 @@ export function rankSessions(
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// The index over a store.
+// Work in steps: what lets a long index build share the event loop (#257).
 
 /**
- * A store's sessions, searchable: each log's prepared documents, kept until the log's size or time changes.
+ * Index work as steps. Each `yield` is a point where the work may pause; it carries nothing.
+ *
+ * The same steps run two ways: {@link runNow} runs them through at once, which is the synchronous {@link
+ * SessionSearchIndex.search}; {@link runSliced} lets the event loop run whenever a slice of work has taken
+ * {@link SEARCH_SLICE_MS}, which is what the server's route uses. One code path, so both answer the same.
+ */
+type Steps<T> = Generator<void, T, undefined>
+
+/**
+ * How long index work holds the event loop before it lets other work run.
+ *
+ * Measured (#257): the first content search after a start decoded every log on the event loop, 12.9 s on a store the
+ * size of the live one and 34-76 s on one twice that, and the supervisor kills a server that misses three 2 s health
+ * probes 5 s apart. With a pause every 20 ms the server answers its probes throughout.
+ */
+export const SEARCH_SLICE_MS = 20
+
+/** How many frames a log's read decodes between pauses: a frame is a few microseconds. */
+const FRAMES_PER_STEP = 64
+
+
+function runNow<T>(steps: Steps<T>): T {
+  for (;;) {
+    const next = steps.next()
+    if (next.done === true) return next.value
+  }
+}
+
+/** Thrown into a search whose index was stopped (the server is closing), so no build outlives its server. */
+export class SessionSearchStopped extends Error {
+  constructor() {
+    super('the session search index was stopped')
+    this.name = 'SessionSearchStopped'
+  }
+}
+
+const turn = (): Promise<void> => new Promise((resolve) => setImmediate(resolve))
+
+async function runSliced<T>(steps: Steps<T>, stopped: () => boolean): Promise<T> {
+  let slice = performance.now()
+  for (;;) {
+    const next = steps.next()
+    if (next.done === true) return next.value
+    if (performance.now() - slice < SEARCH_SLICE_MS) continue
+    await turn()
+    if (stopped()) {
+      steps.return(undefined as never)
+      throw new SessionSearchStopped()
+    }
+    slice = performance.now()
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// One log, read as it grows.
+
+/** How many bytes at each end of what was read are kept to tell an appended log from a rewritten one. */
+const MARK_BYTES = 16
+
+/**
+ * What a framed log's next read needs, so it decodes only what was appended (#257).
+ *
+ * A log is append-only frames, and the surface fold is quiet after a step's end or a replacement
+ * ({@link quietsSurface}): nothing held, no run open. So what is kept is the surface folded through the log's last
+ * quiet event, the documents of the nodes placed by then (final: a node placed there never changes, it can only be
+ * shadowed), and the events after it. The next read folds those events and the appended ones from there, and gives
+ * exactly the documents a whole read would.
+ */
+interface FollowState {
+  /** Bytes read whole, as frames: the next read starts here. */
+  readonly offset: number
+  /** Where the first frame ends, and its last bytes: a log whose head changed was rewritten. */
+  readonly headEnd: number
+  readonly headMark: Buffer
+  /** The last bytes before `offset`: a log whose last frame read is gone was cut back or rewritten. */
+  readonly lastMark: Buffer
+  /** The surface folded through the last quiet event. */
+  readonly surface: SurfaceState
+  /** The document of every node of `surface`, or null for a node that is none. */
+  readonly settled: ReadonlyMap<number, PreparedDocument | null>
+  /** The events after the last quiet event, folded again with the next read's. */
+  readonly pending: readonly SessionEvent[]
+  /** The highest seq read: the follow assumes seqs only grow, and a log where they do not is read whole instead. */
+  readonly lastSeq: number
+  /**
+   * A line that is not JSON, or a surface that does not fold: the log contributes nothing, as a whole read gives
+   * nothing, and since nothing is ever taken out of an appended log it stays so until the log is rewritten.
+   */
+  readonly broken: boolean
+}
+
+/** One log as the index keeps it: the file's identity when read, its documents, and how to read it next. */
+interface LogEntry {
+  readonly transcript: string
+  readonly size: number
+  readonly mtimeMs: number
+  readonly ino: number
+  readonly documents: readonly PreparedDocument[]
+  /** Absent for a log read whole every time it changes: plain text, a torn first frame, or seqs that do not grow. */
+  readonly follow?: FollowState
+}
+
+/** What an index read: kept so a check can see that a grown log was read from where it stopped (#257). */
+export interface SessionSearchCounts {
+  /** Builds begun over the store: the synchronous search's and the shared ones. */
+  builds: number
+  /** Frames decoded. */
+  frames: number
+  /** Logs read from their first byte. */
+  wholeReads: number
+  /** Logs read from where the last read stopped. */
+  tailReads: number
+}
+
+const EMPTY_SURFACE: SurfaceState = { nodes: [], contentGeneration: 0, replaceGeneration: 0, replacements: [] }
+
+const IRREGULAR = Symbol('irregular')
+
+function mark(bytes: Buffer, end: number): Buffer {
+  return Buffer.from(bytes.subarray(Math.max(0, end - MARK_BYTES), end))
+}
+
+function prepared(document: SearchDocument | null): PreparedDocument | null {
+  return document === null ? null : prepareDocument(document)
+}
+
+/**
+ * Read the frames of `bytes` (the log from `base` on) and carry `follow` forward over them.
+ *
+ * `IRREGULAR` when a line's seq does not grow: the fold then reads the whole log, as before this existed.
+ */
+function* extend(
+  follow: FollowState,
+  bytes: Buffer,
+  base: number,
+  counts: SessionSearchCounts,
+): Steps<{ follow: FollowState; documents: readonly PreparedDocument[] } | typeof IRREGULAR> {
+  const fresh: SessionEvent[] = []
+  let broken = follow.broken
+  let lastSeq = follow.lastSeq
+  let end = 0
+  let frames = 0
+  for (const frame of readFrames(bytes, 0)) {
+    if (!broken) {
+      for (const line of frame.lines) {
+        let record: unknown
+        try {
+          record = JSON.parse(line)
+        } catch {
+          broken = true
+          break
+        }
+        const seq = (record as { seq?: unknown } | null)?.seq
+        if (typeof seq !== 'number' || !(seq > lastSeq)) return IRREGULAR
+        lastSeq = seq
+        fresh.push(record as SessionEvent)
+      }
+    }
+    end = frame.end
+    frames += 1
+    counts.frames += 1
+    if (frames % FRAMES_PER_STEP === 0) yield
+  }
+  const read = { offset: base + end, lastMark: end > 0 ? mark(bytes, end) : follow.lastMark, lastSeq }
+  if (broken) {
+    return { follow: { ...follow, ...read, surface: EMPTY_SURFACE, settled: new Map(), pending: [], broken: true }, documents: [] }
+  }
+  const tail = follow.pending.length === 0 ? fresh : [...follow.pending, ...fresh]
+  let quiet = tail.length - 1
+  while (quiet >= 0 && !quietsSurface(tail[quiet]!)) quiet -= 1
+  let surface: SurfaceState
+  let nodes: readonly number[]
+  try {
+    surface = quiet >= 0 ? foldSurface(tail.slice(0, quiet + 1), follow.surface) : follow.surface
+    nodes = foldSurface(quiet >= 0 ? tail.slice(quiet + 1) : tail, surface).nodes
+  } catch {
+    // The fold throws at the same event however much of the log follows it: a whole read gives nothing too.
+    return { follow: { ...follow, ...read, surface: EMPTY_SURFACE, settled: new Map(), pending: [], broken: true }, documents: [] }
+  }
+  yield
+  const bySeq = indexBySeq(tail)
+  yield
+  /** A node's document: the one settled already, else made now — a pause after each, as a long answer's tokens take milliseconds. */
+  const settled = new Map<number, PreparedDocument | null>()
+  let made = false
+  const documentOf = (seq: number): PreparedDocument | null => {
+    const known = settled.has(seq) ? settled.get(seq) : follow.settled.get(seq)
+    if (known !== undefined) return known
+    made = true
+    return prepared(documentAt(bySeq, seq))
+  }
+  for (const seq of surface.nodes) {
+    settled.set(seq, documentOf(seq))
+    if (made) {
+      made = false
+      yield
+    }
+  }
+  const documents: PreparedDocument[] = []
+  for (const seq of nodes) {
+    const document = documentOf(seq)
+    if (document !== null) documents.push(document)
+    if (made) {
+      made = false
+      yield
+    }
+  }
+  return { follow: { ...follow, ...read, surface, settled, pending: tail.slice(quiet + 1), broken: false }, documents }
+}
+
+/** The bytes appended since `follow.offset`, or undefined when the log was rewritten (its marks moved) or cannot be read. */
+function appended(transcript: string, follow: FollowState, size: number): Buffer | undefined {
+  let fd: number
+  try {
+    fd = openSync(transcript, 'r')
+  } catch {
+    return undefined
+  }
+  try {
+    const holds = (at: number, expected: Buffer): boolean => {
+      if (expected.length === 0) return true
+      const found = Buffer.alloc(expected.length)
+      return readSync(fd, found, 0, expected.length, at) === expected.length && found.equals(expected)
+    }
+    if (!holds(follow.headEnd - follow.headMark.length, follow.headMark)) return undefined
+    if (!holds(follow.offset - follow.lastMark.length, follow.lastMark)) return undefined
+    const bytes = Buffer.alloc(Math.max(0, size - follow.offset))
+    let read = 0
+    while (read < bytes.length) {
+      const count = readSync(fd, bytes, read, bytes.length - read, follow.offset + read)
+      if (count === 0) break
+      read += count
+    }
+    return bytes.subarray(0, read)
+  } catch {
+    return undefined
+  } finally {
+    closeSync(fd)
+  }
+}
+
+/** A log read whole, as the index always read it before it followed logs: every frame, then the surface's documents. */
+function* wholeDocuments(bytes: Buffer, counts: SessionSearchCounts): Steps<readonly PreparedDocument[]> {
+  try {
+    let lines: readonly string[]
+    if (looksCompressed(bytes)) {
+      const read: string[] = []
+      for (const frame of readFrames(bytes, 0)) {
+        read.push(...frame.lines)
+        counts.frames += 1
+        if (counts.frames % FRAMES_PER_STEP === 0) yield
+      }
+      lines = read
+    } else lines = decodeTranscript(bytes).lines
+    const events = lines.map((line) => JSON.parse(line) as SessionEvent)
+    yield
+    const documents: PreparedDocument[] = []
+    for (const document of searchDocuments(events)) {
+      documents.push(prepareDocument(document))
+      yield
+    }
+    return documents
+  } catch {
+    // A log that does not parse is not searchable, and must not cost the other sessions their answer.
+    return []
+  }
+}
+
+/**
+ * One log's entry, brought up to date: the same entry when the file has not changed, a read of what was appended when
+ * it only grew, else a read of the whole log. `undefined` when the file cannot be looked at (the search answers no
+ * documents for it, as before).
+ */
+function* readLog(previous: LogEntry | undefined, transcript: string, counts: SessionSearchCounts): Steps<LogEntry | undefined> {
+  let identity: { transcript: string; size: number; mtimeMs: number; ino: number }
+  try {
+    const stats = statSync(transcript)
+    identity = { transcript, size: stats.size, mtimeMs: stats.mtimeMs, ino: stats.ino }
+  } catch {
+    return undefined
+  }
+  const same = previous !== undefined && previous.transcript === transcript && previous.ino === identity.ino
+  if (same && previous.size === identity.size && previous.mtimeMs === identity.mtimeMs) return previous
+  const follow = same ? previous.follow : undefined
+  if (follow !== undefined && identity.size >= follow.offset) {
+    const bytes = appended(transcript, follow, identity.size)
+    if (bytes !== undefined) {
+      counts.tailReads += 1
+      const next = yield* extend(follow, bytes, follow.offset, counts)
+      if (next !== IRREGULAR) return { ...identity, documents: next.documents, follow: next.follow }
+    }
+  }
+  counts.wholeReads += 1
+  let bytes: Buffer
+  try {
+    bytes = readFileSync(transcript)
+  } catch {
+    return { ...identity, documents: [] }
+  }
+  const headEnd = looksCompressed(bytes) ? frameEnd(bytes, 0) : undefined
+  if (headEnd !== undefined) {
+    const start: FollowState = {
+      offset: 0,
+      headEnd,
+      headMark: mark(bytes, headEnd),
+      lastMark: Buffer.alloc(0),
+      surface: EMPTY_SURFACE,
+      settled: new Map(),
+      pending: [],
+      lastSeq: -Infinity,
+      broken: false,
+    }
+    const read = yield* extend(start, bytes, 0, counts)
+    if (read !== IRREGULAR) return { ...identity, documents: read.documents, follow: read.follow }
+  }
+  return { ...identity, documents: yield* wholeDocuments(bytes, counts) }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The index over a store.
+
+/** One searchable session of a build: its listed meta and its documents. */
+interface Indexed {
+  readonly id: string
+  readonly meta: SessionMeta
+  readonly documents: readonly PreparedDocument[]
+}
+
+/**
+ * A store's sessions, searchable: each log's prepared documents, kept between queries and brought up to date by
+ * reading only what was appended.
  *
  * The log is read straight from its file and decoded on its own, so a search neither fills the store's fold with every
  * session nor repairs or locks anything: a torn tail is simply not read, as every reader leaves it to the writer.
+ *
+ * **Off the event loop's back** (#257). The first search in a process reads every log, which took 12.9 s on a store
+ * the size of the live one, all of it on the event loop: the supervisor killed the server as hung. So the server's
+ * search ({@link searchAsync}) does the same work in slices of {@link SEARCH_SLICE_MS}, pausing between frames of a
+ * long log as well as between logs, and between sessions while it ranks; a grown log is read from where the last read
+ * stopped; and the reads are **one shared build**: a search that arrives while one is under way waits for the build
+ * after it, which every search arriving meanwhile shares, because the build under way may already have passed a log
+ * written since. Searches that arrive together share one build. The server starts a build soon after it starts
+ * ({@link warm}), so the first person to search does not wait for the first read of every log.
  */
 export class SessionSearchIndex {
-  private readonly cache = new Map<string, { readonly key: string; readonly documents: readonly PreparedDocument[] }>()
+  private readonly logs = new Map<string, LogEntry>()
   private readonly store: SessionStore
+  /** The build under way or about to begin, and whether it has begun reading. */
+  private build: { readonly corpus: Promise<readonly Indexed[]>; begun: boolean } | undefined
+  /** The build after it, which the searches that arrived during it share. */
+  private next: Promise<readonly Indexed[]> | undefined
+  /** Bumped by {@link stop}: a build or ranking begun before it throws {@link SessionSearchStopped} at its next pause. */
+  private generation = 0
+  /** What the index has read, for a check. */
+  readonly counts: SessionSearchCounts = { builds: 0, frames: 0, wholeReads: 0, tailReads: 0 }
 
   constructor(store: SessionStore) {
     this.store = store
   }
 
-  /** DSH's `session.search`: the query validated with DSH's sentences, then the ranked page. */
+  /** DSH's `session.search`: the query validated with DSH's sentences, then the ranked page. Synchronous: it reads in one go. */
   search(query: unknown): SessionSearchPage {
     const normalized = normalizeSearchQuery(query)
-    const corpus: { id: string; documents: readonly PreparedDocument[] }[] = []
+    this.counts.builds += 1
+    return runNow(rankSteps(runNow(this.buildSteps()), normalized))
+  }
+
+  /** The same answer as {@link search}, read and ranked in slices that let the event loop run between them (#257). */
+  async searchAsync(query: unknown): Promise<SessionSearchPage> {
+    const normalized = normalizeSearchQuery(query)
+    const corpus = await this.refresh()
+    const generation = this.generation
+    return runSliced(rankSteps(corpus, normalized), () => this.generation !== generation)
+  }
+
+  /** Bring the index up to date in the background; the server calls it soon after it starts. Never rejects. */
+  async warm(): Promise<void> {
+    await this.refresh().catch(() => undefined)
+  }
+
+  /** The documents the index holds for a session, as of the last build that read it; undefined before one did. */
+  documents(id: string): readonly PreparedDocument[] | undefined {
+    return this.logs.get(id)?.documents
+  }
+
+  /** Stop the build under way, at its next pause, and any build queued after it: the server is closing. */
+  stop(): void {
+    this.generation += 1
+  }
+
+  /** The corpus as of a build that began after this call, or that began with it. */
+  private refresh(): Promise<readonly Indexed[]> {
+    const build = this.build
+    if (build === undefined || !build.begun) return (this.build ??= this.begin()).corpus
+    const generation = this.generation
+    this.next ??= build.corpus
+      .catch(() => undefined)
+      .then(() => {
+        this.next = undefined
+        if (this.generation !== generation) throw new SessionSearchStopped()
+        return this.refresh()
+      })
+    return this.next
+  }
+
+  private begin(): { readonly corpus: Promise<readonly Indexed[]>; begun: boolean } {
+    const generation = this.generation
+    const stopped = (): boolean => this.generation !== generation
+    const build: { corpus: Promise<readonly Indexed[]>; begun: boolean } = { corpus: Promise.resolve([]), begun: false }
+    build.corpus = (async () => {
+      try {
+        /** One turn of the loop first, so the searches that arrive with this one share it. */
+        await turn()
+        if (stopped()) throw new SessionSearchStopped()
+        build.begun = true
+        this.counts.builds += 1
+        return await runSliced(this.buildSteps(), stopped)
+      } finally {
+        if (this.build === build) this.build = undefined
+      }
+    })()
+    return build
+  }
+
+  /** Every listed session with a `cwd`, its log brought up to date. */
+  private *buildSteps(): Steps<readonly Indexed[]> {
+    const corpus: Indexed[] = []
     const seen = new Set<string>()
-    for (const meta of this.store.list()) {
+    const metas = this.store.list()
+    yield
+    for (const meta of metas) {
       /** DSH searches the visible sessions only: those whose header carries a `cwd` (lib/index.js:2018). */
       if (typeof meta.cwd !== 'string' || meta.cwd.length === 0) continue
       const handle = this.store.open(meta.id)
       if (handle === null) continue
       seen.add(meta.id)
-      corpus.push({ id: meta.id, documents: this.documentsOf(meta.id, handle.transcript) })
+      const before = this.logs.get(meta.id)
+      const after = yield* readLog(before, handle.transcript, this.counts)
+      /** A search that ran while this one paused may have read the log since: its entry is the newer, and stays. */
+      const current = this.logs.get(meta.id)
+      if (current === before) {
+        if (after === undefined) this.logs.delete(meta.id)
+        else this.logs.set(meta.id, after)
+      }
+      corpus.push({ id: meta.id, meta, documents: (current === before ? after : current)?.documents ?? [] })
+      yield
     }
-    for (const id of this.cache.keys()) if (!seen.has(id)) this.cache.delete(id)
-    return rankSessions(corpus, normalized)
-  }
-
-  private documentsOf(id: string, transcript: string): readonly PreparedDocument[] {
-    let key: string
-    try {
-      const stats = statSync(transcript)
-      key = `${transcript}\0${stats.size}\0${stats.mtimeMs}`
-    } catch {
-      return []
-    }
-    const cached = this.cache.get(id)
-    if (cached !== undefined && cached.key === key) return cached.documents
-    let documents: readonly PreparedDocument[] = []
-    try {
-      const events = decodeTranscript(readFileSync(transcript)).lines.map((line) => JSON.parse(line) as SessionEvent)
-      documents = searchDocuments(events).map(prepareDocument)
-    } catch {
-      // A log that does not parse is not searchable, and must not cost the other sessions their answer.
-      documents = []
-    }
-    this.cache.set(id, { key, documents })
-    return documents
+    for (const id of this.logs.keys()) if (!seen.has(id)) this.logs.delete(id)
+    return corpus
   }
 }
 
 const indexes = new WeakMap<SessionStore, SessionSearchIndex>()
 
-/** Search a store through its one index, so a server's repeated queries reuse what earlier ones read. */
-export function searchSessions(store: SessionStore, query: unknown): SessionSearchPage {
+/** A store's one search index, so a server's repeated queries reuse what earlier ones read. */
+export function sessionSearchIndex(store: SessionStore): SessionSearchIndex {
   let index = indexes.get(store)
   if (index === undefined) {
     index = new SessionSearchIndex(store)
     indexes.set(store, index)
   }
-  return index.search(query)
+  return index
+}
+
+/** Search a store through its one index, in one go. */
+export function searchSessions(store: SessionStore, query: unknown): SessionSearchPage {
+  return sessionSearchIndex(store).search(query)
+}
+
+/** Search a store through its one index without holding the event loop: the server's route (#257). */
+export function searchSessionsAsync(store: SessionStore, query: unknown): Promise<SessionSearchPage> {
+  return sessionSearchIndex(store).searchAsync(query)
 }

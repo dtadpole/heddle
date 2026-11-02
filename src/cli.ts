@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { existsSync } from 'node:fs'
+import { performance } from 'node:perf_hooks'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -486,6 +487,9 @@ function hasProfile(args: Args): boolean {
   )
 }
 
+/** How long a startup sweep holds the event loop before it lets the listener answer (#257). */
+const SWEEP_SLICE_MS = 20
+
 /**
  * The commands that answer without running a model.
  *
@@ -537,12 +541,23 @@ async function runWeb(args: Args): Promise<void> {
      * and left out (`SessionStore.loads`), because these sweeps run after the listener is up and before the login line:
      * one throw here used to unwind this function into `app.dispose()`, leaving a listener with every plugin gone and
      * no link printed (#130).
+     *
+     * A sweep lets the event loop run every {@link SWEEP_SLICE_MS} (#257): it decodes every log, which held the loop
+     * for 10 s on a store the size of the live one and 20-35 s on one twice that, so the listener that is already up
+     * answered no health probe until the sweeps were done.
      */
-    const sweepHandles = () =>
-      app.ctx.session
-        .list()
-        .map((meta) => app.ctx.session.store.open(meta.id))
-        .filter((handle): handle is NonNullable<typeof handle> => handle !== null && app.ctx.session.store.loads(handle))
+    const sweepHandles = async () => {
+      const handles: NonNullable<ReturnType<typeof app.ctx.session.store.open>>[] = []
+      let slice = performance.now()
+      for (const meta of app.ctx.session.list()) {
+        const handle = app.ctx.session.store.open(meta.id)
+        if (handle !== null && app.ctx.session.store.loads(handle)) handles.push(handle)
+        if (performance.now() - slice < SWEEP_SLICE_MS) continue
+        await new Promise((resolvePromise) => setImmediate(resolvePromise))
+        slice = performance.now()
+      }
+      return handles
+    }
     /**
      * A restarted harness picks up the goals it finds still active.
      *
@@ -552,7 +567,7 @@ async function runWeb(args: Args): Promise<void> {
      * the startup edge that asks it.
      */
     if (app.ctx.goalDriver !== undefined) {
-      const handles = sweepHandles()
+      const handles = await sweepHandles()
       const resumed = await app.ctx.goalDriver.resumeAtStart(handles)
       if (resumed.requested > 0) process.stdout.write(`heddle web: resuming ${resumed.requested} active goal(s)\n`)
     }
@@ -562,7 +577,7 @@ async function runWeb(args: Args): Promise<void> {
      * turns for teams it is not working on.
      */
     if (app.ctx.team !== undefined) {
-      const handles = sweepHandles()
+      const handles = await sweepHandles()
       const recovered = await app.ctx.team.recoverAll(handles)
       if (recovered.recovered > 0 || recovered.failed > 0) {
         process.stdout.write(`heddle web: recovered ${recovered.recovered} team(s) (${recovered.settled} settled, ${recovered.delivered} delivered${recovered.failed > 0 ? `, ${recovered.failed} failed` : ''})\n`)
@@ -574,7 +589,7 @@ async function runWeb(args: Args): Promise<void> {
      * reason as the sweeps above; the parents' turns are not awaited here.
      */
     if (app.ctx.get('subagents') !== undefined) {
-      const reported = app.ctx.subagents.reportInterrupted(sweepHandles())
+      const reported = app.ctx.subagents.reportInterrupted(await sweepHandles())
       if (reported > 0) process.stdout.write(`heddle web: reported ${reported} interrupted subagent(s) to their parent(s)\n`)
     }
     /** Reminders that came due are delivered by the server only, after the sweeps above (DSH's dsh-schedule). */

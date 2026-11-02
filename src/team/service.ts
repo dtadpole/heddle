@@ -129,7 +129,7 @@ export class TeamService {
 
   /** The Lead session a caller belongs to: itself when it is a Lead, its team's Lead when it is a teammate. */
   leadOf(caller: SessionHandle): SessionHandle {
-    const meta = this.deps.store.list().find((one) => one.id === caller.id)
+    const meta = this.deps.store.metaById(caller.id)
     if (meta?.teamId === undefined) return caller
     const lead = this.deps.store.open(meta.teamId)
     if (lead === null) throw new TeamError(`team session '${meta.teamId}' is missing`, 'TEAM_INVALID_EVENT')
@@ -404,7 +404,7 @@ export class TeamService {
   }
 
   private meta(id: SessionId): SessionMeta | undefined {
-    return this.deps.store.list().find((one) => one.id === id)
+    return this.deps.store.metaById(id)
   }
 
   private isRunning(id: SessionId): boolean {

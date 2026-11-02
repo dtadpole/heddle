@@ -363,7 +363,7 @@ export class GoalService extends Service {
 
   /** The session's metadata record, which says whether it is a delegated (subagent or teammate) session. */
   sessionMeta(handle: SessionHandle): SessionMeta | undefined {
-    return this.store.list().find((meta) => meta.id === handle.id)
+    return this.store.metaById(handle.id)
   }
 
   /** Remove process-local continuation authority without changing phase or revision. */

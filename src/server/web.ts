@@ -2,6 +2,7 @@ import { contextWindowFromModelList } from '../llm/model-info.ts'
 import { createHash } from 'node:crypto'
 import { readFileSync, statSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { performance } from 'node:perf_hooks'
 import { networkInterfaces } from 'node:os'
 import { basename, dirname, extname, join } from 'node:path'
 
@@ -36,7 +37,7 @@ import { canonicalPath, isUnder } from '../paths.ts'
 import { MissingFolderError, readSessionDefinition, updateSessionDefinition } from '../session/definition.ts'
 import { permissionTransition } from '../sandbox/service.ts'
 import { readFileText, tree } from '../session/tree.ts'
-import { SessionSearchQueryError, searchSessions } from '../session/search.ts'
+import { SessionSearchQueryError, searchSessionsAsync, sessionSearchIndex, type SessionSearchIndex } from '../session/search.ts'
 import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.ts'
 import { SessionFlagError } from '../session/store.ts'
 import { normalizeSessionTitle, TITLE_INVALID } from '../session/title-text.ts'
@@ -265,7 +266,7 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
     const resolved = next()
     const id = resolved.sessionId
     if (id === undefined) return resolved
-    const meta = ctx.session.list().find((entry) => entry.id === id)
+    const meta = ctx.session.meta(id)
     const selection = sessionRequestSelection(meta)
     if (selection.endpoint === undefined || !ctx.model.names().includes(selection.endpoint)) return resolved
     const configured = ctx.model.endpoint(selection.endpoint)
@@ -305,7 +306,18 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
     }
   })
 
+  /**
+   * The requests being handled, by when they began, so a slow-loop line can say what was in flight (#257). A request
+   * that ends is kept until the watch's next tick, because one that held the loop ends before the watch can run.
+   */
+  const inFlight = new Map<ServerResponse, { readonly route: string; readonly since: number; closed?: number }>()
+
   const server: Server = createServer((request, response) => {
+    const entry: { readonly route: string; readonly since: number; closed?: number } = { route: requestRoute(request), since: performance.now() }
+    inFlight.set(response, entry)
+    response.once('close', () => {
+      entry.closed = performance.now()
+    })
     /**
      * A request handler that throws must not take the server with it.
      *
@@ -370,10 +382,44 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
   }, heartbeatMs)
   heartbeat.unref()
 
+  /**
+   * **The slow-loop line** (#257). A server whose event loop stood still for {@link SLOW_LOOP_MS} or more says so on
+   * standard error, in words, with the requests that were in flight: the hang that the supervisor killed left no line
+   * at all, so nobody could say what had run. A timer that fires late by that much is the measure; unref'd, so it never
+   * keeps a process alive.
+   */
+  let lastTick = performance.now()
+  const loopWatch = setInterval(() => {
+    const now = performance.now()
+    const late = now - lastTick - LOOP_WATCH_MS
+    if (late >= SLOW_LOOP_MS) {
+      /** What was open at any moment since the last tick: still open, or ended after it. */
+      const open = [...inFlight.values()].filter((entry) => entry.closed === undefined || entry.closed > lastTick)
+      process.stderr.write(`${slowLoopLine(late, now, open)}\n`)
+    }
+    for (const [response, entry] of inFlight) if (entry.closed !== undefined) inFlight.delete(response)
+    lastTick = now
+  }, LOOP_WATCH_MS)
+  loopWatch.unref()
+
   await new Promise<void>((resolvePromise, reject) => {
     server.once('error', reject)
     server.listen(port, host, () => resolvePromise())
   })
+
+  /**
+   * The content search's first read of every log begins soon after the start, in the background and in slices (#257),
+   * so the first person to search does not wait for it.
+   */
+  const searchIndex = (): SessionSearchIndex | undefined => {
+    try {
+      return sessionSearchIndex(ctx.session.store)
+    } catch {
+      return undefined // a server booted without the session service has nothing to search
+    }
+  }
+  const warmSearch = setTimeout(() => void searchIndex()?.warm(), SEARCH_WARM_DELAY_MS)
+  warmSearch.unref()
 
   const address = server.address()
   const boundPort = typeof address === 'object' && address !== null ? address.port : port
@@ -427,6 +473,10 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
   /** End the subscribers, stop accepting and destroy the sockets that remain (see `close` above). */
   function closeNow(resolvePromise: () => void): void {
     clearInterval(heartbeat)
+    clearInterval(loopWatch)
+    clearTimeout(warmSearch)
+    /** A search build under way would hold the process after its server is gone; it stops at its next pause. */
+    searchIndex()?.stop()
     detachApprovals?.()
     for (const client of subscribers) {
       try {
@@ -444,6 +494,43 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
 
 /** How long a shutdown waits for stopped turns to settle: DSH's 3 s kill grace plus room to write the results. */
 const SHUTDOWN_GRACE_MS = 5_000
+
+/**
+ * An event-loop stall this long is named on standard error (#257). The supervisor kills a server that misses three 2 s
+ * health probes 5 s apart, so a 2 s stall is the first one that can cost a probe.
+ */
+export const SLOW_LOOP_MS = 2_000
+
+/** How often the slow-loop watch ticks: a stall is how late a tick comes, which falls short of it by at most this. */
+const LOOP_WATCH_MS = 200
+
+/** How long after the start the content search begins its first read of every log, in the background (#257). */
+const SEARCH_WARM_DELAY_MS = 2_000
+
+/** A request's method and path, without its query: what a slow-loop line names, and never what a person typed. */
+function requestRoute(request: IncomingMessage): string {
+  const path = (request.url ?? '/').split('?')[0] ?? '/'
+  return `${request.method ?? 'GET'} ${path}`
+}
+
+/**
+ * The slow-loop line: how long the event loop stood still, and the requests in flight then, newest first, each with how
+ * long it has been open or how long it took when it ended during the stall. The page's event stream is always open, so
+ * it is left out; at most three are named.
+ */
+export function slowLoopLine(
+  lateMs: number,
+  now: number,
+  inFlight: Iterable<{ readonly route: string; readonly since: number; readonly closed?: number }>,
+): string {
+  const routes = [...inFlight]
+    .filter((entry) => entry.route !== 'GET /api/events')
+    .sort((left, right) => right.since - left.since)
+    .slice(0, 3)
+    .map((entry) => `${entry.route} (${entry.closed === undefined ? 'open' : 'ended after'} ${(((entry.closed ?? now) - entry.since) / 1000).toFixed(1)} s)`)
+  const seconds = (lateMs / 1000).toFixed(1)
+  return `heddle web: the event loop stood still for ${seconds} s; ${routes.length === 0 ? 'no request was in flight' : `in flight: ${routes.join(', ')}`}`
+}
 
 interface RequestState {
   /** Whether the operator enabled Browser framing and the page's Browser tab (`HEDDLE_WEB_BROWSER=1`; D-068, #86). */
@@ -901,7 +988,11 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    */
   if (url.pathname === '/api/sessions/search' && request.method === 'GET') {
     try {
-      const page = searchSessions(ctx.session.store, url.searchParams.get('q') ?? '')
+      /**
+       * Read and ranked in slices that let the event loop run (#257): the first search after a start reads every log,
+       * which held this loop for 12.9 s on a store the size of the live one, and the supervisor killed the server.
+       */
+      const page = await searchSessionsAsync(ctx.session.store, url.searchParams.get('q') ?? '')
       respond(response, 200, 'application/json', `${JSON.stringify(page, null, 2)}\n`)
     } catch (error) {
       const refused = error instanceof SessionSearchQueryError
@@ -1687,7 +1778,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     }
     const events = ctx.session.events(handle)
     const body = events.map((event) => JSON.stringify(event)).join('\n') + '\n'
-    const meta = ctx.session.list().find((entry) => entry.id === id)
+    const meta = ctx.session.meta(id)
     const name = logFileName(meta?.title, id)
     response.writeHead(200, {
       'content-type': 'application/x-ndjson; charset=utf-8',
@@ -2106,7 +2197,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     const handle = ctx.session.openAt(folder, body.new === true ? { fresh: true } : {})
-    const meta = ctx.session.list().find((entry) => entry.id === handle.id)
+    const meta = ctx.session.meta(handle.id)
     respond(
       response,
       200,
@@ -2194,7 +2285,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     /** The session's own record, which is where a switch from the panel was written. */
-    const meta = ctx.session.list().find((entry) => entry.id === id)
+    const meta = ctx.session.meta(id)
     /** The statistics read the same events as the turns, before any await lets the log move on. */
     const stats = (() => {
       const projected = projectSessionStats(events)
@@ -2956,7 +3047,7 @@ export function unknownTurnSession(
   }
   if (typeof body.session === 'string' && body.session.length > 0) {
     const resumeId = body.session
-    const resumed = ctx.session.list().find((entry) => entry.id === resumeId)
+    const resumed = ctx.session.meta(resumeId)
     const refusal = subagentTurnRefusal(resumed)
     if (refusal !== null) {
       respond(response, refusal.status, 'application/json', `${JSON.stringify(refusal.body)}\n`)
@@ -2986,7 +3077,7 @@ export function unknownTurnSession(
    * is refused rather than silently ignored or applied. A session that recorded none takes the named one, but only
    * once the endpoint checks below have passed, so a refused turn records nothing.
    */
-  const recordedPreset = ctx.session.list().find((entry) => entry.id === handle.id)?.preset
+  const recordedPreset = ctx.session.meta(handle.id)?.preset
   if (namedPreset.preset !== undefined && recordedPreset !== undefined && recordedPreset !== namedPreset.preset) {
     respond(response, 409, 'application/json', presetFixedBody(recordedPreset))
     return
@@ -2997,7 +3088,7 @@ export function unknownTurnSession(
    * must stay switched — a reload sends the session id without the choice, and reading the server's default
    * first would make the switch a per-request illusion.
    */
-  const record = ctx.session.list().find((entry) => entry.id === handle.id)
+  const record = ctx.session.meta(handle.id)
   const nominated = ctx.model.defaultEndpoint()
   const endpoint = resolveTurnEndpoint({
     ...(requested !== undefined ? { requested } : {}),
@@ -3312,7 +3403,7 @@ async function handleTerminalRoute(ctx: Context, request: IncomingMessage, respo
     json(400, { error: 'not a session id' })
     return
   }
-  const meta = ctx.session.list().find((entry) => entry.id === session)
+  const meta = ctx.session.meta(session)
   if (meta === undefined) {
     json(404, { error: `no session ${session}` })
     return
@@ -3387,7 +3478,7 @@ async function handleTerminalRoute(ctx: Context, request: IncomingMessage, respo
        * An archive that landed while this request was being read found nothing to close, so the archive is read
        * again now that the terminal exists, and a terminal on an archived session is ended at once.
        */
-      if (ctx.session.list().find((entry) => entry.id === session)?.archived === true) {
+      if (ctx.session.meta(session)?.archived === true) {
         await registry.close(session, created.id)
         json(409, { error: `session ${session} is archived`, code: 'archived' })
         return
