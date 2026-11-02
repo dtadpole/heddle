@@ -166,6 +166,14 @@ impl TeamStore for SessionTeamStore {
         Ok(events.iter().map(|event| event.to_value()).collect())
     }
 
+    fn surface_nodes(&self, session: &str) -> Option<Vec<u64>> {
+        let handle = self.store.open(session)?;
+        self.store
+            .surface(&handle)
+            .ok()
+            .map(|surface| surface.nodes.clone())
+    }
+
     fn meta(&self, session: &str) -> Option<SessionMetaView> {
         self.store.meta(session).map(|meta| SessionMetaView {
             id: meta.id().to_owned(),
