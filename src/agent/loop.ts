@@ -260,6 +260,17 @@ export const ARCHIVED_BLOCKED = 'blocked: an archived session runs no model step
 const BLOCKED_TURN_END = { type: 'turn/failed', reason: { kind: 'blocked' } } as const
 
 /**
+ * The notice of a turn a step's output limit ended (#208): DSH's `turn-max-tokens` title and hint
+ * (dsh-client-ui-chat), as one `ended` reason. The page draws `ended` capitalised, so it reads "Output token limit
+ * reached. …". The Rust twin is heddle-agent's `MAX_TOKENS_NOTICE`, the same bytes.
+ */
+export const MAX_TOKENS_NOTICE =
+  'output token limit reached. The reply was cut off; earlier output is preserved in the conversation. Send "continue" to let the model resume.'
+
+/** What a call of a step cut at its output limit is answered with: it was not run (#208). */
+export const MAX_TOKENS_NOT_RUN = 'the step was cut at the output token limit before the model finished it, so this call was not run'
+
+/**
  * DSH's archived-session gate: whether this session's next step must be rejected.
  *
  * `ArchivedSessionGate` (dsh-api-session-controller lib/index.js:2508-2541) answers `agent/pre-step` with `reject` while
@@ -429,6 +440,11 @@ async function runTurnBody(
   let text = ''
   let reasoning = ''
   let finishReason = 'unknown'
+  /**
+   * Whether a step of this turn was cut at the output limit (#208). DSH's turn keeps that end once it is set (a later step
+   * taken for pending next-step input does not replace it), so the turn reports `max_output_tokens` and a goal disarms.
+   */
+  let cutAtLimit = false
   /** What the provider said each round cost, added up — see `mergeUsage`. */
   let usage: { inputTokens?: number; outputTokens?: number } | undefined
   let rounds = 0
@@ -663,7 +679,11 @@ async function runTurnBody(
              * turn read as "stopped" — measured while checking a ten-round fixture, whose answer carried a notice
              * about its own `tool_calls` finish.
              */
-            if (chunk.finishReason !== 'stop' && chunk.finishReason !== 'tool_calls') {
+            if (chunk.finishReason === 'max_output_tokens') {
+              /** DSH's own notice for a cut turn, once per turn (#208), in place of "round N: max_output_tokens". */
+              cutAtLimit = true
+              if (!ended.includes(MAX_TOKENS_NOTICE)) ended.push(MAX_TOKENS_NOTICE)
+            } else if (chunk.finishReason !== 'stop' && chunk.finishReason !== 'tool_calls') {
               ended.push(`round ${round + 1}: ${chunk.finishReason}`)
             }
           }
@@ -865,6 +885,20 @@ async function runTurnBody(
         content: [{ type: 'text', text: toolMessageText(result) }],
       })
     }
+    /**
+     * A step the provider cut at its output limit runs none of its calls, and the turn ends there (#208). DSH's
+     * `dsh-agent-loop` `step()` returns `max-tokens` once the assistant message is recorded, before
+     * `executeToolCalls`. A call in a cut step may be only what the model finished writing: its arguments cut off, or
+     * the calls it meant to send after it lost. Running it acts on a plan the model never completed, and a cut
+     * `write_file` answered `INVALID_ARGS` was retried at full output cost round after round. Each call is still
+     * answered in the log, as not run, so the request pairing holds. Like any step, one taken while next-step input
+     * waits goes on to answer it; the turn still reports the cut.
+     */
+    if (finishReason === 'max_output_tokens') {
+      for (const call of calls) commitCall(call, { output: '', error: { code: 'MAX_TOKENS', message: MAX_TOKENS_NOT_RUN } })
+      if (!hasNewInput(inputBefore, userInputSeqs(ctx, options.session)) && !hasPendingStep(ctx.session.store, options.session)) break
+      continue
+    }
     const limit = Math.max(1, ctx.tools.maxParallelToolCalls ?? 1)
     const safe = (name: string) => limit > 1 && ctx.tools.isConcurrencySafe?.(name) === true
     for (let first = 0; first < calls.length; ) {
@@ -882,6 +916,8 @@ async function runTurnBody(
   if (rounds >= maxRounds) {
     ended.push(`stopped after the round limit of ${maxRounds}`)
   }
+  /** A cut step's end outlasts a later step taken for pending input, as DSH's `max-tokens` turn end does (#208). */
+  if (cutAtLimit && !stoppedByCaller()) finishReason = 'max_output_tokens'
   ctx.session.store.append(options.session, {
     type: 'assistant/completed',
     text,
