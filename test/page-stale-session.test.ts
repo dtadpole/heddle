@@ -94,6 +94,8 @@ test('the composer is disabled and reads "Session unavailable", and neither Send
       composer,
       field,
       document: { getElementById: () => readonlyCard, body },
+      /** The model seat's gate (#175) runs at the end of every access paint; judged in session-model-seat.test.ts. */
+      gateModelSeat: () => {},
     })()
   access('session-66666666-6666-4666-8666-666666666666')
   assert.deepEqual([field.disabled, field.readOnly, composer.hidden, body.dataset.composer], [true, true, false, 'unavailable'], 'the editor is disabled, on screen')
