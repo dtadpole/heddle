@@ -129,6 +129,8 @@ function harness(): Union {
     ${block('turn-failure')}
     ${source('turnNotice')}
     ${verdicts}
+    /** main's #186: a replacement copy (a pruned tool result) is not drawn; drawSessionEvent asks this. */
+    ${optional('isReplacementCopy')}
     ${source('drawSessionEvent')}
     ${listener()}
     /** The no-session turn's 202, released by the test with the session it created; its verdict later on the stream. */
@@ -140,14 +142,14 @@ function harness(): Union {
       return { ok: true, status: 202, headers: { get: (name) => (name === 'content-type' ? 'application/json' : null) }, json: async () => ({ session, turn }) }
     }
     ${source('runTurn')}
-    let running = Promise.resolve()
+    let running = Promise.resolve(), turnError = ''
     ;({
       stream: (session, event) => listen({ data: JSON.stringify({ session, event }) }),
-      send: () => { running = runTurn('mine', QUEUE_KEY_NONE, [], () => {}).catch((error) => error) },
+      send: () => { turnError = ''; running = runTurn('mine', QUEUE_KEY_NONE, [], () => {}).catch((error) => { turnError = String(error && error.stack || error); return error }) },
       named: (session) => release(session),
       ended: () => turnVerdicts.receive({ turn: accepted.turn, outcome: 'done', session: accepted.session, finishReason: 'stop', rounds: 1, denials: [] }),
       unavailable: (id) => { current = null; composerKey = QUEUE_KEY_NONE; unavailableSession = id; rows.length = 0; rows.push('notice:Failed to load history: offline'); updateStatusBar() },
-      state: () => JSON.stringify({ current, unavailable: unavailableSession, rows, dockHidden: statusBar.hidden, turnsText: cells.get('[data-stat="turns"]')?.textContent ?? null, counts: [...liveTurns], opened, holding: looseTurnEvents !== null }),
+      state: () => JSON.stringify({ turnError, current, unavailable: unavailableSession, rows, dockHidden: statusBar.hidden, turnsText: cells.get('[data-stat="turns"]')?.textContent ?? null, counts: [...liveTurns], opened, holding: looseTurnEvents !== null }),
       turn: () => running,
     })
     `,
@@ -163,6 +165,7 @@ const user = (text: string, seq: number) => ({ type: 'message', seq, message: { 
 const chunk = (text: string, seq: number) => ({ type: 'assistant/chunk', seq, chunk: { type: 'text-delta', text } })
 
 interface State {
+  turnError: string
   current: string | null
   unavailable: string | null
   rows: string[]
@@ -195,6 +198,7 @@ test('the union: a blank page draws only its own first turn, counts each turn on
   page.named(MINE)
   await settle()
   const adopted = read()
+  assert.equal(adopted.turnError, '', 'its runTurn has not failed (a binding the drawing half needs shows here)')
   assert.equal(adopted.current, MINE, 'the page adopts the session its turn created')
   assert.deepEqual(adopted.rows, ['user:mine'], `only its own rows\nsaw: ${JSON.stringify(adopted)}`)
   assert.equal(adopted.turnsText, '1 turns', 'and the dock, drawn for it, says one turn: its own')
@@ -208,7 +212,7 @@ test('the union: a blank page draws only its own first turn, counts each turn on
   page.stream(THEIRS, chunk('their second answer', 5))
   page.stream(MINE, { type: 'turn/completed', seq: 4 })
   page.ended()
-  await page.turn()
+  assert.equal(String(await page.turn() ?? ''), '', 'its runTurn ends without an error (a binding the drawing half needs shows here)')
   const done = read()
   assert.deepEqual(done.rows, ['user:mine', 'assistant:the answer'], `each of its events once, none of theirs\nsaw: ${JSON.stringify(done)}`)
   assert.equal(new Map(done.counts).get(MINE), 1, 'still one turn for its own session')
@@ -228,5 +232,5 @@ test('the union: a blank page draws only its own first turn, counts each turn on
   assert.equal(reopened.current, SECOND)
   assert.ok(!reopened.rows.some((row) => row.includes('must not draw')), 'nothing was drawn under the failure')
   page.ended()
-  await page.turn()
+  assert.equal(String(await page.turn() ?? ''), '', 'and that runTurn ends without an error too')
 })
