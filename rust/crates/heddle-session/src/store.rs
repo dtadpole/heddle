@@ -140,6 +140,27 @@ pub fn lock_path(handle: &SessionHandle) -> String {
 /// The lock files this process holds, and how many stores in it hold each; the last to let go removes it.
 static HELD_BY_PROCESS: LazyLock<Mutex<HashMap<PathBuf, usize>>> = LazyLock::new(Default::default);
 
+/// Whether this process has begun to end (#248), behind the lock every log write and every lock take holds while it
+/// runs. [`release_held_writer_locks`] takes it for writing, sets it, and only then removes the lock files, so it waits
+/// for a write in progress to finish, and no write starts after it: each one finds the flag and refuses with
+/// [`SessionError::Exiting`]. The order is always this gate, then [`HELD_BY_PROCESS`].
+static WRITE_GATE: std::sync::RwLock<bool> = std::sync::RwLock::new(false);
+
+/// Run one write to a session log, or one lock take, under [`WRITE_GATE`]: refused, with nothing written, once the
+/// process is exiting. The gate is held only for the write itself; nothing called inside takes it again.
+fn gated<T>(write: impl FnOnce() -> Result<T, SessionError>) -> Result<T, SessionError> {
+    let exiting = WRITE_GATE.read().unwrap_or_else(PoisonError::into_inner);
+    if *exiting {
+        return Err(SessionError::Exiting);
+    }
+    write()
+}
+
+/// Whether this process has begun to end and writes no session log any more ([`release_held_writer_locks`]).
+pub fn exiting() -> bool {
+    *WRITE_GATE.read().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// Remove a lock file only if it still names this process, so letting go never removes another's lock.
 /// Its identity is checked as well as its pid ([`crate::writer_lock::names_this_process`]).
 fn remove_own_lock(path: &Path) {
@@ -164,6 +185,12 @@ fn remove_own_lock(path: &Path) {
 /// (`false`): only a fresh take is a write-open after whatever wrote the session before, which is when an
 /// unfinished turn is closed ([`crate::repair`]).
 fn acquire_writer_lock(path: &Path, id: &str) -> Result<bool, SessionError> {
+    // A process that is exiting takes no new lock: nothing would remove it (#248).
+    gated(|| acquire_writer_lock_open(path, id))
+}
+
+/// [`acquire_writer_lock`] under the gate.
+fn acquire_writer_lock_open(path: &Path, id: &str) -> Result<bool, SessionError> {
     use crate::writer_lock::{
         LockVerdict, SystemProbe, epoch_seconds, format_lock, judge_lock, own_lock, parse_lock,
         read_lock_file, stamp_lock,
@@ -256,9 +283,17 @@ fn release_writer_lock(path: &Path) {
 /// So every lock file the Rust build wrote stayed on disk naming a dead pid (the live 3097 store held 782 such), and
 /// one whose pid came round again refused the session. The TypeScript build lets go in its `exit` handler
 /// (`acquireWriterLock` in `src/session/store.ts`). A file is removed only while it still names this process, by pid
-/// and identity, so another holder's lock is never touched. Do not call it while a store in this process still
-/// writes: the stores would go on writing without the lock.
+/// and identity, so another holder's lock is never touched.
+///
+/// It first ends every write in this process: a spawned turn can outlive the server's graceful close, and a write it
+/// made after its lock file was gone could interleave with another process that took the lock. So it takes
+/// [`WRITE_GATE`] for writing, which waits for a write in progress, and sets it; from then on every append, record,
+/// seed, truncation and lock take refuses with [`SessionError::Exiting`] (`the session could not be saved: the process
+/// is exiting`) and writes nothing. The files are removed while the gate is still held. It cannot be undone: call it
+/// only when the process is ending.
 pub fn release_held_writer_locks() {
+    let mut exiting = WRITE_GATE.write().unwrap_or_else(PoisonError::into_inner);
+    *exiting = true;
     let paths: Vec<PathBuf> = HELD_BY_PROCESS
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -268,6 +303,7 @@ pub fn release_held_writer_locks() {
     for path in paths {
         remove_own_lock(&path);
     }
+    drop(exiting);
 }
 
 /// The meter sections of one request.
@@ -593,6 +629,10 @@ impl SessionStore {
     /// Create a session filed under its workspace folder: write `<id>.json`, create the empty log, and
     /// append `session/created` with the `cwd`.
     pub fn create(&self, options: CreateOptions) -> Result<SessionHandle, SessionError> {
+        // A process that is exiting files no new session: its first append would be refused (#248).
+        if exiting() {
+            return Err(SessionError::Exiting);
+        }
         let id = options
             .id
             .clone()
@@ -914,12 +954,14 @@ impl SessionStore {
                     bytes.extend(line.into_bytes());
                 }
             }
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&handle.transcript)
-                .and_then(|mut file| file.write_all(&bytes))
-                .map_err(|error| SessionError::io(&handle.transcript, error))?;
+            gated(|| {
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&handle.transcript)
+                    .and_then(|mut file| file.write_all(&bytes))
+                    .map_err(|error| SessionError::io(&handle.transcript, error))
+            })?;
             Arc::make_mut(&mut loaded.events).extend(records.iter().cloned());
             records
                 .iter()
@@ -1239,12 +1281,14 @@ impl SessionStore {
                 bytes.extend(line.into_bytes());
             }
         }
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&handle.transcript)
-            .and_then(|mut file| file.write_all(&bytes))
-            .map_err(|error| SessionError::io(&handle.transcript, error))?;
+        gated(|| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&handle.transcript)
+                .and_then(|mut file| file.write_all(&bytes))
+                .map_err(|error| SessionError::io(&handle.transcript, error))
+        })?;
         Arc::make_mut(&mut loaded.events).extend(records.into_iter().map(Arc::new));
         Ok(())
     }
@@ -1296,13 +1340,15 @@ impl SessionStore {
         } else {
             line.into_bytes()
         };
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&handle.transcript)
-            .map_err(|error| SessionError::io(&handle.transcript, error))?;
-        file.write_all(&bytes)
-            .map_err(|error| SessionError::io(&handle.transcript, error))?;
+        gated(|| {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&handle.transcript)
+                .map_err(|error| SessionError::io(&handle.transcript, error))?;
+            file.write_all(&bytes)
+                .map_err(|error| SessionError::io(&handle.transcript, error))
+        })?;
 
         if let Some(loaded) = state.loaded.get_mut(&handle.id) {
             Arc::make_mut(&mut loaded.events).push(record.clone());
@@ -1337,15 +1383,25 @@ impl SessionStore {
                     bytes = std::fs::read(&handle.transcript).unwrap_or_default();
                     decoded = decode_transcript(&bytes);
                     dropped = bytes.len().saturating_sub(decoded.readable_bytes);
-                    if dropped > 0
-                        && let Ok(file) = std::fs::OpenOptions::new()
-                            .write(true)
-                            .open(&handle.transcript)
-                    {
-                        let _ = file.set_len(decoded.readable_bytes as u64);
+                    if dropped > 0 {
+                        let cut = gated(|| {
+                            if let Ok(file) = std::fs::OpenOptions::new()
+                                .write(true)
+                                .open(&handle.transcript)
+                            {
+                                let _ = file.set_len(decoded.readable_bytes as u64);
+                            }
+                            Ok(())
+                        });
+                        // A process that began to end meanwhile cuts nothing and records nothing; it reads the
+                        // whole frames, as a reader without the lock does.
+                        if cut.is_err() {
+                            dropped = 0;
+                        }
                     }
                 }
-                Err(SessionError::AlreadyOwned { .. }) => {}
+                // Another holder's, or a process that is exiting: read the whole frames and leave the file alone.
+                Err(SessionError::AlreadyOwned { .. } | SessionError::Exiting) => {}
                 Err(error) => return Err(error),
             }
         }

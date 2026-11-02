@@ -35,7 +35,9 @@ fn main() -> ExitCode {
     // Every way out of a run lets go of the session writer locks this process holds: a server stopped by SIGTERM or
     // SIGINT returns here after its graceful close, and a command line here after its turn, failed or not (#248). The
     // stores' `Drop` never ran on these paths — a store a spawned task still holds outlives the run, and statics are
-    // not dropped — so every lock file stayed behind naming a dead pid. Only locks that still name this process go.
+    // not dropped — so every lock file stayed behind naming a dead pid. Only locks that still name this process go,
+    // and only after every session write in the process is ended: a turn still running refuses its next write instead
+    // of writing a log whose lock is gone.
     heddle_session::store::release_held_writer_locks();
     // The library reports a closed pipe as no error; a failed flush is no worse than that.
     let _ = stdout.flush();

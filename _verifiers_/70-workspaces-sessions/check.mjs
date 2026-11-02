@@ -2047,10 +2047,20 @@ function startServer(args, env) {
       let settled = false
       /** Resolves with the exit code (or the signal's name) once the server is gone. */
       const exited = new Promise((done) => child.once('exit', (code, signal) => done(code ?? signal)))
-      /** Stop it the way a service manager or a person does (SIGTERM, SIGINT), and wait for it to exit. */
-      const stop = (signal) => {
+      /**
+       * Stop it the way a service manager or a person does (SIGTERM, SIGINT), and wait for it to exit: at most 15 s, then
+       * it is killed and the check fails naming the hang rather than waiting for ever.
+       */
+      const stop = async (signal) => {
         child.kill(signal)
-        return exited
+        const late = Symbol('late')
+        let timer
+        const outcome = await Promise.race([exited, new Promise((done) => (timer = setTimeout(() => done(late), 15_000)))])
+        clearTimeout(timer)
+        if (outcome !== late) return outcome
+        child.kill('SIGKILL')
+        await exited
+        assert.fail(`the server did not exit within 15 s of ${signal}, so it was killed\n${output}`)
       }
       const onData = (chunk) => {
         output += chunk.toString()

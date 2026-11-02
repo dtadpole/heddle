@@ -120,6 +120,11 @@ pub enum SessionError {
         /// The lock file's name (`<id>.lock`, or `session.lock` in an old-layout directory).
         lock: Option<String>,
     },
+    /// A write asked for after the process began to end and let go of its writer locks (#248): `the session could
+    /// not be saved: the process is exiting`. Nothing is written, because the lock that made the write this process's
+    /// alone is already gone ([`crate::store::release_held_writer_locks`]). The code is heddle's, `session/exiting`.
+    #[error("the session could not be saved: the process is exiting")]
+    Exiting,
     /// A branch heddle may not write, so a session cannot be filed in it (#106):
     /// `cannot write to "<folder>": permission denied`, the folder by its name and never its absolute path
     /// (the I/O error carried the definition's path). DSH files no session in the folder, so the code is
@@ -157,11 +162,13 @@ fn owned_message(
 
 impl SessionError {
     /// The code DSH's session controller answers a held session with (`session/writer-held`), for
-    /// [`SessionError::AlreadyOwned`]; heddle's `session/unwritable` for [`SessionError::Unwritable`] and
-    /// `session/folder-missing` for [`SessionError::MissingFolder`]; `None` for every other error.
+    /// [`SessionError::AlreadyOwned`]; heddle's `session/unwritable` for [`SessionError::Unwritable`],
+    /// `session/folder-missing` for [`SessionError::MissingFolder`] and `session/exiting` for
+    /// [`SessionError::Exiting`]; `None` for every other error.
     pub fn code(&self) -> Option<&'static str> {
         match self {
             SessionError::AlreadyOwned { .. } => Some("session/writer-held"),
+            SessionError::Exiting => Some("session/exiting"),
             SessionError::Unwritable { .. } => Some("session/unwritable"),
             SessionError::MissingFolder { .. } => Some("session/folder-missing"),
             _ => None,

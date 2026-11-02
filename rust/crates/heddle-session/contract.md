@@ -44,7 +44,13 @@ grounded_in:
   when it ends, removing each file only while it still names this process by pid and identity (#248): the
   TypeScript build in its `exit` handler, the Rust build in the `heddle` binary's shell after a run returns
   (a server stopped by SIGTERM or SIGINT, a command line done or failed) or a panic unwinds out of it
-  (`store::release_held_writer_locks`).
+  (`store::release_held_writer_locks`). Before it removes a file the Rust release ends every write in the
+  process: under the lock each log write and lock take holds while it runs, it sets the exiting state, so a
+  write in progress finishes first and every later append, record, seed, truncation, lock take or create is
+  refused with `SessionError::Exiting` (`the session could not be saved: the process is exiting`,
+  `session/exiting`) and writes nothing. A turn that outlives the server's close therefore never writes a log
+  whose lock another process may already hold. The TypeScript build needs no such state: its `exit` handler
+  runs on the one thread, after which nothing else runs.
 
 ## Decisions a dependent crate should know
 

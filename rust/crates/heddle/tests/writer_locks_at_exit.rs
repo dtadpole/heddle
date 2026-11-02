@@ -91,14 +91,37 @@ impl Home {
         command
     }
 
-    /// Run the command line to its end: (exit code, stdout, stderr).
+    /// Run the command line to its end, at most [`RUN_LIMIT`]: (exit code, stdout, stderr). One that is still running
+    /// then is killed, and the test fails naming it, rather than hanging the suite.
     fn run(&self, args: &[&str]) -> (Option<i32>, String, String) {
-        let output = self.command(args).output().expect("the binary runs");
-        (
-            output.status.code(),
-            String::from_utf8_lossy(&output.stdout).into_owned(),
-            String::from_utf8_lossy(&output.stderr).into_owned(),
-        )
+        let mut child = Guarded(
+            self.command(args)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("the binary runs"),
+        );
+        let stdout = read_all(child.0.stdout.take().expect("piped stdout"));
+        let stderr = read_all(child.0.stderr.take().expect("piped stderr"));
+        let deadline = Instant::now() + RUN_LIMIT;
+        let status = loop {
+            if let Some(status) = child.0.try_wait().expect("the command can be waited on") {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.0.kill();
+                let _ = child.0.wait();
+                panic!(
+                    "`heddle {}` did not exit within {} s; killed",
+                    args.join(" "),
+                    RUN_LIMIT.as_secs()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let stdout = stdout.join().expect("stdout was read");
+        let stderr = stderr.join().expect("stderr was read");
+        (status.code(), stdout, stderr)
     }
 
     /// A new session in the working folder, made by the command line: its id.
@@ -159,6 +182,30 @@ impl Home {
     }
 }
 
+/// How long a command-line run may take before it is killed and named as a hang.
+const RUN_LIMIT: Duration = Duration::from_secs(60);
+
+/// A child process killed and reaped when it goes out of scope, so a failing assertion never leaves it running.
+struct Guarded(Child);
+
+impl Drop for Guarded {
+    fn drop(&mut self) {
+        if matches!(self.0.try_wait(), Ok(None)) {
+            let _ = self.0.kill();
+        }
+        let _ = self.0.wait();
+    }
+}
+
+/// Read a stream to its end on its own thread, so a full pipe never stalls the process writing it.
+fn read_all(mut stream: impl Read + Send + 'static) -> std::thread::JoinHandle<String> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stream.read_to_end(&mut bytes);
+        String::from_utf8_lossy(&bytes).into_owned()
+    })
+}
+
 impl Drop for Home {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.home);
@@ -197,9 +244,9 @@ fn a_command_line_turn_leaves_no_lock_when_it_exits_whether_it_succeeds_or_fails
     );
 }
 
-/// A running `heddle web`, its output collected as it comes.
+/// A running `heddle web`, its output collected as it comes; killed when it goes out of scope.
 struct Server {
-    child: Child,
+    child: Guarded,
     port: u16,
     token: String,
     output: Arc<Mutex<String>>,
@@ -207,16 +254,23 @@ struct Server {
 
 impl Server {
     fn start(home: &Home) -> Self {
-        let mut child = home
-            .command(&["web", "--host", "127.0.0.1", "--port", "0"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("the server starts");
-        let output = Arc::new(Mutex::new(String::new()));
+        // Guarded from the moment it exists: a panic while it starts kills it.
+        let mut server = Server {
+            child: Guarded(
+                home.command(&["web", "--host", "127.0.0.1", "--port", "0"])
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .expect("the server starts"),
+            ),
+            port: 0,
+            token: String::new(),
+            output: Arc::new(Mutex::new(String::new())),
+        };
+        let output = Arc::clone(&server.output);
         for stream in [
-            Box::new(child.stdout.take().unwrap()) as Box<dyn Read + Send>,
-            Box::new(child.stderr.take().unwrap()) as Box<dyn Read + Send>,
+            Box::new(server.child.0.stdout.take().unwrap()) as Box<dyn Read + Send>,
+            Box::new(server.child.0.stderr.take().unwrap()) as Box<dyn Read + Send>,
         ] {
             let output = Arc::clone(&output);
             std::thread::spawn(move || {
@@ -233,23 +287,20 @@ impl Server {
                 .find_map(|line| line.strip_prefix("heddle web: http://127.0.0.1:"))
             {
                 let (port, rest) = url.split_once('/').expect("a URL with a path");
-                let token = rest
+                server.port = port.parse().expect("a port");
+                server.token = rest
                     .split_once("token=")
                     .map(|(_, token)| token)
-                    .unwrap_or("");
-                return Server {
-                    child,
-                    port: port.parse().expect("a port"),
-                    token: token.to_string(),
-                    output,
-                };
+                    .unwrap_or("")
+                    .to_string();
+                return server;
             }
             assert!(
                 Instant::now() < deadline,
                 "the server printed no URL within 30 s\n{text}"
             );
             assert!(
-                child.try_wait().unwrap().is_none(),
+                server.child.0.try_wait().unwrap().is_none(),
                 "the server exited before it served\n{text}"
             );
             std::thread::sleep(Duration::from_millis(50));
@@ -257,7 +308,7 @@ impl Server {
     }
 
     fn pid(&self) -> u32 {
-        self.child.id()
+        self.child.0.id()
     }
 
     /// One HTTP/1.1 exchange, read to its end.
@@ -268,7 +319,15 @@ impl Server {
             .unwrap();
         stream.write_all(request.as_bytes()).unwrap();
         let mut response = Vec::new();
-        let _ = stream.read_to_end(&mut response);
+        // A timeout or a reset is a failure, never a short answer: a partial stream could still hold `event: done`.
+        if let Err(error) = stream.read_to_end(&mut response) {
+            panic!(
+                "reading the answer to `{}` failed after {} bytes: {error}\n{}",
+                request.lines().next().unwrap_or(""),
+                response.len(),
+                String::from_utf8_lossy(&response)
+            );
+        }
         String::from_utf8_lossy(&response).into_owned()
     }
 
@@ -310,7 +369,7 @@ impl Server {
         assert!(sent.success(), "the signal was sent");
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            if let Some(status) = self.child.try_wait().unwrap() {
+            if let Some(status) = self.child.0.try_wait().unwrap() {
                 return status.code();
             }
             assert!(
@@ -320,13 +379,6 @@ impl Server {
             );
             std::thread::sleep(Duration::from_millis(50));
         }
-    }
-}
-
-impl Drop for Server {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
     }
 }
 
