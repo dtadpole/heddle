@@ -1,6 +1,6 @@
 ---
 title: Verifier 4 — Pluggable Tools
-version: 1.7.0
+version: 1.8.0
 description: tools are configurable and pluggable.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-11, listing the ten verifiers
@@ -39,7 +39,11 @@ TypeScript build listed a link to a folder as a file of the folder's size).
 `check-bash-streams.mjs` holds a finished bash call's stderr to its own section, as DSH's renderResult marks it: stdout,
 a newline when stdout does not end in one, then `[stderr]` and the stderr text, in success and below a failure's error
 line alike (live-testing issue #246: both builds glued the streams, `printf out; printf err >&2` came back `outerr`).
-Those five share `fs-tool-turn.mjs`, which is not a check: it writes a self-contained profile that allows the one tool
+`check-list-order.mjs` holds a listing to DSH's order, `name.localeCompare` (ICU collation), which the TypeScript
+build shares: case and accents sort with their letters, punctuation and digits before letters in ICU's order, and
+names that collate equal in byte order (live-testing issue #247: the Rust build sorted by bytes). Its expected orders
+are English collation; under a Node that resolves another locale it reports itself unjudged.
+Those six share `fs-tool-turn.mjs`, which is not a check: it writes a self-contained profile that allows the one tool
 under test and runs one scripted turn that calls it once, returning the tool results and what the disk holds afterwards.
 `check-utf8-chunks.mjs` holds bash output to whole characters when a UTF-8 sequence arrives split across chunks
 (live-testing issue #96: the TypeScript build decoded each chunk alone).
