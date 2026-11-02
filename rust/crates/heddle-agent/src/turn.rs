@@ -150,6 +150,9 @@ pub struct RunTurnOptions {
     /// settlement notice that reached a turn which ended before it saw it is in the log once, and the turn that
     /// answers it must not write it again (`answerPending` in the TypeScript build).
     pub answer_pending: bool,
+    /// The turn's input is a queued row, claimed once the turn holds its session (#162): see [`TurnClaim`]. `prompt`
+    /// and `attachments` are not written when this is set.
+    pub claim: Option<TurnClaim>,
 }
 
 impl RunTurnOptions {
@@ -174,7 +177,37 @@ impl RunTurnOptions {
             purpose: None,
             cancel: None,
             answer_pending: false,
+            claim: None,
         }
+    }
+}
+
+/// Why a claimed turn ended before its first step: its queued row was gone by the time it held the session (#162).
+/// `NOTHING_CLAIMED` in the TypeScript build.
+pub const NOTHING_CLAIMED: &str = "nothing to answer: the queued message was no longer waiting";
+
+/// The claim of a queued row, made by the turn that answers it once it holds its session (#162 follow-up).
+///
+/// Called **once**, at the point where the prompt would be written: after the live-turn slot is held and after pending
+/// steers are written, as DSH claims the next-turn row at the turn's first step. It records the row as the turn's user
+/// message (the queue's one-write claim) and answers its parts, `Ok(None)` when the row is gone, or the store's error,
+/// which fails the turn with the slot released. A turn stopped while it waited does not call it. Shared (`Arc`) only so
+/// the options stay `Clone`; the turn calls it at most once. `RunTurnOptions.claim` in the TypeScript build.
+#[derive(Clone)]
+#[allow(clippy::type_complexity)]
+pub struct TurnClaim(Arc<dyn Fn() -> Result<Option<Vec<ContentPart>>, PortError> + Send + Sync>);
+
+impl TurnClaim {
+    pub fn new(
+        claim: impl Fn() -> Result<Option<Vec<ContentPart>>, PortError> + Send + Sync + 'static,
+    ) -> Self {
+        Self(Arc::new(claim))
+    }
+}
+
+impl std::fmt::Debug for TurnClaim {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("TurnClaim")
     }
 }
 
@@ -456,7 +489,9 @@ fn begin_registered(
     // the turn ends `blocked`; the claimed input is dropped, never written as a message. Every caller starts its turn
     // here: the page's turn route, `--resume --turn`, a settlement notice, a goal round, a reminder, a teammate's mail.
     if runtime.session.under_archived(&options.session) {
-        let prompt = (!options.answer_pending).then(|| {
+        // A claimed turn has no prompt of its own: the gate's claim takes its queued row and drops it, as DSH's rejected
+        // step does.
+        let prompt = (!options.answer_pending && options.claim.is_none()).then(|| {
             let mut content = vec![ContentPart::text(options.prompt.clone())];
             content.extend(options.attachments.iter().cloned());
             (content, options.source.clone())
@@ -502,15 +537,63 @@ fn begin_registered(
     }
     // A steer a stopped turn left in the inbox is DSH's next-step input, and DSH's boundary claims next-step
     // input before the queued prompt, so it is written ahead of this turn's prompt.
-    if let Err(error) = runtime.session.claim_pending_input(&options.session) {
-        if let Some(live) = &live {
-            live.settle();
+    let steered = match runtime.session.claim_pending_input(&options.session) {
+        Ok(steered) => steered,
+        Err(error) => {
+            if let Some(live) = &live {
+                live.settle();
+            }
+            return Err(TurnError::Port(error));
         }
-        return Err(TurnError::Port(error));
+    };
+    if let Some(claim) = options.claim.clone() {
+        // A turn a person stopped while it waited claims nothing: the row stays queued, held by the Stop.
+        let stopped = cancel.as_ref().is_some_and(CancellationToken::is_cancelled);
+        let claimed = if stopped { Ok(None) } else { (claim.0)() };
+        match claimed {
+            Err(error) => {
+                if let Some(live) = &live {
+                    live.settle();
+                }
+                return Err(TurnError::Port(error));
+            }
+            // Nothing to answer: no message, no model request, nothing written.
+            Ok(None) if steered == 0 => {
+                let done = TurnResult {
+                    text: String::new(),
+                    reasoning: String::new(),
+                    tool_calls: Vec::new(),
+                    denials: Vec::new(),
+                    finish_reason: if stopped { "cancelled" } else { "stop" }.to_owned(),
+                    events: runtime
+                        .session
+                        .count(&options.session)
+                        .saturating_sub(started),
+                    rounds: 0,
+                    context: None,
+                    ended: vec![if stopped {
+                        "stopped by the caller".to_owned()
+                    } else {
+                        NOTHING_CLAIMED.to_owned()
+                    }],
+                    usage: None,
+                };
+                return Ok(BegunTurn {
+                    runtime: runtime.clone(),
+                    options,
+                    cancel,
+                    started,
+                    live,
+                    blocked: Some(done),
+                    preset,
+                });
+            }
+            Ok(_) => {}
+        }
     }
     let mut content = vec![ContentPart::text(options.prompt.clone())];
     content.extend(options.attachments.iter().cloned());
-    let written = if options.answer_pending {
+    let written = if options.answer_pending || options.claim.is_some() {
         Ok(())
     } else {
         runtime
@@ -4928,5 +5011,136 @@ pub(crate) mod tests {
         assert_eq!(offered(&session), [["read_tool", "write_tool"]]);
         assert_eq!(session.preset(), None, "and records no preset");
         assert_eq!(context.systems.lock().unwrap().clone(), [None::<String>]);
+    }
+
+    // ---- #162 follow-up: a claimed turn claims its queued row once it holds the session. ----
+
+    fn claim_runtime(
+        model: Arc<ScriptedModel>,
+        session: &Arc<RecordingSession>,
+        turns: &TurnRegistry,
+    ) -> AgentRuntime {
+        let mut built = runtime(
+            model,
+            Arc::clone(session),
+            registry_with(Vec::new()),
+            Arc::new(crate::ports::NoTurnHooks),
+        );
+        built.turns = Some(turns.clone());
+        built
+    }
+
+    /// A claim that writes the row as the turn's user message (as the queue's one-write claim does) and counts calls.
+    fn counting_claim(
+        session: &Arc<RecordingSession>,
+        calls: &Arc<std::sync::atomic::AtomicUsize>,
+        row: Option<&'static str>,
+    ) -> TurnClaim {
+        let (port, calls) = (Arc::clone(session), Arc::clone(calls));
+        TurnClaim::new(move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let Some(text) = row else {
+                return Ok(None);
+            };
+            port.user_content(&session_handle(), vec![ContentPart::text(text)], None)?;
+            Ok(Some(vec![ContentPart::text(text)]))
+        })
+    }
+
+    #[tokio::test]
+    async fn a_claimed_turn_claims_its_row_only_once_it_holds_the_session_and_exactly_once() {
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![answers("answered")]);
+        let turns = TurnRegistry::new();
+        let runtime = claim_runtime(model.clone(), &session, &turns);
+        let holder = turns.begin("s", None);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut options = RunTurnOptions::new(session_handle(), "scripted", "");
+        options.claim = Some(counting_claim(&session, &calls, Some("QUEUED-ROW")));
+        let turn = tokio::spawn(async move { run_turn(&runtime, options).await });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "nothing is claimed while another turn holds the session"
+        );
+        assert!(session.messages().is_empty(), "and nothing is written");
+        holder.settle();
+        let result = turn.await.unwrap().unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the claim ran exactly once"
+        );
+        assert_eq!(result.rounds, 1);
+        assert_eq!(
+            model.requests.lock().unwrap().len(),
+            1,
+            "the row was answered by one request"
+        );
+        assert!(!turns.is_running("s"));
+    }
+
+    #[tokio::test]
+    async fn a_claimed_turn_whose_row_is_gone_writes_nothing_and_asks_nothing() {
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![]);
+        let turns = TurnRegistry::new();
+        let runtime = claim_runtime(model.clone(), &session, &turns);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut options = RunTurnOptions::new(session_handle(), "scripted", "");
+        options.claim = Some(counting_claim(&session, &calls, None));
+        let result = run_turn(&runtime, options).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(result.rounds, 0);
+        assert_eq!(result.ended, [NOTHING_CLAIMED]);
+        assert!(
+            model.requests.lock().unwrap().is_empty(),
+            "no model request"
+        );
+        assert!(session.messages().is_empty(), "no empty prompt is written");
+        assert!(session.kinds().is_empty(), "nothing at all is written");
+        assert!(!turns.is_running("s"));
+    }
+
+    #[tokio::test]
+    async fn a_claim_that_fails_fails_the_turn_and_releases_the_session() {
+        let session = RecordingSession::new();
+        let turns = TurnRegistry::new();
+        let runtime = claim_runtime(ScriptedModel::new(vec![]), &session, &turns);
+        let mut options = RunTurnOptions::new(session_handle(), "scripted", "");
+        options.claim = Some(TurnClaim::new(|| {
+            Err(PortError("the log refused the claim".into()))
+        }));
+        let error = run_turn(&runtime, options).await.unwrap_err();
+        assert!(matches!(error, TurnError::Port(_)), "{error:?}");
+        assert!(!turns.is_running("s"));
+    }
+
+    #[tokio::test]
+    async fn a_claimed_turn_stopped_while_it_waited_claims_nothing() {
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![]);
+        let turns = TurnRegistry::new();
+        let runtime = claim_runtime(model.clone(), &session, &turns);
+        let holder = turns.begin("s", None);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let stop = CancellationToken::new();
+        let mut options = RunTurnOptions::new(session_handle(), "scripted", "");
+        options.claim = Some(counting_claim(&session, &calls, Some("KEPT-ROW")));
+        options.cancel = Some(stop.clone());
+        let turn = tokio::spawn(async move { run_turn(&runtime, options).await });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        stop.cancel();
+        holder.settle();
+        let result = turn.await.unwrap().unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "a stopped turn never claims"
+        );
+        assert_eq!(result.ended, ["stopped by the caller"]);
+        assert!(model.requests.lock().unwrap().is_empty());
+        assert!(!turns.is_running("s"));
     }
 }

@@ -40,8 +40,8 @@ pub use subagent::{
     subagent_runner, subagent_tools,
 };
 pub use turn::{
-    AgentRuntime, BegunTurn, ContextSummary, Denial, RoundLimit, RunTurnOptions, ToolCallRecord,
-    TurnError, TurnResult, begin_turn, begin_turn_queued, has_new_input, merge_usage,
-    parse_arguments, run_turn,
+    AgentRuntime, BegunTurn, ContextSummary, Denial, NOTHING_CLAIMED, RoundLimit, RunTurnOptions,
+    ToolCallRecord, TurnClaim, TurnError, TurnResult, begin_turn, begin_turn_queued, has_new_input,
+    merge_usage, parse_arguments, run_turn,
 };
 pub use turns::{LiveTurn, TurnRegistry};
