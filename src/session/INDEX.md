@@ -1,6 +1,6 @@
 ---
 title: Session
-version: 1.5.0
+version: 1.5.1
 description: The session store and its service — an append-only event log per session, the surface a request is derived from, and the folder tree a session is found in.
 grounded_in:
   - source: human-authored
@@ -43,6 +43,12 @@ current user or assistant messages hold a phrase, ranked and quoted as DSH's SQL
 SQLite, so the tokenizer's tables are measured from SQLite by [`unicode61-generate.ts`](unicode61-generate.ts) into
 [`unicode61.ts`](unicode61.ts) and its Rust twin, and the search is a scan that re-reads a log only when it changed
 (R-developer-eight-19).
+
+The server's search reads in **slices** (#257): it reads and ranks in steps of about 20 ms that leave the event loop
+free between them, a log that grew is read from where the last read stopped (one rewritten or cut is read whole), the
+searches that arrive together share one read of the store, and the server begins that read in the background soon
+after it starts. Before, the first search after a start read every log on the event loop at once: 12.9 s on a store
+the size of the live one, which cost the server its supervisor's health probes.
 
 [`activity.ts`](activity.ts) names the **running work** a plain archive is refused for, in DSH's
 `workspace/session-activity` shape and DSH's listener order: the session's own turn, its live background jobs (the
@@ -103,6 +109,13 @@ grow with the square of the session's length, and it is also what made decompres
 it now happens once per session per process. The trade is stated in the code rather than hidden: a
 second process appending to the same session while this one holds it open would not be seen, and
 heddle runs one process per session.
+
+**One record is found by its id, and the list is read once a second at most** (#257, hang 5). `list()` reads every
+record and judges every log's head; the team panel's poll asked `list().find(id)` four times per request, every 2 s per
+open tab, and after a restart that stood the server still. `SessionStore.metaById` (and `SessionService.meta`) reads
+the one record from where it was last found, verified before use, and gives what `list().find` gives. `list()` keeps its
+answer for one second (`LIST_MEMO_MS`), so requests that list together share one read; any write to the records through
+a store over that root in the process ends it, and another process's write shows within the second.
 
 **A turn its writer never finished is closed when the session is next opened for writing**
 ([`repair.ts`](repair.ts), issue #5). A server restarted while `bash` ran used to leave the log at the call:

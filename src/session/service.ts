@@ -164,7 +164,7 @@ export class SessionService extends Service {
     }
     const taken = existingSessionNames(canonical)
     const handle = this.openAt(canonical, { fresh: true, ...options })
-    const meta = this.list().find((entry) => entry.id === handle.id)
+    const meta = this.meta(handle.id)
     let definition: SessionDefinition
     try {
       definition = writeSessionDefinition(handle, canonical, {
@@ -198,7 +198,7 @@ export class SessionService extends Service {
     | null
     | { readonly error: 'unavailable' }
     | { readonly error: 'no-such-event'; readonly atSeq: number; readonly lastSeq?: number } {
-    const source = this.store.list().find((one) => one.id === id)
+    const source = this.store.metaById(id)
     if (source === undefined) return null
     if (options.atSeq !== undefined) return this.forkAt(id, source, options.atSeq)
     /**
@@ -260,7 +260,7 @@ export class SessionService extends Service {
   private nameFork(handle: SessionHandle, source: SessionMeta): { readonly handle: SessionHandle; readonly definition: SessionDefinition } {
     /** A fork continues its source, so it runs under the source's preset (inventory A96). */
     if (source.preset !== undefined) this.store.recordPreset(handle.id, source.preset)
-    const created = this.store.list().find((one) => one.id === handle.id)
+    const created = this.store.metaById(handle.id)
     /** Named from the source's title alone, as DSH names it (`forkTitle`); an untitled source leaves the fork untitled. */
     const title = forkTitle(source.title ?? '')
     if (title !== undefined) this.store.rename(handle.id, title)
@@ -301,7 +301,7 @@ export class SessionService extends Service {
   userContent(handle: SessionHandle, content: readonly ContentPart[], source?: unknown): void {
     if (content.length === 0) return
     this.store.message(handle, { role: 'user', content: [...content], ...(source !== undefined ? { source } : {}) })
-    const meta = this.store.list().find((one) => one.id === handle.id)
+    const meta = this.store.metaById(handle.id)
     if (meta !== undefined && (meta.title === undefined || meta.title.trim().length === 0)) {
       const title = titleFrom(textOf(content))
       if (title.length > 0) this.store.rename(handle.id, title)
@@ -396,6 +396,14 @@ export class SessionService extends Service {
   /** Every session, newest first. */
   list(): readonly SessionMeta[] {
     return this.store.list()
+  }
+
+  /**
+   * One session's record, what `list().find((meta) => meta.id === id)` answers, without reading the whole store (#257,
+   * `SessionStore.metaById`). For any caller that wants one session's record by its id.
+   */
+  meta(id: SessionId): SessionMeta | undefined {
+    return this.store.metaById(id)
   }
 
   /**

@@ -16,6 +16,7 @@ import {
 } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
+import { performance } from 'node:perf_hooks'
 import { zstdCompressSync } from 'node:zlib'
 
 import type { Chunk, ContentPart, Message } from '../llm/types.ts'
@@ -322,12 +323,16 @@ export function endsStep(type: string): boolean {
  * input at the next step boundary. So a message that lands while a run is open is held. It is placed when the run
  * closes, or, when the step called tools, once their results are placed, so a call and its result stay adjacent. A
  * new request, the turn's end or a replacement places whatever is still held.
+ *
+ * `from` continues an earlier fold, for a reader that folds a log as it grows (the content search, #257). It must be
+ * the state folded through a **quiet** event ({@link quietsSurface}): every other variable of the fold is empty there,
+ * so folding the rest of the log from it gives what folding the whole log gives.
  */
-export function foldSurface(events: readonly SessionEvent[]): SurfaceState {
-  const nodes: number[] = []
-  const replacements: SurfaceReplacement[] = []
-  let contentGeneration = 0
-  let replaceGeneration = 0
+export function foldSurface(events: readonly SessionEvent[], from?: SurfaceState): SurfaceState {
+  const nodes: number[] = from === undefined ? [] : [...from.nodes]
+  const replacements: SurfaceReplacement[] = from === undefined ? [] : [...from.replacements]
+  let contentGeneration = from?.contentGeneration ?? 0
+  let replaceGeneration = from?.replaceGeneration ?? 0
   let openChunk: number | undefined
   /** The tool calls of the open run. */
   let runCalls = new Set<string>()
@@ -413,6 +418,19 @@ export function foldSurface(events: readonly SessionEvent[]): SurfaceState {
   release()
 
   return { nodes, contentGeneration, replaceGeneration, replacements }
+}
+
+/**
+ * Whether the fold is **quiet** after this event: no chunk run open, no tool result awaited and no message held, so its
+ * whole state is the surface it has placed. A step's end is quiet (a request or a `turn/*`), and so is a replacement:
+ * both close the run and place what was held ({@link foldSurface}). A replacement that is itself a chunk is left out,
+ * because a search document's chunk run reads on through the chunks that follow it. A search folding a growing log
+ * keeps the surface at its last quiet event and folds only what follows it (#257).
+ */
+export function quietsSurface(event: SessionEvent): boolean {
+  if (typeof event?.type !== 'string') return false
+  if (isReplacementOp(event.surfaceOp as SurfaceOp | undefined)) return event.type !== 'assistant/chunk'
+  return endsStep(event.type)
 }
 
 /**
@@ -832,6 +850,15 @@ function releaseWriterLock(path: string): void {
   removeOwnLock(path)
 }
 
+/**
+ * How long a {@link SessionStore.list} answer is kept (#257). Every open tab polls the server every 2 s, and a poll's
+ * handlers listed the store several times each: hang 5 was those scans, back to back, on a cold file cache.
+ */
+export const LIST_MEMO_MS = 1_000
+
+/** Writes to each store root's records in this process, by root: a memo older than the last write is not used. */
+const recordWrites = new Map<string, number>()
+
 export class SessionStore {
   readonly root: string
   private readonly onEvent: ((handle: SessionHandle, event: SessionEvent) => void) | undefined
@@ -895,6 +922,20 @@ export class SessionStore {
 
   /** The unreadable whole logs `loads` has already named, so a second sweep does not name one twice. */
   private readonly reportedLoads = new Set<string>()
+
+  /**
+   * The last {@link list} answer, kept for {@link LIST_MEMO_MS} (#257): requests that list at once, or one right after
+   * another, share one read of the store. Any write to the records through a store over this root in this process ends
+   * it ({@link recordWrites}), so this process never lists from before its own write; another process's write shows
+   * within the memo's life.
+   */
+  private listed: { readonly at: number; readonly writes: number; readonly metas: readonly SessionMeta[] } | undefined
+
+  /** How many times the whole store was read. */
+  private scans = 0
+
+  /** Where each session's record was last found, by id; verified before it is used ({@link metaFile}). */
+  private readonly recordPaths = new Map<string, string>()
 
   constructor(
     root: string = defaultSessionRoot(),
@@ -970,6 +1011,8 @@ export class SessionStore {
         2,
       )}\n`,
     )
+    this.recordPaths.set(id, handle.meta)
+    this.wroteRecords()
     appendFileSync(handle.transcript, '')
     this.append(handle, { type: 'session/created', cwd })
     return handle
@@ -988,7 +1031,7 @@ export class SessionStore {
    * with nothing visible left clears, as a blank one does; refusing it is the route's answer, as in DSH.
    */
   rename(id: SessionId, title: string): SessionMeta | null {
-    const current = this.list().find((meta) => meta.id === id)
+    const current = this.metaById(id)
     if (current === undefined) return null
     const trimmed = normalizeSessionTitle(title)
     const next: SessionMeta = {
@@ -999,6 +1042,7 @@ export class SessionStore {
     const meta = this.metaFile(id)
     if (meta === null) return null
     writeFileSync(meta, `${JSON.stringify(next, null, 2)}\n`)
+    this.wroteRecords()
     /**
      * After the write, as with `onEvent`: a listener never announces a title the record does not hold. A listener that
      * throws is logged and swallowed: the rename has landed, and the first-message fallback that renames inside
@@ -1020,13 +1064,14 @@ export class SessionStore {
    * unknown session.
    */
   recordPreset(id: SessionId, preset: string): SessionMeta | null {
-    const current = this.list().find((meta) => meta.id === id)
+    const current = this.metaById(id)
     if (current === undefined) return null
     if (current.preset !== undefined || preset.trim().length === 0) return current
     const next: SessionMeta = { ...current, preset: preset.trim() }
     const meta = this.metaFile(id)
     if (meta === null) return null
     writeFileSync(meta, `${JSON.stringify(next, null, 2)}\n`)
+    this.wroteRecords()
     return next
   }
 
@@ -1040,7 +1085,7 @@ export class SessionStore {
    * is true of the session.
    */
   flags(id: SessionId, patch: { readonly pinned?: boolean; readonly archived?: boolean }): SessionMeta | null {
-    const current = this.list().find((meta) => meta.id === id)
+    const current = this.metaById(id)
     if (current === undefined) return null
     const next: SessionMeta = { ...current }
     if (patch.pinned !== undefined) {
@@ -1067,6 +1112,7 @@ export class SessionStore {
     const meta = this.metaFile(id)
     if (meta === null) return null
     writeFileSync(meta, `${JSON.stringify(next, null, 2)}\n`)
+    this.wroteRecords()
     return next
   }
 
@@ -1121,7 +1167,7 @@ export class SessionStore {
   ): SessionHandle | null {
     const from = this.open(source)
     if (from === null) return null
-    const meta = this.list().find((one) => one.id === source)
+    const meta = this.metaById(source)
     const handle = this.create({
       ...(meta?.cwd !== undefined ? { cwd: meta.cwd } : {}),
       ...(meta?.endpoint !== undefined ? { endpoint: meta.endpoint } : {}),
@@ -1185,7 +1231,7 @@ export class SessionStore {
     id: SessionId,
     selection: { readonly endpoint: string; readonly model?: string; readonly reasoningEffort?: string },
   ): SessionMeta | null {
-    const current = this.list().find((meta) => meta.id === id)
+    const current = this.metaById(id)
     if (current === undefined) return null
     const endpoint = selection.endpoint.trim()
     if (endpoint.length === 0) return null
@@ -1199,6 +1245,7 @@ export class SessionStore {
     const meta = this.metaFile(id)
     if (meta === null) return null
     writeFileSync(meta, `${JSON.stringify(next, null, 2)}\n`)
+    this.wroteRecords()
     return next
   }
 
@@ -1213,14 +1260,21 @@ export class SessionStore {
   private metaFile(id: SessionId): string | null {
     const legacy = join(this.root, id, 'meta.json')
     if (existsSync(legacy)) return legacy
+    /** Where the record was last found, while it is still there: a lookup by id need not walk every folder (#257). */
+    const known = this.recordPaths.get(id)
+    if (known !== undefined && existsSync(known)) return known
     try {
       for (const name of readdirSync(this.root)) {
         const candidate = join(this.root, name, metaName(id))
-        if (existsSync(candidate)) return candidate
+        if (existsSync(candidate)) {
+          this.recordPaths.set(id, candidate)
+          return candidate
+        }
       }
     } catch {
       return null
     }
+    this.recordPaths.delete(id)
     return null
   }
 
@@ -1307,6 +1361,24 @@ export class SessionStore {
    * log cannot be read is left out, and named once ({@link SessionStore.logReadable}).
    */
   list(): readonly SessionMeta[] {
+    const writes = recordWrites.get(this.root) ?? 0
+    const kept = this.listed
+    if (kept === undefined || kept.writes !== writes || performance.now() - kept.at >= LIST_MEMO_MS) {
+      const at = performance.now()
+      this.listed = { at, writes, metas: this.scan() }
+    }
+    /** Copies, so a caller that changes what it was given changes nothing another caller reads. */
+    return (this.listed as { readonly metas: readonly SessionMeta[] }).metas.map((meta) => ({ ...meta }))
+  }
+
+  /** How many times {@link list} has read the whole store, for a check that one did not (#257). */
+  get listScans(): number {
+    return this.scans
+  }
+
+  /** The whole store's records, read from disk: every folder walked, every record read, every log's head judged. */
+  private scan(): readonly SessionMeta[] {
+    this.scans += 1
     let names: string[]
     try {
       names = readdirSync(this.root)
@@ -1314,12 +1386,13 @@ export class SessionStore {
       return []
     }
     const metas = new Map<string, SessionMeta>()
-    const remember = (text: string, dir: string): void => {
+    const remember = (text: string, dir: string, path: string): void => {
       try {
         const meta = JSON.parse(text) as SessionMeta
         if (typeof meta?.id !== 'string' || metas.has(meta.id)) return
         if (!this.logReadable(this.transcriptFor(dir, meta.id))) return
         metas.set(meta.id, meta)
+        if (basename(path) === metaName(meta.id)) this.recordPaths.set(meta.id, path)
       } catch {
         // A file that is not metadata is not a reason to lose the sessions that are.
       }
@@ -1328,7 +1401,7 @@ export class SessionStore {
       const at = join(this.root, name)
       if (name.startsWith('session-')) {
         try {
-          remember(readFileSync(join(at, 'meta.json'), 'utf8'), at)
+          remember(readFileSync(join(at, 'meta.json'), 'utf8'), at, join(at, 'meta.json'))
         } catch {
           // A session directory without readable metadata is skipped, as it always was.
         }
@@ -1343,13 +1416,39 @@ export class SessionStore {
       for (const entry of entries) {
         if (!entry.startsWith('session-') || !entry.endsWith('.json')) continue
         try {
-          remember(readFileSync(join(at, entry), 'utf8'), at)
+          remember(readFileSync(join(at, entry), 'utf8'), at, join(at, entry))
         } catch {
           continue
         }
       }
     }
     return [...metas.values()].sort((left, right) => (left.created < right.created ? 1 : -1))
+  }
+
+  /**
+   * One session's record, found **without listing the store** (#257): the record `list()` holds for `id`, or
+   * `undefined` when it holds none — no record, a record naming another id, or a log that cannot be read.
+   *
+   * Hang 5 of #257 was a 2 s poll per open tab that asked `list().find(id)` four times per request: every call read
+   * all 1,700 records and judged every log's head, on a cold file cache after a restart. This reads one record, from
+   * where it was last found ({@link metaFile}), and judges one log. It always reads the file, so a writer that reads
+   * a record before it rewrites it reads the current one.
+   */
+  metaById(id: SessionId): SessionMeta | undefined {
+    const path = this.metaFile(id)
+    if (path === null) return undefined
+    try {
+      const meta = JSON.parse(readFileSync(path, 'utf8')) as SessionMeta
+      if (typeof meta?.id !== 'string' || meta.id !== id) return undefined
+      return this.logReadable(this.transcriptFor(dirname(path), id)) ? meta : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /** A write to this store's records: no `list()` in this process answers from before it. */
+  private wroteRecords(): void {
+    recordWrites.set(this.root, (recordWrites.get(this.root) ?? 0) + 1)
   }
 
   /**
@@ -1892,6 +1991,7 @@ export class SessionStore {
         ...(added > 0 ? { turns: (meta.turns ?? 0) + added } : {}),
       }
       writeFileSync(path, `${JSON.stringify(updated, null, 2)}\n`)
+      this.wroteRecords()
     } catch {
       // A session without readable metadata is still a usable session; the count
       // is a convenience and losing it must not lose the turn.
