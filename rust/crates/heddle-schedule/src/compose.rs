@@ -25,7 +25,7 @@ use heddle_tools::{ToolRegistry, ToolResult};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::delivery::{DeliveryHost, DriverOptions, ScheduleDriver};
+use crate::delivery::{DeliveryHost, DriverOptions, Reservation, ScheduleDriver};
 use crate::service::{SUBAGENT_TARGET_MESSAGE, ScheduleService, ScheduleServiceOptions, Warn};
 use crate::store::default_schedule_file;
 use crate::tool::{ScheduleTools, schedule_tool_specs};
@@ -341,6 +341,49 @@ impl DeliveryHost for RuntimeHost {
             let begun = heddle_agent::begin_turn_queued(&runtime, options)
                 .await
                 .map_err(|error| error.to_string())?;
+            spawner.spawn(async move {
+                if let Err(error) = begun.run().await {
+                    warn(&format!(
+                        "schedule: the reminder turn in session {session} failed — {error}"
+                    ));
+                    if let Some(driver) = driver.and_then(|driver| driver.upgrade()) {
+                        driver.turn_ended(&session);
+                    }
+                }
+            });
+            Ok(())
+        })
+    }
+
+    /// The session's next place in its turn queue (#256): queued now, behind the turn in flight, so a turn queued
+    /// when that one ends (the goal driver's next round) comes after the reminder.
+    fn reserve_next(&self, session_id: &str) -> Option<BoxFuture<'static, Reservation>> {
+        let turns = self.registry()?;
+        let session = session_id.to_owned();
+        Some(Box::pin(async move {
+            Box::new(turns.begin_queued(&session, None).await) as Reservation
+        }))
+    }
+
+    /// The reminder's turn in the place a reservation holds: registered at once (the place is the session's), and
+    /// only then is the place given up, so the next queued turn waits for this one.
+    fn start_turn_reserved(
+        &self,
+        session_id: &str,
+        text: &str,
+        source: Value,
+        reservation: Reservation,
+    ) -> BoxFuture<'static, Result<(), String>> {
+        let prepared = self.prepare(session_id, text, source);
+        let warn = Arc::clone(&self.warn);
+        let driver = self.driver.get().cloned();
+        let session = session_id.to_owned();
+        Box::pin(async move {
+            let (runtime, options, spawner) = prepared?;
+            let begun =
+                heddle_agent::begin_turn(&runtime, options).map_err(|error| error.to_string());
+            drop(reservation);
+            let begun = begun?;
             spawner.spawn(async move {
                 if let Err(error) = begun.run().await {
                     warn(&format!(
@@ -737,6 +780,69 @@ mod tests {
             user_messages(&fixture, &session)[0]["content"][0]["text"],
             json!(render_reminder_framing(&record))
         );
+    }
+
+    /// Issue #256: a reminder that falls due while a turn runs takes the session's next place then, so a turn queued
+    /// when that one ends (the goal driver's next round) runs after the reminder, as DSH's round driver yields to a
+    /// waiting followup. Before, the reminder waited for idle and lost the race to the next round, time after time.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reminder_due_during_a_turn_runs_before_the_turn_queued_after_it() {
+        let fixture = fixture("first", true);
+        let plugin = start(&fixture, json!({})).unwrap();
+        let session = session(&fixture);
+        let record = create_after_schedule_record(
+            "schedule-first",
+            &json!("before the next round"),
+            &json!(30),
+            now() - 60_000,
+            &json!("Later"),
+        )
+        .unwrap();
+        plugin
+            .service
+            .store()
+            .put(
+                &record.id,
+                ScheduleTask::new(session.clone(), record.clone()),
+            )
+            .unwrap();
+        let turns = fixture.runtime.turns.clone().unwrap();
+        // The round in flight.
+        let round = turns.begin_queued(&session, None).await;
+        plugin.start_delivery();
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(
+            user_messages(&fixture, &session).is_empty(),
+            "nothing is written while the round runs"
+        );
+        // The next round queues behind it, as the goal driver's does when a round ends.
+        let next = {
+            let turns = turns.clone();
+            let session = session.clone();
+            tokio::spawn(async move { turns.begin_queued(&session, None).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        drop(round);
+        let next = tokio::time::timeout(std::time::Duration::from_secs(10), next)
+            .await
+            .expect("the next round gets its place")
+            .unwrap();
+        let written = user_messages(&fixture, &session);
+        assert_eq!(
+            written.len(),
+            1,
+            "the reminder's turn was written before the next round got its place"
+        );
+        assert_eq!(
+            written[0]["content"][0]["text"],
+            json!(render_reminder_framing(&record))
+        );
+        // `begin_queued` resolved only once the session was idle: the reminder's turn had ended by then.
+        drop(next);
+        until("the reminder committed", || {
+            plugin.service.tasks()[0].status == crate::store::TaskStatus::Inactive
+        })
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
