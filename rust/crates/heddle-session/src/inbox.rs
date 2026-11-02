@@ -251,17 +251,33 @@ pub fn queue_turn_request(
     Ok(message)
 }
 
-/// The queued next-turn message a request put there, so a retry of that request is answered with the same row
-/// (#162). `queuedByRequest` in the TypeScript build.
+/// The next-turn message a request put in the queue, claimed or not, read from the log, so a retry of that request
+/// (also after a restart) is answered with the same row instead of a second one (#162). `queuedByRequest` in the
+/// TypeScript build.
 pub fn queued_by_request(
     store: &SessionStore,
     handle: &SessionHandle,
     request_id: &str,
 ) -> Result<Option<InboxMessage>, InboxError> {
-    Ok(pending_inbox(store, handle)?
-        .next_turn
-        .into_iter()
-        .find(|message| message.request_id.as_deref() == Some(request_id)))
+    for event in store.read(handle)?.iter() {
+        let event = event.as_ref();
+        if event.kind != INBOX_SPLICED
+            || event.get("target").and_then(Value::as_str) != Some(NEXT_TURN)
+        {
+            continue;
+        }
+        let Some(inserted) = event.get("inserted").and_then(Value::as_array) else {
+            continue;
+        };
+        for value in inserted {
+            if value.get("requestId").and_then(Value::as_str) == Some(request_id)
+                && let Ok(message) = serde_json::from_value::<InboxMessage>(value.clone())
+            {
+                return Ok(Some(message));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Take a queued prompt back out before its turn: one splice that removes it, marked `outcome: "canceled"` as DSH
@@ -310,6 +326,40 @@ pub fn replace_queued(
             .field("target", NEXT_TURN)
             .field("start", start as u64)
             .field("removedCount", 1u64)
+            .field("inserted", inserted),
+        AppendOptions::default(),
+    )?;
+    Ok(true)
+}
+
+/// Move a queued prompt into the running turn: out of next-turn, onto the end of next-step, where the loop claims it at
+/// its next step boundary (#162). Answers whether it was still queued. `steerQueued` in the TypeScript build.
+pub fn steer_queued(
+    store: &SessionStore,
+    handle: &SessionHandle,
+    id: &str,
+) -> Result<bool, InboxError> {
+    let inbox = pending_inbox(store, handle)?;
+    let Some(start) = inbox.next_turn.iter().position(|message| message.id == id) else {
+        return Ok(false);
+    };
+    let message = inbox.next_turn[start].clone();
+    store.append(
+        handle,
+        NewEvent::new(INBOX_SPLICED)
+            .field("target", NEXT_TURN)
+            .field("start", start as u64)
+            .field("removedCount", 1u64)
+            .field("inserted", Value::Array(Vec::new())),
+        AppendOptions::default(),
+    )?;
+    let inserted =
+        serde_json::to_value(std::slice::from_ref(&message)).expect("a message is serializable");
+    store.append(
+        handle,
+        NewEvent::new(INBOX_SPLICED)
+            .field("target", NEXT_STEP)
+            .field("start", inbox.next_step.len() as u64)
             .field("inserted", inserted),
         AppendOptions::default(),
     )?;
