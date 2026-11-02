@@ -161,9 +161,17 @@ render_plist() {
     # The supervisor watches the server's health route (a hung server keeps its port and answers nothing), reclaims a
     # leftover of this same command on the port (the agent abandons its process group, so a killed supervisor leaves
     # its server serving), and holds a lock so no second supervisor of this service ever runs beside it. A server it
-    # judges hung is examined first, into a 0700 directory beside the lock: a node report and a `sample` (#257).
+    # judges hung is examined first, into a 0700 directory beside the lock: a native `sample` and, for node, the
+    # JavaScript stack through the inspector (#257).
+    #
+    # INTERIM (#257, asked by its owner on 2026-11-01): the TS server is judged hung after five missed probes (about
+    # 25 s) instead of three (12-15 s). Its first content search decodes every session log on the event loop, about
+    # 13 s at the deployment's size, so three misses killed a healthy server and every turn running on it. Revert to 3
+    # in the batch that deploys the search-yield fix. The Rust server keeps three.
+    if [ -n "$cli" ]; then misses="${HEDDLE_HEALTH_MISSES:-5}"; else misses="${HEDDLE_HEALTH_MISSES:-3}"; fi
     xml_strings "$node" "$here/supervisor.mjs" \
       --health-url "http://127.0.0.1:$port/healthz" --health-every "${HEDDLE_HEALTH_EVERY:-5}" \
+      --health-misses "$misses" \
       --reclaim-port "$port" --lock "$heddle_home/web-supervisor.$port.lock" \
       --capture-dir "$heddle_home/hang-captures" -- >> "$args"
   fi

@@ -1,7 +1,7 @@
 ---
 title: Web daemon — what launchd does on this Mac, and the rules it forced
 created: 2026-10-23T04:42:38Z
-modified: 2026-11-02T02:12:00Z
+modified: 2026-11-02T03:14:00Z
 level: L3
 version: 1.1.0
 description: The launchd behaviours measured on the owner's Mac (macOS 27.0, 26A428) and the rule each one put into install.sh, supervisor.mjs, guard.sh and 95-web-daemon.
@@ -26,7 +26,7 @@ host, not to this service.
 | `bootout` returns before the job is gone; a `bootstrap` in that window fails with `5: Input/output error` | `install.sh` waits up to 10 s for the old job, retries a refused bootstrap ten times, then exits 1 saying the agent is not loaded |
 | `kickstart -k` on a job younger than `ThrottleInterval` (10 s) waits out the throttle: about 10 s of silence | a restorer must not kick a job that is already restarting |
 | a SIGKILL or SIGTERM of the job's process takes its process group down and the job stays `not running` | `AbandonProcessGroup`: the server outlives a killed supervisor; the next supervisor reclaims it |
-| a hung server keeps its port and the job reads `running` | the supervisor probes `/healthz` and replaces a server that misses three probes |
+| a hung server keeps its port and the job reads `running` | the supervisor probes `/healthz` and replaces a server that misses three probes (five for the TS server, an interim for #257 until its search-yield fix is live) |
 | a hang-kill leaves nothing to say where the server was stuck (#257); node's `--report-on-signal` writes nothing while JavaScript spins, because it is handled on the event loop (node 24.21, 2026-11-01) | before the kill, the supervisor takes a native `sample` and, for node, opens the inspector with SIGUSR1 and pauses it for the JavaScript stack, at most 5 s, into `<heddle home>/hang-captures` (0700, files 0600) |
 
 **The supervisor** restarts at once after a run that lasted, with backoff for failed starts, and retries every 60 s
