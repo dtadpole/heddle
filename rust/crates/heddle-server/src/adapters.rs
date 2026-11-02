@@ -407,6 +407,28 @@ impl SessionService for StoreSessions {
     }
 }
 
+/// Content parts from their JSON form (the queue's, #162).
+fn parts_of(content: Vec<Value>) -> Result<Vec<heddle_session::ContentPart>, ServiceError> {
+    content
+        .into_iter()
+        .map(serde_json::from_value::<heddle_session::ContentPart>)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| ServiceError::new(format!("a content part is malformed: {error}")))
+}
+
+/// A queued inbox message as the server's row (#162).
+fn queue_row(message: heddle_session::inbox::InboxMessage) -> QueueRow {
+    QueueRow {
+        id: message.id,
+        request_id: message.request_id,
+        content: message
+            .content
+            .iter()
+            .filter_map(|part| serde_json::to_value(part).ok())
+            .collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -811,27 +833,5 @@ mod tests {
         assert_eq!(sessions.meta(id), None);
         assert_eq!(sessions.effective_mode(id, "read-only"), "read-only");
         assert_eq!(sessions.folder(id), None);
-    }
-}
-
-/// Content parts from their JSON form (the queue's, #162).
-fn parts_of(content: Vec<Value>) -> Result<Vec<heddle_session::ContentPart>, ServiceError> {
-    content
-        .into_iter()
-        .map(serde_json::from_value::<heddle_session::ContentPart>)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| ServiceError::new(format!("a content part is malformed: {error}")))
-}
-
-/// A queued inbox message as the server's row (#162).
-fn queue_row(message: heddle_session::inbox::InboxMessage) -> QueueRow {
-    QueueRow {
-        id: message.id,
-        request_id: message.request_id,
-        content: message
-            .content
-            .iter()
-            .filter_map(|part| serde_json::to_value(part).ok())
-            .collect(),
     }
 }

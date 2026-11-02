@@ -60,7 +60,9 @@ use crate::page;
 use crate::preview;
 use crate::respond::{self, JsonBody, JsonObject, SessionId, SessionPath, canonical_path};
 use crate::runs::{RunRegistry, iso_time};
-use crate::selection::{SessionSelection, session_request_selection, turn_selection};
+use crate::selection::{
+    SessionSelection, TurnSelection, session_request_selection, turn_selection,
+};
 use crate::services::{
     ApprovalOutcome, FlagPatch, ForkOutcome, GoalAction, GoalAnswer, GoalRef, Harness, OpenAt,
     ServiceError, SessionMeta, SessionService, StartSession,
@@ -3364,10 +3366,15 @@ fn kick_queue(state: &AppState, session: &str) {
             if state.runs().is_closing() || queue_held(&session) {
                 break;
             }
+            // The selection before the claim (developer-ten's review): a server with no endpoint leaves the row queued
+            // rather than a claimed message with no turn.
+            let Some(selection) = queue_selection(&state, &session) else {
+                break;
+            };
             let Some(row) = state.harness().sessions.claim_next_turn(&session) else {
                 break;
             };
-            run_queued(&state, &session, row).await;
+            run_queued(&state, &session, row, selection).await;
         }
         draining()
             .lock()
@@ -3380,20 +3387,27 @@ fn kick_queue(state: &AppState, session: &str) {
 
 /// One claimed row as the session's next turn, on its recorded selection, with its verdict on the stream as a detached
 /// turn's.
-async fn run_queued(state: &AppState, session: &str, row: crate::services::QueueRow) {
-    let sessions = state.harness().sessions.clone();
-    let meta = sessions.meta(session);
+/// The selection a drained turn runs on: the one a turn route would give the session (#162).
+fn queue_selection(state: &AppState, session: &str) -> Option<TurnSelection> {
+    let meta = state.harness().sessions.meta(session);
     let recorded = session_request_selection(meta.as_ref());
-    let Some(selection) = turn_selection(
+    turn_selection(
         None,
         None,
         None,
         &recorded,
         state.options().default_endpoint.as_deref(),
         state.harness().models.as_ref(),
-    ) else {
-        return;
-    };
+    )
+}
+
+async fn run_queued(
+    state: &AppState,
+    session: &str,
+    row: crate::services::QueueRow,
+    selection: TurnSelection,
+) {
+    let sessions = state.harness().sessions.clone();
     let text: String = row
         .content
         .iter()
