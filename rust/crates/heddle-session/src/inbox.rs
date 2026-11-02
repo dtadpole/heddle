@@ -710,4 +710,58 @@ mod tests {
             "nor an unknown id"
         );
     }
+
+    /// Issue #162: the next-turn queue a page keeps on the host.
+    #[test]
+    fn the_next_turn_queue_finds_removes_rewrites_and_claims() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_str().unwrap(), &heddle_config::Env::default());
+        let handle = store.create(CreateOptions::default()).expect("a session");
+        let text = |value: &str| {
+            vec![ContentPart::Text {
+                text: value.to_owned(),
+            }]
+        };
+        let a =
+            queue_turn_request(&store, &handle, text("a"), None, Some("request-a".into())).unwrap();
+        let b =
+            queue_turn_request(&store, &handle, text("b"), None, Some("request-b".into())).unwrap();
+        let c = queue_turn(&store, &handle, text("c"), None).unwrap();
+        assert_eq!(
+            queued_by_request(&store, &handle, "request-b")
+                .unwrap()
+                .map(|row| row.id),
+            Some(b.id.clone())
+        );
+        assert!(remove_queued(&store, &handle, &b.id).unwrap());
+        assert!(
+            !remove_queued(&store, &handle, &b.id).unwrap(),
+            "not removed twice"
+        );
+        let last = store.read(&handle).unwrap().last().cloned().unwrap();
+        assert_eq!(
+            last.get("outcome").and_then(Value::as_str),
+            Some("canceled")
+        );
+        assert!(replace_queued(&store, &handle, &c.id, text("c2")).unwrap());
+        let rows = pending_inbox(&store, &handle).unwrap().next_turn;
+        assert_eq!(
+            rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>(),
+            vec![a.id.clone(), c.id.clone()]
+        );
+        assert_eq!(rows[0].request_id.as_deref(), Some("request-a"));
+        assert_eq!(rows[1].content, text("c2"));
+        assert_eq!(
+            claim_next_turn(&store, &handle).unwrap().map(|row| row.id),
+            Some(a.id)
+        );
+        let last = store.read(&handle).unwrap().last().cloned().unwrap();
+        assert_eq!(
+            last.get("outcome"),
+            None,
+            "a claim delivers, it does not cancel"
+        );
+        claim_next_turn(&store, &handle).unwrap();
+        assert!(claim_next_turn(&store, &handle).unwrap().is_none());
+    }
 }
