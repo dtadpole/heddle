@@ -515,6 +515,8 @@ impl GoalDriver {
                     };
                     // A round waits for the session's progressing descendants (inventory A9); after a wait the
                     // condition is read again, because the goal may have been paused, edited or completed meanwhile.
+                    // A pause or a Stop during the wait is seen only then; no round is running, so there is no turn
+                    // for it to abort, and none starts. A descendant that never goes idle holds the rounds, as in DSH.
                     if self.runner.wait_for_children(session).await {
                         continue;
                     }
