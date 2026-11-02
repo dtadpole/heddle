@@ -3150,6 +3150,12 @@ export function unknownTurnSession(
    * one); a streamed caller (the CLI) keeps its own turn, as before.
    */
   releaseQueue(ctx, handle.id)
+  /**
+   * A prompt the page queued (`queue: true`) for a session that is busy, or already has prompts waiting, goes into the
+   * session's durable next-turn queue and is answered at once (#162): DSH queues it on the host, so a reload, another tab
+   * and another device see it, and the host runs it when the running turn ends. A retry with the same `requestId`
+   * answers the row it queued. On a free session it runs now, as any turn does.
+   */
   if (body.queue === true || (body.detach === true && pendingInbox(ctx.session.store, handle)['next-turn'].length > 0)) {
     const requestId = typeof body.requestId === 'string' && body.requestId.length > 0 ? body.requestId : undefined
     const queued = queueRequest(ctx, handle, [{ type: 'text', text: body.prompt }, ...attachments], requestId)
@@ -3166,12 +3172,6 @@ export function unknownTurnSession(
   const activeTurns = state.running.get(handle.id) ?? 0
   state.running.set(handle.id, activeTurns + 1)
   if (activeTurns === 0) state.runningSince.set(handle.id, Date.now())
-  /**
-   * A prompt the page queued (`queue: true`) for a session that is busy, or already has prompts waiting, goes into the
-   * session's durable next-turn queue and is answered at once (#162): DSH queues it on the host, so a reload, another tab
-   * and another device see it, and the host runs it when the running turn ends. A retry with the same `requestId`
-   * answers the row it queued. On a free session it runs now, as any turn does.
-   */
   /**
    * The turn's abort handle, registered before the stream opens so a stop arriving immediately after the
    * request still finds it. The `finally` below removes it either way, which is what keeps a finished

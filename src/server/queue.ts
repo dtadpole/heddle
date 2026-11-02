@@ -252,8 +252,6 @@ function drain(ctx: Context, session: string): void {
   const store = ctx.session.store
   const handle = store.open(session)
   if (handle === null) return
-  const claimed = claimNextTurn(store, handle)
-  if (claimed === undefined) return
   const options = settings.get(ctx) ?? {}
   const meta = ctx.session.list().find((one) => one.id === session)
   const selection =
@@ -262,9 +260,13 @@ function drain(ctx: Context, session: string): void {
       ? { endpoint: (meta?.endpoint ?? ctx.model.defaultEndpoint())!, ...(meta?.model !== undefined ? { model: meta.model } : {}), ...(meta?.reasoningEffort !== undefined ? { reasoningEffort: meta.reasoningEffort } : {}) }
       : undefined)
   if (selection === undefined) {
+    // Before the claim (developer-ten's review): a server with no endpoint leaves the row queued, not a claimed message
+    // with no turn.
     ctx.logger.warn('queue: no endpoint is configured for the queued turn in session %s', session)
     return
   }
+  const claimed = claimNextTurn(store, handle)
+  if (claimed === undefined) return
   const text = textOf(claimed.content)
   const attachments = claimed.content.filter((part) => part.type !== 'text')
   const maxRounds = options.maxRounds
