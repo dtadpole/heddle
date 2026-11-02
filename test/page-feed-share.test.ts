@@ -143,6 +143,8 @@ interface Tab {
   open(): Source[]
   delivered: string[]
   body: { dataset: Record<string, string> }
+  /** The tab's own `events` object, for the calls `runTurn` makes on it. */
+  events: { whenOpen(timeoutMs: number): Promise<boolean>; nextReady(): Promise<{ resumed?: boolean }> }
   show(): void
   /** Move this tab's clock on, firing the timers that come due. */
   advance(ms: number): void
@@ -207,17 +209,20 @@ function tab(name: string, world: { locks?: Locks | null; bus: Bus; visible: boo
     },
     console,
     delivered,
+    exposed: {} as { events?: Tab['events'] },
   }
   runInNewContext(
     `${marked('feed-order')}
     ${block('events')};
     events.addEventListener('session', (message) => delivered.push(JSON.parse(message.data).n))
+    exposed.events = events
     `,
     context,
   )
   return {
     name,
     sources,
+    events: context.exposed.events!,
     open: () => sources.filter((source) => !source.closed),
     delivered,
     body,
@@ -525,13 +530,45 @@ function runTurnHarness(answer: string) {
     }
     let streamOpen = true;
     const opening = [];
-    const events = { whenOpen: () => (streamOpen ? Promise.resolve() : new Promise((resolve) => opening.push(resolve))) };
+    /** The stream's next \`ready\` as runTurn asks for it, and the reads its catch-up starts (the page's showSession). */
+    const readies = [];
+    let readyAsks = 0;
+    const schedState = { pageOpen: false };
+    async function showSession(id) { calls.push('read ' + id); current = id; return true }
+    const events = {
+      whenOpen: () => (streamOpen ? Promise.resolve(true) : new Promise((resolve) => opening.push(resolve))),
+      nextReady: () => { readyAsks += 1; return new Promise((resolve) => readies.push(resolve)) },
+    };
+    ${marked('stream-catch-up')}
+    ${source('catchUpAtReady')}
     ${block('turnVerdicts')};
     ${source('runTurn')}
-    ({ run: () => runTurn('hello', 'S', [], () => calls.push('accepted')), verdict: (data) => turnVerdicts.receive(data), idle: () => turnVerdicts.endIdle(new Map(), runningTick), close: () => { streamOpen = false }, open: () => { streamOpen = true; for (const resolve of opening.splice(0)) resolve() } })
+    ({
+      run: () => runTurn('hello', 'S', [], () => calls.push('accepted')),
+      verdict: (data) => turnVerdicts.receive(data),
+      idle: () => turnVerdicts.endIdle(new Map(), runningTick),
+      close: () => { streamOpen = false },
+      open: () => { streamOpen = true; for (const resolve of opening.splice(0)) resolve(true) },
+      timeOut: () => { for (const resolve of opening.splice(0)) resolve(false) },
+      ready: (data) => { for (const resolve of readies.splice(0)) resolve(data) },
+      readyAsks: () => readyAsks,
+      show: (id) => { current = id },
+      tasksPage: () => { schedState.pageOpen = true },
+    })
     `,
     { sent, calls, performance: { now: () => 0 }, TextDecoder, chunks: CHUNKS },
-  ) as { run(): Promise<void>; verdict(data: unknown): void; idle(): void; close(): void; open(): void }
+  ) as {
+    run(): Promise<void>
+    verdict(data: unknown): void
+    idle(): void
+    close(): void
+    open(): void
+    timeOut(): void
+    ready(data: unknown): void
+    readyAsks(): number
+    show(id: string): void
+    tasksPage(): void
+  }
   return { sent, calls, harness }
 }
 
@@ -606,4 +643,103 @@ test('a turn is not sent until the page follows the stream, so its first events 
   assert.equal(sent.length, 1, 'and the turn goes once it is')
   harness.verdict({ turn: 't9', outcome: 'done', session: 'S', denials: [] })
   await running
+})
+
+const DETACHED = "{ ok: true, status: 202, headers: { get: (name) => (name === 'content-type' ? 'application/json' : null) }, json: async () => ({ session: 'S', turn: 't9' }) }"
+const reads = (calls: string[]) => Array.from(calls).filter((call) => call.startsWith('read '))
+
+test('the wait for the stream answers whether it opened, and the next ready is given to whoever asked, own or relayed', { timeout: 5000 }, async () => {
+  const world = { locks: new Locks(), bus: new Bus() }
+  const first = tab('first', { ...world, visible: true })
+  await settle()
+  const second = tab('second', { ...world, visible: false })
+  await settle()
+  const late = first.events.whenOpen(3000)
+  first.advance(3000)
+  assert.equal(await late, false, 'a wait that ran out says the stream did not open')
+  const waiting = first.events.whenOpen(3000)
+  const own = first.events.nextReady()
+  const relayed = second.events.nextReady()
+  first.open()[0]!.emit('ready', ready('e-0'))
+  await settle()
+  assert.equal(await waiting, true, 'a wait the stream answered says it opened')
+  assert.equal((await own).resumed, false, "the leading tab's own ready, with its data")
+  assert.equal((await relayed).resumed, false, 'and the ready it relayed, on the following tab')
+  assert.equal(await first.events.whenOpen(3000), true, 'an open stream answers at once')
+})
+
+test('a ready resumed from the cursor needs no read; a fresh one reads the shown session the turn named, and nothing else', () => {
+  const reread = runInNewContext(`${marked('stream-catch-up')}; StreamCatchUp`).reread as (ready: unknown, session: unknown, shown: unknown, elsewhere: unknown) => boolean
+  assert.equal(reread({ resumed: false }, 'S', 'S', false), true, 'a fresh stream: the shown session is read')
+  assert.equal(reread({}, 'S', 'S', false), true, 'a ready without data is fresh too')
+  assert.equal(reread({ resumed: true }, 'S', 'S', false), false, 'a resumed stream replays what it missed')
+  assert.equal(reread({ resumed: false }, 'S', 'OTHER', false), false, 'a session the person left is not read: the read never navigates')
+  assert.equal(reread({ resumed: false }, 'S', null, false), false, 'nor is one when nothing is shown')
+  assert.equal(reread({ resumed: false }, null, 'S', false), false, 'nor without a session named')
+  assert.equal(reread({ resumed: false }, 'S', 'S', true), false, 'nor while the Automation tasks page holds the main area')
+})
+
+test('a turn sent after the wait for the stream ran out reads its session again at the stream\'s first ready, once', { timeout: 5000 }, async () => {
+  const { sent, calls, harness } = runTurnHarness(DETACHED)
+  harness.close()
+  const running = harness.run()
+  await settle()
+  harness.timeOut()
+  await settle()
+  assert.equal(sent.length, 1, 'the turn goes when the wait runs out')
+  assert.equal(harness.readyAsks(), 1, 'and the page asks for the stream\'s next ready')
+  assert.deepEqual(reads(calls), [], 'nothing is read before it comes')
+  harness.ready({ type: 'ready', cursor: 'e-9', resumed: false })
+  await settle()
+  assert.deepEqual(reads(calls), ['read S'], 'the session the 202 named is read again at the ready')
+  harness.verdict({ turn: 't9', outcome: 'done', session: 'S', denials: [] })
+  await running
+  assert.deepEqual(reads(calls), ['read S'], 'once')
+})
+
+test('a turn whose stream resumes from its cursor reads nothing: the server replays what the page missed', { timeout: 5000 }, async () => {
+  const { calls, harness } = runTurnHarness(DETACHED)
+  harness.close()
+  const running = harness.run()
+  await settle()
+  harness.timeOut()
+  await settle()
+  harness.ready({ type: 'ready', cursor: 'e-9', resumed: true })
+  await settle()
+  harness.verdict({ turn: 't9', outcome: 'done', session: 'S', denials: [] })
+  await running
+  assert.deepEqual(reads(calls), [])
+})
+
+test('the catch-up never takes the person anywhere: a session they left, or the tasks page, is not read', { timeout: 5000 }, async () => {
+  for (const away of ['left', 'tasks'] as const) {
+    const { calls, harness } = runTurnHarness(DETACHED)
+    harness.close()
+    const running = harness.run()
+    await settle()
+    harness.timeOut()
+    await settle()
+    if (away === 'left') harness.show('OTHER')
+    else harness.tasksPage()
+    harness.ready({ type: 'ready', cursor: 'e-9', resumed: false })
+    await settle()
+    harness.verdict({ turn: 't9', outcome: 'done', session: 'S', denials: [] })
+    await running
+    assert.deepEqual(reads(calls), [], away)
+  }
+})
+
+test('a page whose stream was open sends with no extra read and asks for no ready', { timeout: 5000 }, async () => {
+  for (const opensLate of [false, true]) {
+    const { calls, harness } = runTurnHarness(DETACHED)
+    if (opensLate) harness.close()
+    const running = harness.run()
+    await settle()
+    if (opensLate) harness.open()
+    await settle()
+    harness.verdict({ turn: 't9', outcome: 'done', session: 'S', denials: [] })
+    await running
+    assert.equal(harness.readyAsks(), 0, opensLate ? 'a stream that opened within the wait' : 'a stream open at the send')
+    assert.deepEqual(reads(calls), [])
+  }
 })

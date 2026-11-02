@@ -9511,6 +9511,8 @@ const events = (() => {
   }
   /** Callers waiting for the stream to open: a turn is sent only once its events will reach this page. */
   const openWaiters = new Set()
+  /** Callers waiting for the stream's next `ready`, each given its data (`nextReady`). */
+  const readyWaiters = new Set()
   function setState(state) {
     document.body.dataset.connection = state
     banner.hidden = state !== 'connecting'
@@ -9528,6 +9530,17 @@ const events = (() => {
     if (!FeedOrder.UNNUMBERED.has(name)) lastDelivered = FeedOrder.parse(id) ?? lastDelivered
     if (id.length > 0) lastEventId = id
     if (leading) post({ kind: 'frame', name, data: message.data, lastEventId: id })
+    if (name === 'ready' && readyWaiters.size > 0) {
+      let data = {}
+      try {
+        data = JSON.parse(message.data) ?? {}
+      } catch {
+        // a ready frame without data is a stream that resumed nothing
+      }
+      const waiting = [...readyWaiters]
+      readyWaiters.clear()
+      for (const resolve of waiting) resolve(data)
+    }
     for (const handler of handlers.get(name) ?? []) {
       try {
         handler(message)
@@ -9713,18 +9726,29 @@ const events = (() => {
      * Resolve once the stream is open, or after `timeoutMs`. A page that sends as soon as it loads would otherwise
      * post its turn before its stream is subscribed, and the turn's first events (the person's own message) would
      * reach the server's log but never this page (measured in check-composer once the stream waited for its lock).
+     *
+     * It answers whether the stream opened: `false` when the wait ran out first, which is the one case where what the
+     * server writes next may be written before this page's stream subscribes (`runTurn`'s catch-up).
      */
     whenOpen(timeoutMs) {
-      if (document.body.dataset.connection === 'open') return Promise.resolve()
+      if (document.body.dataset.connection === 'open') return Promise.resolve(true)
       return new Promise((resolve) => {
-        const done = () => {
+        const done = (opened) => {
           clearTimeout(timer)
-          openWaiters.delete(done)
-          resolve()
+          openWaiters.delete(waiter)
+          resolve(opened)
         }
-        const timer = setTimeout(done, timeoutMs)
-        openWaiters.add(done)
+        const waiter = () => done(true)
+        const timer = setTimeout(() => done(false), timeoutMs)
+        openWaiters.add(waiter)
       })
+    },
+    /**
+     * Resolve at the stream's next `ready`, this tab's own or the one the leading tab relays, with its data: `resumed`
+     * says whether the server replays what came before it.
+     */
+    nextReady() {
+      return new Promise((resolve) => readyWaiters.add(resolve))
     },
     addEventListener(name, handler) {
       if (!handlers.has(name)) {
@@ -11568,6 +11592,39 @@ events.addEventListener('turn', (message) => {
   }
 })
 
+/* stream-catch-up:begin */
+/**
+ * Whether a turn sent before the page's stream opened reads its session again at the stream's `ready` (#128's
+ * first-ready follow-up, developer-ten's (b)).
+ *
+ * The first connection presents no cursor, so its `ready` replays nothing (`StreamBaseline` reads nothing on it either):
+ * the frames the server wrote between the turn's acceptance and the subscription are gone for this page, and the person's
+ * own message was not drawn until a reload. A `ready` that says `resumed` was replayed from the page's cursor, so it
+ * needs no read. The read is the `reset` path's (`showSession` of the shown session), and it must never take the person
+ * anywhere: only while the session the turn named is still the one shown, and not while the Automation tasks page holds
+ * the main area, which `showSession` would close.
+ *
+ * Pure, so `test/page-feed-share.test.ts` judges it out of the page.
+ */
+const StreamCatchUp = {
+  reread(ready, session, shown, elsewhere) {
+    return ready?.resumed !== true && typeof session === 'string' && session.length > 0 && session === shown && elsewhere !== true
+  },
+}
+/* stream-catch-up:end */
+
+/**
+ * Read `session` again once `ready` (the stream's next `ready`, asked for when the turn was sent) comes, if it still
+ * needs it. Live frames are not drawn twice: `showSession` empties the log before it draws the history, keeps the
+ * session's frames that arrive during the read aside (`sessionLoading`) and draws only those recorded past the history
+ * (`drawKeptEvents`), and a later open (the `reset` path's, or the first message's adoption) supersedes this one.
+ */
+function catchUpAtReady(ready, session) {
+  void ready.then((data) => {
+    if (StreamCatchUp.reread(data, session, current, schedState.pageOpen)) void showSession(session)
+  })
+}
+
 async function runTurn(text, key, attachments = [], onAccepted) {
   const target = key === QUEUE_KEY_NONE ? null : key
   const seatAtSend = { endpoint: chosenEndpoint, model: chosenModel, effort: chosenEffort }
@@ -11597,7 +11654,14 @@ async function runTurn(text, key, attachments = [], onAccepted) {
     }
   }
   /** The turn's own events reach this page only through the stream, so a send at load waits for it to open (#128). */
-  await events.whenOpen(3000)
+  const followed = await events.whenOpen(3000)
+  /**
+   * The wait ran out, and the turn goes all the same: what the server writes before this page's stream subscribes (the
+   * person's own message first) never reaches the page, so its session is read again at the stream's `ready`
+   * (`catchUpAtReady`). Asked for now, before anything else is awaited, so a `ready` that comes while the turn is
+   * posted is not missed. A page whose stream was open sends with no extra read.
+   */
+  const caughtUp = followed === false ? events.nextReady() : null
   const startedAt = performance.now()
   // Every record in flight, including one chosen while this turn waited, reaches the server before the turn does.
   while (pendingSaves.size > 0) await Promise.all([...pendingSaves])
@@ -11800,6 +11864,8 @@ async function runTurn(text, key, attachments = [], onAccepted) {
     const accepted = await response.json()
     const session = typeof accepted.session === 'string' ? accepted.session : null
     if (session !== null) await verdict('session', { session })
+    /** The session the `202` names: on a first message, the one this turn created and the panel just adopted. */
+    if (caughtUp !== null) catchUpAtReady(caughtUp, session ?? target)
     const turn = String(accepted.turn ?? '')
     const ended = await turnVerdicts.wait(turn, session)
     /**
