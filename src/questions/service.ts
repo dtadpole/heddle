@@ -351,7 +351,7 @@ export class QuestionService extends Service {
     const request = foldQuestions(this.store.read(handle)).get(id)
     if (request === undefined) throw new QuestionError(`no question request '${id}' in this session`, 'NOT_FOUND')
     if (request.settled !== undefined) throw new QuestionError(`question request '${id}' is already ${request.settled.kind}`, 'SETTLED')
-    const waiter = this.waiters.get(id)
+    const waiter = this.waiterIn(handle, id)
     if (waiter === undefined && !request.continuable) throw new QuestionError(`question request '${id}' is already cancelled`, 'SETTLED')
     const answers = validateAnswers(request.questions, rawAnswers)
     const late = waiter === undefined
@@ -394,6 +394,17 @@ export class QuestionService extends Service {
     return seconds === -1 ? null : seconds
   }
 
+  /**
+   * The turn in this session that waits on a request, if any. A fork copies `question/*` events with their request ids,
+   * so the id alone can name the source's waiter. A fork's copy must not read `waiting`, and its answer must not reach
+   * the source's turn (#245). DSH keys its foreground waits by the live agent, so by session (dsh-user-questions
+   * `waits.get(agent)`).
+   */
+  private waiterIn(handle: SessionHandle, id: string): Waiter | undefined {
+    const waiter = this.waiters.get(id)
+    return waiter !== undefined && waiter.session === handle.id ? waiter : undefined
+  }
+
   private release(id: string): void {
     const waiter = this.waiters.get(id)
     if (waiter?.timer !== undefined) clearTimeout(waiter.timer)
@@ -401,7 +412,7 @@ export class QuestionService extends Service {
   }
 
   private view(handle: SessionHandle, request: FoldedRequest): QuestionRequestView {
-    const waiter = this.waiters.get(request.id)
+    const waiter = this.waiterIn(handle, request.id)
     const base = {
       id: request.id,
       session: handle.id,
