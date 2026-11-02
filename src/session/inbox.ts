@@ -37,6 +37,11 @@ export interface InboxMessage {
   readonly content: readonly ContentPart[]
   /** Who wrote it, when it was not a person (the same field a recorded message carries). */
   readonly source?: unknown
+  /**
+   * The id of the request that queued it, when a page queued it (issue #162): a retried request finds its row by it
+   * instead of queueing a second one, and a page matches its pending row to the host's (DSH's `requestId`).
+   */
+  readonly requestId?: string
 }
 
 /** The inbox's state: DSH's projection, `{ 'next-turn', 'next-step' }`. */
@@ -133,16 +138,66 @@ export function queueSteer(store: InboxStore, handle: SessionHandle, content: re
  * order has to be kept: a turn into an archived session queues its prompt here, and the rejected step claims and
  * drops it (`claimRejected`), which is how DSH records input it discarded.
  */
-export function queueTurn(store: InboxStore, handle: SessionHandle, content: readonly ContentPart[], source?: unknown): InboxMessage {
+export function queueTurn(
+  store: InboxStore,
+  handle: SessionHandle,
+  content: readonly ContentPart[],
+  source?: unknown,
+  options: { readonly requestId?: string } = {},
+): InboxMessage {
   const message: InboxMessage = {
     id: `inbox-${randomUUID()}`,
     role: 'user',
     content: [...content],
     ...(source !== undefined ? { source } : {}),
+    ...(options.requestId !== undefined ? { requestId: options.requestId } : {}),
   }
   const list = pendingInbox(store, handle)['next-turn']
   store.append(handle, { type: INBOX_SPLICED, target: 'next-turn', start: list.length, inserted: [message] })
   return message
+}
+
+/** The queued next-turn message a request put there, so a retry of that request is answered with the same row (#162). */
+export function queuedByRequest(store: InboxStore, handle: SessionHandle, requestId: string): InboxMessage | undefined {
+  return pendingInbox(store, handle)['next-turn'].find((message) => message.requestId === requestId)
+}
+
+/**
+ * Take a queued prompt back out before its turn: one splice that removes it, marked `outcome: 'canceled'` as DSH marks
+ * input dropped unrun (dsh-agent consumed-work). Answers whether it was still queued; a prompt its turn already claimed
+ * is not, and nothing is written (#162).
+ */
+export function removeQueued(store: InboxStore, handle: SessionHandle, id: string): boolean {
+  const list = pendingInbox(store, handle)['next-turn']
+  const start = list.findIndex((message) => message.id === id)
+  if (start === -1) return false
+  store.append(handle, { type: INBOX_SPLICED, target: 'next-turn', start, removedCount: 1, inserted: [], outcome: 'canceled' })
+  return true
+}
+
+/**
+ * Rewrite a queued prompt in place, keeping its id, its request and its place in the list (#162). Answers whether it was
+ * still queued.
+ */
+export function replaceQueued(store: InboxStore, handle: SessionHandle, id: string, content: readonly ContentPart[]): boolean {
+  const list = pendingInbox(store, handle)['next-turn']
+  const start = list.findIndex((message) => message.id === id)
+  if (start === -1) return false
+  const message = list[start]!
+  store.append(handle, { type: INBOX_SPLICED, target: 'next-turn', start, removedCount: 1, inserted: [{ ...message, content: [...content] }] })
+  return true
+}
+
+/**
+ * Claim the first queued prompt for the turn that is about to answer it (DSH's next-turn claim at a turn's first step):
+ * one splice with no `outcome`, because the prompt is delivered, not dropped. The caller writes it as the turn's user
+ * message right after (#162). Answers the claimed message, or `undefined` when nothing waits.
+ */
+export function claimNextTurn(store: InboxStore, handle: SessionHandle): InboxMessage | undefined {
+  const queued = pendingInbox(store, handle)['next-turn'][0]
+  if (queued === undefined) return undefined
+  store.append(handle, { type: INBOX_SPLICED, target: 'next-turn', start: 0, removedCount: 1, inserted: [] })
+  return queued
 }
 
 /**
