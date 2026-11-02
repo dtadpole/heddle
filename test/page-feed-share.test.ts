@@ -500,12 +500,14 @@ function runTurnHarness(answer: string) {
     function refreshRunningStatus() {}
     async function renderSettledAnswers() {}
     function renderScheduleCards() {}
+    function renderPlanCards() {}
     async function attachTurnUsage() {}
     async function attachEditedFiles() {}
     function markStopped() {}
     function noteCompletion() {}
     function rememberCurrent() {}
     function chooseWorkspace() {}
+    function closePlanTabsOutside() {}
     const pendingInteractions = new Map();
     async function renderTree() {}
     async function refreshSessions() { calls.push('sessions read') }

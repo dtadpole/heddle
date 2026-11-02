@@ -77,6 +77,7 @@ function harness(options: { holdGoal?: boolean } = {}): Page {
     function scheduleTreeRefresh() {}
     function renderComposerState() {}
     function chooseWorkspace() {}
+    function closePlanTabsOutside() {}
     function paintEmptyState() {}
     function rememberCurrent() {}
     function paintComposerAccess() {}
@@ -96,6 +97,7 @@ function harness(options: { holdGoal?: boolean } = {}): Page {
     async function refreshGoal() { if (HOLD_GOAL) await hold('goal') }
     async function refreshTodo() {}
     function renderScheduleCards() {}
+    function renderPlanCards() {}
     function renderScheduleDrawer() {}
     async function refreshScheduleList() {}
     async function refreshScheduleCatalog() {}

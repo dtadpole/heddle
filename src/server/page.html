@@ -813,6 +813,10 @@
     font: inherit; font-size: 12px; text-align: left; cursor: pointer;
   }
   .changed-toggle:hover { background: color-mix(in oklab, currentColor 5%, transparent); }
+  /** A submitted plan's card (#231): the Edited files card's treatment, with Open as its action. */
+  .plan-cards { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; white-space: normal; }
+  .plan-cards > .plan-card { margin-top: 0; }
+  .plan-card-action { flex: none; padding: 2px 10px; font-size: 12px; line-height: 20px; color: var(--text-2); border: .5px solid var(--line); border-radius: 8px; }
   .turn.user .turn-time { font-size: 13px; line-height: 24px; color: var(--chat-caption); padding-right: 12px; white-space: nowrap; }
   .turn.user .action { opacity: .6; width: 28px; height: 28px; font-size: .9rem; }
   .turn.user .action[data-copied='true'] { opacity: 1; }
@@ -2353,6 +2357,7 @@
   #question-card .pager button { height: 22px; width: 22px; padding: 0; border: 1px solid var(--border); border-radius: 6px; background: none; color: var(--text); cursor: pointer; }
   #question-card .pager button:disabled { opacity: .35; cursor: default; }
   #question-text { margin: .45rem 0 .5rem; font-size: 13px; line-height: 1.5; white-space: pre-wrap; }
+  #question-card .question-plan { display: block; margin: -.2rem 0 .5rem; padding: 0; font: inherit; font-size: 12px; color: var(--accent); background: none; border: 0; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
   #question-options { display: flex; flex-direction: column; gap: .3rem; margin: 0 0 .5rem; }
   #question-options .q-option {
     display: flex; flex-direction: column; align-items: flex-start; gap: .1rem; width: 100%; padding: .4rem .6rem; text-align: left;
@@ -3060,6 +3065,11 @@
   .rs-tab-close:hover, #rs-new:hover, #rs-close:hover { background: color-mix(in oklab, currentColor 12%, transparent); color: var(--text); }
   #rs-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
   .browser-tab { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+  /** A plan tab (#231): the plan as rendered Markdown, scrolled inside the sidebar. */
+  .plan-tab { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 16px 20px; }
+  .plan-doc[data-rendered='failed'] { white-space: pre-wrap; font-family: var(--code-font); font-size: 12.5px; }
+  .rs-tab[data-kind='plan'] > [role='tab'] { display: inline-flex; align-items: center; gap: 4px; }
+  .rs-tab[data-kind='plan'] > [role='tab'] > svg { flex: none; }
   /** A row, stated: the page's `form` rule makes every form a column. */
   .browser-bar { flex: none; display: flex; flex-direction: row; align-items: center; gap: 2px; padding: 6px; border-bottom: 1px solid var(--line); }
   .browser-bar button { flex: none; height: 28px; min-width: 28px; padding: 0 6px; display: inline-grid; place-items: center; font: inherit; font-size: 12px; color: var(--text-2); background: none; border: 0; border-radius: var(--radius); }
@@ -3717,6 +3727,8 @@
       </span>
     </div>
     <p id="question-text"></p>
+    <!-- A plan review carries its plan as the question's detail: read in the right sidebar, never inline (#231). -->
+    <button type="button" id="question-plan" class="question-plan" hidden>View full plan</button>
     <div id="question-options" role="group" aria-label="Choices"></div>
     <p id="question-skipped" hidden>Skipped</p>
     <!-- A single-line field, not a textarea: the page's composer is the document's first textarea, and checks and tools
@@ -3855,7 +3867,7 @@
 <section id="right-sidebar" aria-label="Right sidebar" hidden>
   <header id="rs-head">
     <div id="rs-tabs" role="tablist" aria-label="Right sidebar tabs"></div>
-    <button type="button" id="rs-new" aria-label="New browser tab" title="New browser tab">+</button>
+    <button type="button" id="rs-new" aria-label="New browser tab" title="New browser tab" hidden>+</button>
     <button type="button" id="rs-close" aria-label="Hide the right sidebar" title="Hide">✕</button>
   </header>
   <div id="rs-body"></div>
@@ -5626,7 +5638,7 @@ async function renderSettledAnswers() {
  * that stopped early. History draws them after the message actions; a live answer gets them when its turn ends, which
  * can be while its markdown is still being drawn.
  */
-const ANSWER_DECORATIONS = '[data-changed-files], .turn-usage, .turn-notice'
+const ANSWER_DECORATIONS = '[data-changed-files], [data-plan-cards], .turn-usage, .turn-notice'
 
 /**
  * An answer's own text, without the card, row and notice that hang below it.
@@ -8527,6 +8539,8 @@ async function showSession(id) {
   if (current !== id) chooseWorkspace(null)
   current = id
   paintEmptyState()
+  /** Another session's plan tabs close as it opens, so a plan never outlives its session on screen (#231, #89). */
+  closePlanTabsOutside(id)
   /** Kept the moment it opens, as DSH's `replaceMain` writes its selection, so a reload comes back here (`restoreSelection`). */
   rememberCurrent()
   /** A one-shot subagent's child shows DSH's read-only record in the composer's place. */
@@ -8683,6 +8697,8 @@ async function showSession(id) {
    * catalog read is newer than their mount and a task deleted since the turn reads "Deleted".
    */
   renderScheduleCards()
+  /** And each completed turn's plan cards, from the same rows a live page drew them from (#231). */
+  renderPlanCards()
   renderScheduleDrawer()
   void refreshScheduleList()
   void refreshScheduleCatalog()
@@ -9606,6 +9622,8 @@ events.addEventListener('session', (message) => {
       void renderSettledAnswers()
       /** DSH's turn tail exists only for a completed turn, so a turn's created-reminder cards land here. */
       renderScheduleCards()
+      /** So do its plan cards, on every page showing the session, not only the one that sent the turn (#231). */
+      renderPlanCards(true)
 
       /** A turn started elsewhere ends only here, and it may have edited files as well as the page's own. */
       void attachEditedFiles()
@@ -11064,6 +11082,7 @@ async function runTurn(text, key, attachments = [], onAccepted) {
       void renderSettledAnswers()
       /** The page's own turn ended here, so its created-reminder cards (DSH's turn tail) are drawn now. */
       renderScheduleCards(true)
+      renderPlanCards(true)
 
       /** DSH's per-Turn usage row, from the durable fold that a reload draws it from. */
       void attachTurnUsage()
@@ -12592,7 +12611,18 @@ function showRightSidebar(open) {
 window.addEventListener('resize', layoutRightSidebar)
 new ResizeObserver(() => layoutRightSidebar()).observe(document.getElementById('workspace-sidebar'))
 
-function closeSidebarTab(tab) {
+/**
+ * Where the focus goes when the sidebar closes from inside: the globe while the Browser shows it, else the control that
+ * opened the tab (a plan card's Open, the review's View full plan) while it is on the page, else the composer (#231).
+ */
+function sidebarReturnFocus(tab) {
+  if (!browserOpen.hidden) browserOpen.focus()
+  else if (tab?.opener instanceof HTMLElement && tab.opener.isConnected && !tab.opener.hidden) tab.opener.focus()
+  else field.focus()
+}
+
+/** Close a tab; `quiet` (a session switch closing that session's plan tabs) moves no focus. */
+function closeSidebarTab(tab, { quiet = false } = {}) {
   const at = sidebarTabs.indexOf(tab)
   if (at < 0) return
   sidebarTabs.splice(at, 1)
@@ -12601,25 +12631,30 @@ function closeSidebarTab(tab) {
   tab.panel.remove()
   if (sidebarTabs.length === 0) {
     activeSidebarTab = null
+    const inside = rightSidebar.contains(document.activeElement) || document.activeElement === document.body
     showRightSidebar(false)
-    browserOpen.focus()
+    if (!quiet || inside) sidebarReturnFocus(tab)
     return
   }
   if (activeSidebarTab === tab) {
     const next = sidebarTabs[Math.min(at, sidebarTabs.length - 1)]
     selectSidebarTab(next)
-    next.button.focus()
+    if (!quiet) next.button.focus()
   }
 }
 
-/** Open another Browser tab, as DSH's guide action does each time, and put the cursor in its address bar. */
-function openBrowserTab(initialAddress) {
-  if (!browserEnabled) return null
+/**
+ * One sidebar tab of any kind: its tab button and close, its panel, selected and shown. The kind's own content is the
+ * `panel` it brings. Nothing here moves the focus; the caller decides (a Browser tab puts the cursor in its address bar,
+ * an automatic plan open leaves the focus where it was). Factored out of the Browser's tab for the plan tab (#231).
+ */
+function openSidebarTab({ kind, panel }) {
   sidebarTabCount += 1
   const id = `rs-tab-${sidebarTabCount}`
-  const tab = { id, nav: { entries: [], index: -1, revision: 0, status: 'empty', failed: false, refusal: null }, frame: null }
+  const tab = { id, kind, frame: null, panel }
   tab.tab = document.createElement('div')
   tab.tab.className = 'rs-tab'
+  tab.tab.dataset.kind = kind
   tab.button = document.createElement('button')
   tab.button.type = 'button'
   tab.button.id = id
@@ -12634,12 +12669,26 @@ function openBrowserTab(initialAddress) {
   close.title = 'Close tab'
   close.textContent = '×'
   tab.tab.append(tab.button, close)
+  panel.id = `${id}-panel`
+  panel.setAttribute('role', 'tabpanel')
+  panel.setAttribute('aria-labelledby', id)
+  tab.button.addEventListener('click', () => selectSidebarTab(tab))
+  close.addEventListener('click', () => closeSidebarTab(tab))
+  sidebarTabs.push(tab)
+  rsTabs.append(tab.tab)
+  rsBody.append(panel)
+  selectSidebarTab(tab)
+  showRightSidebar(true)
+  return tab
+}
 
-  tab.panel = document.createElement('div')
-  tab.panel.className = 'browser-tab'
-  tab.panel.id = `${id}-panel`
-  tab.panel.setAttribute('role', 'tabpanel')
-  tab.panel.setAttribute('aria-labelledby', id)
+/** Open another Browser tab, as DSH's guide action does each time, and put the cursor in its address bar. */
+function openBrowserTab(initialAddress) {
+  if (!browserEnabled) return null
+  const panel = document.createElement('div')
+  panel.className = 'browser-tab'
+  const tab = openSidebarTab({ kind: 'browser', panel })
+  tab.nav = { entries: [], index: -1, revision: 0, status: 'empty', failed: false, refusal: null }
   const bar = document.createElement('form')
   bar.className = 'browser-bar'
   bar.setAttribute('aria-label', 'Browser navigation')
@@ -12673,7 +12722,7 @@ function openBrowserTab(initialAddress) {
   tab.start.className = 'browser-start'
   tab.start.textContent = 'Enter an HTTP(S) address to start browsing'
   tab.view.append(tab.start)
-  tab.panel.append(bar, tab.notice, tab.view)
+  panel.append(bar, tab.notice, tab.view)
 
   bar.addEventListener('submit', (submitEvent) => {
     submitEvent.preventDefault()
@@ -12692,15 +12741,7 @@ function openBrowserTab(initialAddress) {
     const target = tab.nav.entries[tab.nav.index]
     if (target !== undefined && tab.nav.status !== 'unknown') window.open(target.url, '_blank', 'noopener,noreferrer')
   })
-  tab.button.addEventListener('click', () => selectSidebarTab(tab))
-  close.addEventListener('click', () => closeSidebarTab(tab))
-
-  sidebarTabs.push(tab)
-  rsTabs.append(tab.tab)
-  rsBody.append(tab.panel)
   renderBrowserTab(tab)
-  selectSidebarTab(tab)
-  showRightSidebar(true)
   if (initialAddress !== undefined) browserLoad(tab, initialAddress)
   tab.address.focus()
   return tab
@@ -12714,6 +12755,8 @@ function applyBrowserFeature(enabled) {
   browserEnabled = enabled
   browserOpen.hidden = !enabled
   refreshShortcuts()
+  /** A plan tab opens the sidebar on a server without the Browser too (#231); its New browser tab button is the Browser's. */
+  document.getElementById('rs-new').hidden = !enabled
 }
 
 /**
@@ -12734,14 +12777,15 @@ function toggleRightSidebar() {
     return
   }
   showRightSidebar(true)
-  activeSidebarTab.address.focus()
+  /** A plan tab has no address bar; its tab button takes the cursor. */
+  ;(activeSidebarTab.address ?? activeSidebarTab.button).focus()
 }
 
 browserOpen.addEventListener('click', () => toggleRightSidebar())
 document.getElementById('rs-new').addEventListener('click', () => openBrowserTab())
 document.getElementById('rs-close').addEventListener('click', () => {
   showRightSidebar(false)
-  browserOpen.focus()
+  sidebarReturnFocus(activeSidebarTab)
 })
 /** Arrow keys move between the sidebar's tabs, the behaviour `role=tablist` promises. */
 rsTabs.addEventListener('keydown', (keyEvent) => {
@@ -12753,6 +12797,228 @@ rsTabs.addEventListener('keydown', (keyEvent) => {
   selectSidebarTab(next)
   next.button.focus()
 })
+
+/* ── Plans: the plan tab and the turn's plan cards (#231) ───────────────────────────────────────────────────────── */
+/**
+ * A submitted plan is read in the right sidebar, as DSH's `dsh-client-ui-plan` does: rendered Markdown in a plan tab, not
+ * raw text in the review card. Three ways in, one tab per plan:
+ *
+ * - the review card's **View full plan**, for the plan under review (the question's `detail`, #231's server half);
+ * - an **automatic open**, once per plan per browser session (sessionStorage), when a review is first shown. Never on a
+ *   narrow layout, where the sidebar covers the conversation and would hide the review card, and never taking the focus
+ *   from where it was (the composer, or the card's own controls, #158);
+ * - a completed turn's **plan card**, one per `exit_plan_mode` call, which stays after approval, a keep-planning answer
+ *   or a dismissal.
+ *
+ * A tab is keyed by its session and its plan: the presenting call's id (the review's `intent.callId`, the card's tool
+ * call), else the review request's id. Opening a plan already open selects its tab instead of adding one, and opening
+ * another session closes this one's plan tabs (#89 is that bug for the Browser tab). The document is drawn by the
+ * server's renderer, `POST /api/markdown`, with the answers' code highlighting; the tab carries no Approve or Keep
+ * planning, which stay on the review card alone.
+ */
+const PLAN_OPENED_PREFIX = 'heddle.plan-opened.'
+const PLAN_HEADING = /^#{1,6}\s+(.+?)\s*$/
+
+/** A plan's title, its first heading at any level, as `planTitle` reads it on the server. */
+function planTitleOf(markdown) {
+  for (const line of String(markdown).split('\n')) {
+    const match = PLAN_HEADING.exec(line)
+    if (match !== null) return match[1]
+  }
+  return 'Plan'
+}
+
+/** A review question as the plan service asks it: the `plan-review` intent with the plan as its detail. */
+function isPlanReviewQuestion(question) {
+  return question?.intent?.kind === 'plan-review' && typeof question.detail === 'string' && question.detail.trim() !== ''
+}
+
+/** A plain text-file glyph, DSH's plan tab icon; `size` in pixels. */
+function planGlyph(size) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+  svg.setAttribute('viewBox', '0 0 16 16')
+  svg.setAttribute('width', String(size))
+  svg.setAttribute('height', String(size))
+  svg.setAttribute('fill', 'none')
+  svg.setAttribute('stroke', 'currentColor')
+  svg.setAttribute('stroke-width', '1.2')
+  svg.setAttribute('stroke-linecap', 'round')
+  svg.setAttribute('stroke-linejoin', 'round')
+  svg.setAttribute('aria-hidden', 'true')
+  svg.append(svgPath('M4 1.5h5.5L12.5 4.5V14a.5.5 0 0 1-.5.5H4a.5.5 0 0 1-.5-.5V2a.5.5 0 0 1 .5-.5Z'), svgPath('M9.5 1.5v3h3M5.5 8h5M5.5 10.5h5M5.5 5.5h2'))
+  return svg
+}
+
+/** Draw a plan with the server's renderer; if that fails, the plan's own text is shown, never nothing. */
+async function renderPlanDocument(doc, markdown) {
+  try {
+    const response = await fetch('/api/markdown', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: markdown }) })
+    const body = response.ok ? await response.json() : null
+    if (body === null || typeof body.html !== 'string') throw new Error('the renderer answered nothing')
+    doc.innerHTML = body.html
+    decorateCodeBlocks(doc)
+    doc.dataset.rendered = 'true'
+  } catch {
+    doc.textContent = markdown
+    doc.dataset.rendered = 'failed'
+  }
+  doc.removeAttribute('aria-busy')
+}
+
+/**
+ * Show a plan in its tab: select the open one for this session and key, or open one. `focus` puts the cursor on the tab
+ * (a click asked for it); without it the focus stays where it was. `opener` is where the cursor returns when the
+ * sidebar closes from inside.
+ */
+function openPlanTab(plan, { focus = true, opener = null } = {}) {
+  const before = document.activeElement
+  let tab = sidebarTabs.find((each) => each.kind === 'plan' && each.session === plan.session && each.key === plan.key)
+  if (tab !== undefined) {
+    selectSidebarTab(tab)
+    showRightSidebar(true)
+  } else {
+    const panel = document.createElement('div')
+    panel.className = 'plan-tab'
+    const doc = document.createElement('div')
+    doc.className = 'plan-doc markdown'
+    doc.dataset.planDoc = ''
+    doc.setAttribute('aria-busy', 'true')
+    panel.append(doc)
+    tab = openSidebarTab({ kind: 'plan', panel })
+    tab.session = plan.session
+    tab.key = plan.key
+    tab.button.dataset.planKey = plan.key
+    tab.button.prepend(planGlyph(12))
+    tab.label.textContent = plan.title
+    tab.button.title = plan.title
+    void renderPlanDocument(doc, plan.markdown)
+  }
+  if (opener !== null) tab.opener = opener
+  if (focus) tab.button.focus()
+  else if (before instanceof HTMLElement && before.isConnected && document.activeElement !== before) before.focus({ preventScroll: true })
+  return tab
+}
+
+/** Opening a session closes every other session's plan tabs, without moving the focus. */
+function closePlanTabsOutside(session) {
+  for (const tab of [...sidebarTabs]) if (tab.kind === 'plan' && tab.session !== session) closeSidebarTab(tab, { quiet: true })
+}
+
+/** Whether the sidebar would open beside the conversation: not on a narrow window, and not as a cover over it. */
+function planAutoOpenRoom() {
+  const viewport = document.documentElement.clientWidth
+  if (viewport < RIGHTBAR_FULLSCREEN_BELOW || sidebarNarrow()) return false
+  if (!rightSidebar.hidden) return rightSidebar.dataset.presentation === 'push'
+  const start = Math.round(conversationColumn.getBoundingClientRect().left)
+  return viewport - start - RIGHTBAR_CENTER_MIN >= RIGHTBAR_MIN
+}
+
+/** A review the card shows for the first time opens its plan, once per plan in this browser session. */
+function autoOpenPlanReview(request) {
+  if (request.state !== 'waiting') return
+  const review = request.questions.find(isPlanReviewQuestion)
+  if (review === undefined || !planAutoOpenRoom()) return
+  const key = typeof review.intent.callId === 'string' ? review.intent.callId : request.id
+  const session = request.session ?? current
+  const marker = `${PLAN_OPENED_PREFIX}${session}.${key}`
+  try {
+    if (sessionStorage.getItem(marker) !== null) return
+    sessionStorage.setItem(marker, '1')
+  } catch {}
+  openPlanTab({ session, key, title: planTitleOf(review.detail), markdown: review.detail }, { focus: false })
+}
+
+/** The plan an `exit_plan_mode` row carries, from its arguments: `{ key, title, markdown }`, or `null`. */
+function planOfToolRow(row) {
+  const key = row.dataset.toolCallId
+  if (!key) return null
+  let args = null
+  try {
+    args = JSON.parse(row.querySelector('[data-args]')?.textContent ?? '')
+  } catch {
+    return null
+  }
+  const markdown = typeof args?.plan === 'string' ? args.plan.trim() : ''
+  return markdown === '' ? null : { key, title: planTitleOf(markdown), markdown }
+}
+
+/** One plan card, the Edited files card's treatment with the plan glyph: the title, and Open. */
+function planCard(plan) {
+  const card = document.createElement('div')
+  card.className = 'changed-files plan-card'
+  card.dataset.planCard = plan.key
+  const open = document.createElement('button')
+  open.type = 'button'
+  open.className = 'changed-head plan-card-open'
+  open.setAttribute('aria-label', `Open plan: ${plan.title}`)
+  const tile = document.createElement('span')
+  tile.className = 'changed-tile'
+  tile.append(planGlyph(18))
+  const titles = document.createElement('span')
+  titles.className = 'changed-titles'
+  const title = document.createElement('span')
+  title.className = 'changed-title'
+  title.textContent = plan.title
+  const kind = document.createElement('span')
+  kind.className = 'changed-stat'
+  kind.textContent = 'Plan · Markdown'
+  titles.append(title, kind)
+  const action = document.createElement('span')
+  action.className = 'plan-card-action'
+  action.textContent = 'Open'
+  open.append(tile, titles, action)
+  open.addEventListener('click', () => {
+    openPlanTab({ session: card.dataset.session || current, key: plan.key, title: plan.title, markdown: plan.markdown }, { focus: true, opener: open })
+  })
+  card.dataset.session = current ?? ''
+  card.append(open)
+  return card
+}
+
+/**
+ * Draw each completed turn's plan cards: one per `exit_plan_mode` call, keyed by its call id, in call order, below the
+ * turn's last answer with the other things an answer carries (the Edited files card, the usage row). A turn that ended
+ * with no answer row gets them in a block after its last row.
+ *
+ * The cards come from the tool rows, which the history render and the live stream draw alike, so a reload and every
+ * other page showing the session draw what the sending page drew. A turn is complete as for the reminder cards: an
+ * earlier turn always, the last one once the session is not running or its own end just arrived (`turnEnded`). Called
+ * from the session load and both turn ends; a re-render adds nothing, because a mounted card is kept by its key.
+ */
+function renderPlanCards(turnEnded = false) {
+  const segments = []
+  let rows = []
+  for (const child of Array.from(log.children)) {
+    if (child.hasAttribute('data-chat-running') || child.hasAttribute('data-turn-tail')) continue
+    if (child.classList.contains('turn') && child.dataset.kind === 'user') {
+      segments.push(rows)
+      rows = []
+      continue
+    }
+    rows.push(child)
+  }
+  segments.push(rows)
+  const last = segments.length - 1
+  segments.forEach((turn, index) => {
+    if (index === last && !turnEnded && sessionRunning()) return
+    const plans = turn.filter((row) => row.classList.contains('tool') && row.dataset.toolName === 'exit_plan_mode').map(planOfToolRow).filter((plan) => plan !== null)
+    if (plans.length === 0) return
+    const answer = turn.filter((row) => row.classList.contains('turn') && row.dataset.kind === 'assistant').at(-1)
+    let holder = answer?.querySelector(':scope > [data-plan-cards]') ?? turn.find((row) => row.matches('div[data-plan-cards]')) ?? null
+    if (holder === null) {
+      holder = document.createElement('div')
+      holder.className = 'plan-cards'
+      holder.dataset.planCards = ''
+      if (answer !== undefined) answer.insertBefore(holder, answer.querySelector(':scope > :is(.turn-notice, .turn-usage)'))
+      else turn[turn.length - 1].after(holder)
+    }
+    const mounted = new Map(Array.from(holder.querySelectorAll(':scope > [data-plan-card]')).map((card) => [card.dataset.planCard, card]))
+    plans.forEach((plan, position) => {
+      const card = mounted.get(plan.key) ?? planCard(plan)
+      if (holder.children[position] !== card) holder.insertBefore(card, holder.children[position] ?? null)
+    })
+  })
+}
 
 accessButton.addEventListener('click', (clickEvent) => {
   clickEvent.stopPropagation()
@@ -24915,6 +25181,7 @@ function renderQuestion() {
   document.getElementById('question-prev').disabled = draft.index === 0
   document.getElementById('question-next').disabled = draft.index === total - 1
   document.getElementById('question-text').textContent = question.question
+  document.getElementById('question-plan').hidden = !isPlanReviewQuestion(question)
   const options = document.getElementById('question-options')
   options.replaceChildren()
   for (const option of question.options ?? []) {
@@ -25011,6 +25278,7 @@ function showQuestion(request, options = {}) {
   const note = document.getElementById('question-note')
   note.dataset.kind = ''
   renderQuestion()
+  if (!readOnly) autoOpenPlanReview(request)
 }
 function hideQuestion() {
   clearInterval(questionTimer)
@@ -25102,6 +25370,14 @@ document.getElementById('question-skip').addEventListener('click', () => {
 })
 document.getElementById('question-submit').addEventListener('click', () => void questionSubmit())
 document.getElementById('question-close').addEventListener('click', () => hideQuestion())
+document.getElementById('question-plan').addEventListener('click', (clickEvent) => {
+  const shown = questionShown
+  if (shown === null) return
+  const question = shown.request.questions[shown.draft.index]
+  if (!isPlanReviewQuestion(question)) return
+  const key = typeof question.intent.callId === 'string' ? question.intent.callId : shown.request.id
+  openPlanTab({ session: shown.request.session ?? current, key, title: planTitleOf(question.detail), markdown: question.detail }, { focus: true, opener: clickEvent.currentTarget })
+})
 document.getElementById('question-take-time').addEventListener('click', () => void questionHold())
 questionCustom.addEventListener('input', () => {
   const shown = questionShown

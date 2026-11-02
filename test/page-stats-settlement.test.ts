@@ -95,7 +95,7 @@ function harness(): Harness {
     const selectionForTurn = () => ({});
     const noop = () => {};
     const settleReasoning = noop, settleChat = noop, refreshRunningStatus = noop,
-      renderScheduleCards = noop, scheduleTreeRefresh = noop, scheduleGoalRefresh = noop,
+      renderScheduleCards = noop, renderPlanCards = noop, scheduleTreeRefresh = noop, scheduleGoalRefresh = noop,
       scheduleTodoRefresh = noop, paintRunningMarks = noop, renderComposerState = noop,
       add = noop, paintDock = noop, noteCompletion = noop, markBranchable = noop,
       attachEditedFiles = noop, attachTurnUsage = noop;
