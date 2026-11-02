@@ -16,7 +16,9 @@ use heddle_llm::{GenerateRequest, ModelError, ModelHooks, ModelService};
 use heddle_session::{SessionHandle, SessionStore};
 use heddle_tools::Tool;
 
-use crate::mode::{PlanChange, PlanLog, PlanSessions, plan_active, set_plan_mode};
+use crate::mode::{
+    PlanChange, PlanLog, PlanSessions, plan_active, set_plan_mode, set_plan_mode_with,
+};
 use crate::policy::with_plan_policy;
 use crate::routes::{self, PlanRouteHost};
 use crate::tool::{PlanReviewChannel, PlanToolHost, exit_plan_mode_tool};
@@ -202,8 +204,9 @@ impl PlanToolHost for PlanService {
         PlanService::active(self, session)
     }
 
+    /// The approval's own leave writes the mode alone, without the user-switch notice (#228; [`set_plan_mode_with`]).
     fn leave(&self, session: &SessionHandle) -> Result<(), String> {
-        self.set_mode(session, false).map(|_| ())
+        set_plan_mode_with(self.store.as_ref(), session, false, false).map(|_| ())
     }
 
     fn channel(&self) -> Option<Arc<dyn PlanReviewChannel>> {

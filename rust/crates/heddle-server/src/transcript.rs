@@ -401,6 +401,17 @@ struct UsageAccount {
     start: usize,
 }
 
+/// Whether a logged event is a replacement copy: it shadowed a span of the model's surface
+/// (`surfaceOp: {"op": "replace", …}`) instead of appending to it. `transcriptTurns` in `src/server/web.ts`
+/// reads the marker the same way (through `isReplacementCopy` in `src/server/ledger.ts`).
+fn is_replacement_copy(event: &Value) -> bool {
+    event
+        .get("surfaceOp")
+        .and_then(|op| op.get("op"))
+        .and_then(Value::as_str)
+        == Some("replace")
+}
+
 /// Fold a session's recorded events into the turns the page renders.
 pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
     let mut turns: Vec<ChatTurn> = Vec::new();
@@ -471,6 +482,13 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
             continue;
         }
         if event_type == "message" {
+            // A replacement copy is not a turn. It is a message that shadows part of the model's surface: today, a
+            // tool result cut down under context pressure. It is what the model is sent, not what a person reads,
+            // and the original it shadows is already on the call. DSH's chat keeps such a copy model-only
+            // (`isAppendSurfaceEvent`). Folded, it became a second, unpaired tool row (#186).
+            if is_replacement_copy(event) {
+                continue;
+            }
             close_runs(&mut open_assistant, &mut open_reasoning);
             let Some(message) = event.get("message") else {
                 continue;
@@ -793,6 +811,48 @@ fn append(turns: &mut Vec<ChatTurn>, kind: TurnKind, text: &str, index: Option<u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #186: a tool result pruned under context pressure is written again as a second `message` for the same call, marked
+    /// `surfaceOp: {"op": "replace"}`. It is what the model is sent, not what a person reads, as DSH's chat keeps a
+    /// replacement copy model-only. The fold found the call closed and pushed the copy as an extra, unpaired tool turn.
+    /// The fixture is the one `test/web.test.ts` and both ledger projections read.
+    #[test]
+    fn a_pruned_tool_result_stays_one_turn_with_the_original() {
+        let events: Vec<Value> =
+            include_str!("../../heddle-web-trajectory/tests/fixtures/pruned-result.jsonl")
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| {
+                    serde_json::from_str(line).expect("each fixture line is one JSON event")
+                })
+                .collect();
+        let original = events
+            .iter()
+            .find(|event| event.get("seq").and_then(Value::as_u64) == Some(5))
+            .and_then(|event| event.pointer("/message/content/0/text"))
+            .and_then(Value::as_str)
+            .expect("the fixture holds the original result at seq 5");
+        let turns = transcript_turns(&events);
+        let kinds: Vec<TurnKind> = turns.iter().map(|turn| turn.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![TurnKind::User, TurnKind::Tool, TurnKind::Assistant],
+            "the person, one call, the answer"
+        );
+        assert_eq!(
+            turns[1].result.as_deref(),
+            Some(original),
+            "and the call holds what the tool returned"
+        );
+        assert!(
+            !turns.iter().any(|turn| turn.text.contains("[pruned,")
+                || turn
+                    .result
+                    .as_deref()
+                    .is_some_and(|result| result.contains("[pruned,"))),
+            "the cut copy is drawn nowhere"
+        );
+    }
 
     #[test]
     fn a_failed_turn_is_the_answers_stop_reason_as_in_typescript() {

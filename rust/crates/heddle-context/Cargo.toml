@@ -16,14 +16,17 @@ testing = []
 
 [dependencies]
 futures.workspace = true
+# The budget refusal's sentence, shared with the context row's write-time rule (#212).
+heddle-config.workspace = true
 heddle-llm.workspace = true
 heddle-session.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha1 = "0.10"
 thiserror.workspace = true
+# The turn's stop token, which a turn's automatic compaction honours (#154); heddle-agent's own version.
+tokio-util = "0.7"
 
 [dev-dependencies]
-heddle-config.workspace = true
 # The integration tests replay the TypeScript build's record through `testing::MemoryStore`.
 heddle-context = { workspace = true, features = ["testing"] }

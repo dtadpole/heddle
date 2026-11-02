@@ -36,7 +36,8 @@ function harness(baseUrl: string) {
   const sandbox = new SandboxService(ctx, { workspaceRoot: scratch, backend: 'none' })
   new ToolRegistry(ctx, new ApprovalService(ctx, { mode: 'allow' }), sandbox, sessions)
   new ContextService(ctx, sessions.store, { instructionsMaxBytes: 100_000, contextWindow: 100_000 })
-  new ModelService(ctx, [{ name: 'double', kind: 'openai-chat', baseUrl, model: 'm' } as never])
+  // The failure is the subject here, not the retry: DSH's default policy would retry it five times (about 15 s).
+  new ModelService(ctx, [{ name: 'double', kind: 'openai-chat', baseUrl, model: 'm', retryPolicy: { maxRetries: 0 } } as never])
   const ends = () => {
     const events = sessions.store.read(session)
     return {

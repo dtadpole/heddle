@@ -1,6 +1,6 @@
 ---
 title: Verifier 1 — LLM Backends
-version: 1.2.0
+version: 1.3.0
 description: heddle connects to backend model servers and runs agent loops over them.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-11, listing the ten verifiers
@@ -30,6 +30,11 @@ a display or a window.
 - `check-window-refusal.mjs` — an Anthropic window refusal (`400 prompt is too long: … tokens > … maximum`) is read
   as a window overflow on the Messages route, so recovery folds once and the retry is answered, and a refusal the
   fold cannot fix fails with the provider's sentence and the way out rather than its JSON (#153).
+- `check-auth-quota.mjs` — a 401 fails the turn with DSH's "API key is invalid" and none of the provider's words
+  (they can echo the key), and a quota-worded 429 with the provider's sentence and DSH's "Request quota exhausted.",
+  sent once (S31).
+- `check-transport-cause.mjs` — a request to a refused port says why on each build (Node's `ECONNREFUSED`, the OS's
+  "Connection refused") and never says the baseUrl's query, fragment, user or password (#217).
 
 ## Running it
 

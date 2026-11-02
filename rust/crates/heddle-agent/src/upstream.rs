@@ -117,7 +117,7 @@ pub struct SurfaceView {
 }
 
 /// What a round's context is prepared for. Mirror of the options of `heddle_context`'s `prepare`/`assemble`.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct PrepareOptions {
     /// The conversation's folder, where instruction files are found.
     pub cwd: PathBuf,
@@ -129,6 +129,9 @@ pub struct PrepareOptions {
     pub tools: Vec<ToolSpec>,
     /// A system prompt for a session that has none.
     pub system: Option<String>,
+    /// The turn's stop token (#154): a Stop or a shutdown cancels the automatic compaction's summary call, and nothing
+    /// lands. `None` outside a turn, and for `assemble`, which calls no model.
+    pub cancel: Option<tokio_util::sync::CancellationToken>,
 }
 
 #[cfg(test)]

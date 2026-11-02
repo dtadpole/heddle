@@ -5,7 +5,7 @@ import Schema from '@deepseek-ai/schemastery'
 
 import { heddleHome } from '../config/schema.ts'
 import type { Chunk, Message, ToolSpec } from '../llm/types.ts'
-import { CONTEXT_WINDOW_EXCEEDED, contextWindowFor } from '../llm/types.ts'
+import { CONTEXT_WINDOW_EXCEEDED, contextWindowFor, summaryFinishFailure } from '../llm/types.ts'
 import { deriveMessage, indexBySeq, type SessionEvent, type SessionHandle, type SessionStore } from '../session/store.ts'
 
 import { resolveBudget, type Budget, type BudgetPolicy } from './budget.ts'
@@ -24,6 +24,8 @@ export * from './compaction.ts'
 export * from './instructions.ts'
 export * from './meter.ts'
 export * from './prune.ts'
+/** The rule a settings write and `config --validate` run over this row before a turn could fail on it (#212). */
+export { contextConfigProblems as configProblems } from '../config/context-rule.ts'
 
 export const name = 'context'
 
@@ -152,6 +154,8 @@ export interface ContextDependencies {
     readonly maxOutputTokens?: number
     /** Tags the call for a consumer that treats a summary differently from a turn. */
     readonly purpose?: string
+    /** The turn's signal, so a Stop cancels the summary call (#154). */
+    readonly signal?: AbortSignal
   }) => Promise<string>
 }
 
@@ -441,6 +445,8 @@ export class ContextService extends Service {
       readonly system?: string
       readonly summarize?: (messages: readonly Message[]) => Promise<string>
       readonly force?: boolean
+      /** The turn's signal: a Stop or a shutdown cancels the summary call, and nothing lands (#154). */
+      readonly signal?: AbortSignal
     },
   ): Promise<ContextReport> {
     const baseline = this.ensureContext(handle, { cwd: options.cwd, ...(options.system !== undefined ? { system: options.system } : {}) })
@@ -451,6 +457,7 @@ export class ContextService extends Service {
       budget,
       measurement,
       ...(options.force !== undefined ? { force: options.force } : {}),
+      ...(options.signal !== undefined ? { signal: options.signal } : {}),
       summarize: options.summarize ?? this.defaultSummarizer(options),
       measure: () => this.measure(handle, tools !== undefined ? { tools } : {}),
     })
@@ -464,7 +471,7 @@ export class ContextService extends Service {
   }
 
   /** The default summariser: one call, the replayed prefix, and the configured cap. */
-  private defaultSummarizer(options: { readonly endpoint: string; readonly model?: string }): (messages: readonly Message[]) => Promise<string> {
+  private defaultSummarizer(options: { readonly endpoint: string; readonly model?: string; readonly signal?: AbortSignal }): (messages: readonly Message[]) => Promise<string> {
     const complete = this.dependencies.complete
     const endpoint = this.config.endpoint ?? options.endpoint
     const model = this.config.model ?? options.model
@@ -476,7 +483,9 @@ export class ContextService extends Service {
         messages,
         ...(this.config.summarizeMaxTokens !== undefined ? { maxOutputTokens: this.config.summarizeMaxTokens } : {}),
         purpose: 'compaction',
-      })    }
+        ...(options.signal !== undefined ? { signal: options.signal } : {}),
+      })
+    }
   }
 
   /** Build the report every caller reads, measuring the surface once more after any rewrite. */
@@ -529,13 +538,19 @@ export default class ContextPlugin extends ContextService {
         return configured === undefined ? undefined : contextWindowFor(configured, model)
       },
       complete: async (request) => {
-        const result = await ctx.model.generate({
-          endpoint: request.endpoint,
-          ...(request.model !== undefined ? { model: request.model } : {}),
-          messages: request.messages,
-          maxOutputTokens: request.maxOutputTokens,
-          ...(request.purpose !== undefined ? { purpose: request.purpose } : {}),
-        })
+        const result = await ctx.model.generate(
+          {
+            endpoint: request.endpoint,
+            ...(request.model !== undefined ? { model: request.model } : {}),
+            messages: request.messages,
+            maxOutputTokens: request.maxOutputTokens,
+            ...(request.purpose !== undefined ? { purpose: request.purpose } : {}),
+          },
+          request.signal,
+        )
+        // A summary cut at its output limit, or ended early any other way, is no checkpoint (#207): DSH's `finishError`.
+        const incomplete = summaryFinishFailure(request.endpoint, result.finishReason)
+        if (incomplete !== undefined) throw incomplete
         return result.text
       },
     })
@@ -561,6 +576,7 @@ export default class ContextPlugin extends ContextService {
         ...(payload.model !== undefined ? { model: payload.model } : {}),
         tools: payload.tools,
         force: true,
+        ...(payload.signal !== undefined ? { signal: payload.signal } : {}),
       })
       const after = ctx.session.surface(payload.session).replaceGeneration
       /**
