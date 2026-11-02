@@ -270,55 +270,74 @@ function inspectorPortOf(pid, servicePort) {
   return null
 }
 
+/** How long `Debugger.pause` may go unanswered: a server blocked inside a native call never answers it. */
+const PAUSE_WAIT_MS = 1_500
+
 /**
- * The JavaScript stack of a hung node server, one frame per line, or `null` when none came within `budgetMs`.
+ * The stack file's lines for a `Debugger.paused` event: the pause reason, then one frame per line with its location and
+ * the **types** of its scopes (local, closure, module, …), which tell an await loop from a synchronous one without
+ * reading a single value. Nothing is evaluated in the server.
+ */
+export function formatPaused(params) {
+  return [
+    `paused: ${params.reason}`,
+    ...params.callFrames.map((frame) => {
+      const scopes = (frame.scopeChain ?? []).map((scope) => scope.type).join(',')
+      return `${frame.functionName || '(anonymous)'} ${frame.url}:${frame.location.lineNumber + 1}:${frame.location.columnNumber + 1} [${scopes}]`
+    }),
+  ]
+}
+
+/**
+ * The JavaScript stack of a hung node server as the stack file's lines: `formatPaused`'s, or one line saying why the
+ * inspector did not pause, so the file always says what happened.
  *
  * SIGUSR1 opens the inspector on loopback; `Debugger.pause` stops the running JavaScript at its next interrupt check
  * and the paused event carries the call frames. A server blocked inside a native call never services the inspector,
- * which is what the native `sample` beside this is for. The inspector stays open only until the kill that follows.
+ * which is what the native `sample` before this is for. The inspector stays open only until the kill that follows.
  */
 async function javascriptStackOf(run, servicePort, budgetMs) {
   const deadline = Date.now() + budgetMs
+  const failed = (reason) => [`inspector did not pause: ${reason}`]
   run.signalling('SIGUSR1')
   let port = null
   while (port === null && Date.now() < deadline) {
     port = inspectorPortOf(run.pid, servicePort)
     if (port === null) await new Promise((resolve) => setTimeout(resolve, 100))
   }
-  if (port === null) return null
+  if (port === null) return failed(`no inspector port within ${budgetMs} ms of SIGUSR1`)
   try {
     const listed = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(Math.max(deadline - Date.now(), 1)) })
     const [target] = await listed.json()
-    if (target?.webSocketDebuggerUrl === undefined) return null
+    if (target?.webSocketDebuggerUrl === undefined) return failed('the inspector listed no target')
     const socket = new WebSocket(target.webSocketDebuggerUrl)
     return await new Promise((resolve) => {
-      const finish = (frames) => {
+      let timer = null
+      const finish = (lines) => {
         clearTimeout(timer)
         try {
           socket.close()
         } catch {
           // already closed
         }
-        resolve(frames)
+        resolve(lines)
       }
-      const timer = setTimeout(() => finish(null), Math.max(deadline - Date.now(), 1))
-      socket.onerror = () => finish(null)
+      timer = setTimeout(() => finish(failed('the inspector socket did not open in time')), Math.max(deadline - Date.now(), 1))
+      socket.onerror = () => finish(failed('the inspector socket failed'))
       socket.onopen = () => {
+        clearTimeout(timer)
+        const wait = Math.max(Math.min(PAUSE_WAIT_MS, deadline - Date.now()), 1)
+        timer = setTimeout(() => finish(failed(`no Debugger.paused within ${wait} ms (blocked inside a native call?)`)), wait)
         socket.send(JSON.stringify({ id: 1, method: 'Debugger.enable' }))
         socket.send(JSON.stringify({ id: 2, method: 'Debugger.pause' }))
       }
       socket.onmessage = (event) => {
         const message = JSON.parse(String(event.data))
-        if (message.method !== 'Debugger.paused') return
-        finish(
-          message.params.callFrames.map(
-            (frame) => `${frame.functionName || '(anonymous)'} ${frame.url}:${frame.location.lineNumber + 1}:${frame.location.columnNumber + 1}`,
-          ),
-        )
+        if (message.method === 'Debugger.paused') finish(formatPaused(message.params))
       }
     })
-  } catch {
-    return null
+  } catch (error) {
+    return failed(error.message)
   }
 }
 
@@ -376,8 +395,8 @@ async function captureHung(run, command, captureDir, servicePort) {
   }
   const left = CAPTURE_BUDGET_MS - (Date.now() - started)
   if (steps.stack && left > 200) {
-    const frames = await javascriptStackOf(run, servicePort, left)
-    if (frames !== null) writeFileSync(join(captureDir, `stack-${stamp}-${run.pid}.txt`), `${frames.join('\n')}\n`, { mode: 0o600 })
+    const lines = await javascriptStackOf(run, servicePort, left)
+    writeFileSync(join(captureDir, `stack-${stamp}-${run.pid}.txt`), `${lines.join('\n')}\n`, { mode: 0o600 })
   }
   const written = readdirSync(captureDir).filter((name) => !before.has(name))
   for (const name of written) {
