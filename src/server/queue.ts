@@ -265,19 +265,19 @@ function drain(ctx: Context, session: string): void {
     ctx.logger.warn('queue: no endpoint is configured for the queued turn in session %s', session)
     return
   }
-  const claimed = claimNextTurn(store, handle)
-  if (claimed === undefined) return
-  const text = textOf(claimed.content)
-  const attachments = claimed.content.filter((part) => part.type !== 'text')
+  if (pendingInbox(store, handle)['next-turn'].length === 0) return
   const maxRounds = options.maxRounds
   const end = options.track?.(session)
-  // The claim wrote the user message with it (one write); the turn answers that message instead of writing it again.
+  /**
+   * The row is claimed by the turn itself, once it holds the session (developer-three's point 3): a direct turn that
+   * takes the slot first runs before it without seeing the row, and the claim (the splice and the user message, one
+   * write) happens where the turn would write its prompt.
+   */
   const turn = runTurn(ctx, {
     session: handle,
     endpoint: selection.endpoint,
-    prompt: text,
-    answerPending: true,
-    ...(attachments.length > 0 ? { attachments } : {}),
+    prompt: '',
+    claim: () => claimNextTurn(store, handle)?.content,
     ...(selection.model !== undefined ? { model: selection.model } : {}),
     ...(selection.reasoningEffort !== undefined ? { reasoningEffort: selection.reasoningEffort } : {}),
     ...(maxRounds !== undefined ? { maxRounds } : {}),
