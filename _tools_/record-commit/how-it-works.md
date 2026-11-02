@@ -1,10 +1,10 @@
 ---
 title: How record-commit works
 created: 2026-10-24T05:00:49Z
-modified: 2026-10-26T14:40:22Z
+modified: 2026-11-01T21:12:46Z
 level: L2
-version: 1.1.0
-description: Why record-commit exists, the seven steps of a run, and how a push that lost a race is replayed or rebuilt.
+version: 1.2.0
+description: Why record-commit exists, the seven steps of a run, how a push that lost a race is replayed or rebuilt, and how a commit refused by a protected main is parked on records/<seat>.
 status: unverified
 grounded_in:
   - source: the record-commit INDEX.md version 1.0.0 this was split from
@@ -42,3 +42,13 @@ given files: rebased onto the new tip and pushed at once, up to five times. That
 wins against a busy remote where a full rebuild kept losing. Otherwise the attempt is **rebuilt from a fresh
 origin** (fetch, new worktree, re-union, re-check) up to `--retries` times, default 2. It never rebases over a
 change to a given file and never force-pushes.
+
+## A protected main
+
+The reflection main became a protected branch on 2026-11-01, so every direct push there fails with GitHub's GH006.
+That is not a race, so it is never replayed. The same commit is **parked** on `refs/heads/records/<seat>`. The seat
+is `--seat`, else the TEAM.yaml key of `$DSH_SESSION_ID`, and with neither the run exits 1. A missing branch is
+created at the commit, which sits on `origin/main`. A branch that main already contains is fast-forwarded. Any other
+branch gets the commit rebuilt on its tip, where a file takes the staged bytes and a log gains only its own lines.
+The branch is read back, the live tree is left as it was, and the run exits 0 with `parked on records/<seat> <sha>`
+as its last line. The coordinator gets the parked branches merged.

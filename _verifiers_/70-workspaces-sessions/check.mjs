@@ -1470,6 +1470,121 @@ test('a turn cut by a server restart reads as interrupted at once, and is closed
   }
 })
 
+test('after a crash, a session whose lock names a pid now another live process\'s, or pid 1, takes the next turn; a live holder is refused in words (#202)', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * Issue #202 by J178's steps (j178/run.sh): make sessions with the server, kill -9 it, so each lock still names the dead
+   * server; then write into one lock the pid of a live unrelated process (a sleep) and into another pid 1, the way a
+   * pid that comes round again looks, and start the server again. Measured before the fix, on both builds: the crashed
+   * one took its turn, but the other two answered "session ... is already owned by an active write handle (process N)"
+   * for as long as that process lived (pid 1: for good), and nothing said what to do.
+   *
+   * DSH's lock is a kernel flock, which dies with its holder (dsh-session-persistence-jsonl lib/index.js:692-716), so a
+   * dead holder never blocks a session. The rewritten locks are the pid-only form every build before #202 wrote, and
+   * they are dated ten minutes back, as a lock the crash left before the pid came round again. A fourth session's lock
+   * names the same sleep, written after it started: that process may be the holder, so its turn is refused, and the
+   * sentence names the process and the lock file and says how to clear it, in the stream and in the server's output.
+   */
+  const { spawn, execFileSync } = await import('node:child_process')
+  const { utimesSync } = await import('node:fs')
+  const h = harness('lock-identity')
+  const serverArgs = ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')]
+  let live
+  let sleeper
+  try {
+    let cookie = ''
+    const connect = async () => {
+      live = await startServer(serverArgs, { ...h.env, HOME: h.home })
+      const handshake = await fetch(live.url, { redirect: 'manual' })
+      cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    }
+    const webTurn = async (body) => {
+      const response = await fetch(new URL('/api/turn', live.url), {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      return { status: response.status, text: await response.text() }
+    }
+    const said = (id) =>
+      readTranscript(join(h.home, 'sessions', id))
+        .filter((event) => event.type === 'message' && event.message?.role === 'user')
+        .map((event) => event.message.content?.[0]?.text)
+    const lockOf = (id) => join(dirname(transcriptFile(join(h.home, 'sessions', id))), `${id}.lock`)
+
+    /** Four sessions, each written by the server, so it holds a lock on each. */
+    await connect()
+    const names = ['crash', 'reuse', 'root', 'held']
+    const ids = {}
+    for (const name of names) {
+      const made = await runCli(adminArgs(h, ['session', 'new', h.work, '--json']), { env: h.env, cwd: h.work })
+      assert.equal(made.code, 0, `the ${name} session was created\n${made.stdout}${made.stderr}`)
+      ids[name] = parseJson(made.stdout)?.session
+      assert.ok(typeof ids[name] === 'string', `it has an id\n${made.stdout}`)
+      const turn = await webTurn({ session: ids[name], prompt: `the ${name} session` })
+      assert.equal(turn.status, 200, `the server's turn in the ${name} session ran\n${turn.text}`)
+      assert.ok(!turn.text.includes('event: error'), `and did not fail\n${turn.text}`)
+    }
+    assert.equal(new Set(Object.values(ids)).size, names.length, 'four sessions')
+    const crashed = live.pid
+    live.kill()
+    live = undefined
+    await new Promise((done) => setTimeout(done, 300))
+    for (const name of names) {
+      const lock = lockOf(ids[name])
+      assert.ok(existsSync(lock), `the killed server left the ${name} session's lock behind`)
+      assert.equal(readFileSync(lock, 'utf8').split(/\s+/)[0], String(crashed), `and it names the dead server, process ${crashed}`)
+    }
+
+    /** The dead server's pid, come round again: a live process that is not heddle, and pid 1. */
+    sleeper = spawn('sleep', ['120'], { stdio: 'ignore' })
+    await new Promise((done, fail) => {
+      sleeper.once('spawn', done)
+      sleeper.once('error', fail)
+    })
+    const tenMinutesAgo = Date.now() / 1000 - 600
+    writeFileSync(lockOf(ids.reuse), `${sleeper.pid}\n`)
+    utimesSync(lockOf(ids.reuse), tenMinutesAgo, tenMinutesAgo)
+    const asRoot = process.getuid?.() === 0
+    if (!asRoot) {
+      writeFileSync(lockOf(ids.root), '1\n')
+      utimesSync(lockOf(ids.root), tenMinutesAgo, tenMinutesAgo)
+    }
+    /** Written after the sleep started, so the sleep may be its holder. */
+    writeFileSync(lockOf(ids.held), `${sleeper.pid}\n`)
+
+    await connect()
+    for (const name of ['crash', 'reuse', ...(asRoot ? [] : ['root'])]) {
+      const turn = await webTurn({ session: ids[name], prompt: `after the restart, ${name}` })
+      assert.equal(turn.status, 200, `the turn into the ${name} session was answered\n${turn.text}`)
+      assert.ok(!turn.text.includes('event: error'), `and accepted: the lock its dead holder left does not block it\n${turn.text}`)
+      assert.deepEqual(said(ids[name]), [`the ${name} session`, `after the restart, ${name}`], `the ${name} session's log holds the turn`)
+      assert.equal(readFileSync(lockOf(ids[name]), 'utf8').split(/\s+/)[0], String(live.pid), 'and the restarted server holds its lock')
+    }
+
+    /** The live holder: refused, and the sentence says which process, which file, and what to do. */
+    const command = process.platform === 'linux'
+      ? readFileSync(`/proc/${sleeper.pid}/comm`, 'utf8').trim()
+      : execFileSync('/bin/ps', ['-o', 'ucomm=', '-p', String(sleeper.pid)], { encoding: 'utf8', env: { LC_ALL: 'C' } }).trim()
+    const sentence =
+      `session "${ids.held}" is already owned by an active write handle (process ${sleeper.pid}, ${command}). ` +
+      `Its lock file is ${ids.held}.lock, beside the session's log; if process ${sleeper.pid} is not heddle, delete that file and try again.`
+    const refused = await webTurn({ session: ids.held, prompt: 'after the restart, held' })
+    assert.equal(refused.status, 200, `the refused turn is answered on its stream\n${refused.text}`)
+    assert.ok(refused.text.includes('event: error'), `with an error frame\n${refused.text}`)
+    assert.ok(refused.text.includes(JSON.stringify(sentence).slice(1, -1)), `whose message names the process and the lock file, and says how to clear it\nwanted: ${sentence}\n${refused.text}`)
+    assert.deepEqual(said(ids.held), ['the held session'], 'and nothing was written to the held session')
+    const line = `heddle web: the failed turn could not be recorded: ${sentence}`
+    for (let waited = 0; waited < 3_000 && !live.output().includes(line); waited += 100) await new Promise((done) => setTimeout(done, 100))
+    assert.ok(live.output().includes(line), `the server says it in its own output, one line\nwanted: ${line}\n${live.output()}`)
+  } finally {
+    live?.kill()
+    sleeper?.kill('SIGKILL')
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 test('a session log that is not a readable log is left out after a restart, and the server still starts whole (#130)', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   /**
@@ -1846,7 +1961,7 @@ function startServer(args, env) {
         const match = /heddle web: (http:\/\/\S+)/.exec(output)
         if (match && !settled) {
           settled = true
-          resolvePromise({ url: match[1], kill: () => child.kill('SIGKILL'), output: () => output })
+          resolvePromise({ url: match[1], pid: child.pid, kill: () => child.kill('SIGKILL'), output: () => output })
         }
       }
       child.stdout.on('data', onData)

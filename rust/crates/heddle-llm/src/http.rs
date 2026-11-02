@@ -195,11 +195,22 @@ pub async fn wire(request: WireRequest) -> Result<WireResponse, ModelError> {
 
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
+        // The provider's own wait, when it names one, is what a retry policy honours.
+        let retry_after_ms = response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| {
+                heddle_config::parse_retry_after(value, std::time::SystemTime::now())
+            });
         let text = read_text(response, endpoint.clone(), idle).await;
         let message = failure_message(&endpoint, status, &text);
-        return Err(
-            ModelError::new(message, endpoint, failure_code(status, &text)).with_status(status),
-        );
+        let error =
+            ModelError::new(message, endpoint, failure_code(status, &text)).with_status(status);
+        return Err(match retry_after_ms {
+            Some(delay) => error.with_retry_after_ms(delay),
+            None => error,
+        });
     }
 
     let content_type = response
