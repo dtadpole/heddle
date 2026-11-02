@@ -4,7 +4,7 @@ import net from 'node:net'
 import { test } from 'node:test'
 
 import { connect, decodeFrame, encodeFrame } from '../../cdp.mjs'
-import { browserPath, chromeArgs, releaseChromeOutput, stateDir, stopChrome } from '../../chrome.mjs'
+import { browserPath, chromeArgs, environmentArgs, releaseChromeOutput, stateDir, stopChrome } from '../../chrome.mjs'
 import { keyDescription, keyEvents, macEditingCommand, parseKey, VISIBLE_CLIPBOARD_REASON } from '../../actions.mjs'
 import { parseGeolocation, parseHeaders, parseViewport } from '../../emulate.mjs'
 import {
@@ -377,6 +377,29 @@ test('every start disables the default apps, headless or windowed, and keeps the
     assert.ok(args.includes('--user-data-dir=/p'))
     assert.deepEqual(args.slice(-2), ['--lang=fr', 'about:blank'])
   }
+})
+
+/**
+ * A seat diagnosing a browser needs flags no check passes: developer-eight's Page.navigate hangs of
+ * 1 November 2026 wanted a --log-net-log capture. HEDDLE_BROWSER_ARGS carries them to every start.
+ */
+test('HEDDLE_BROWSER_ARGS adds flags after the tool\'s own and before a check\'s, which still win', () => {
+  const env = { HEDDLE_BROWSER_ARGS: '  --log-net-log=/tmp/n.json   --net-log-capture-mode=Everything ' }
+  const args = chromeArgs({ profile: '/p', headless: true, args: ['--lang=fr'] }, env)
+  assert.deepEqual(args.slice(-4), ['--log-net-log=/tmp/n.json', '--net-log-capture-mode=Everything', '--lang=fr', 'about:blank'])
+  assert.ok(args.indexOf('--log-net-log=/tmp/n.json') > args.indexOf('--user-data-dir=/p'), 'after the tool\'s own flags')
+  assert.deepEqual(chromeArgs({ profile: '/p' }, {}), chromeArgs({ profile: '/p' }, { HEDDLE_BROWSER_ARGS: '' }), 'unset and empty add nothing')
+  assert.deepEqual(chromeArgs({ profile: '/p' }, {}).slice(-1), ['about:blank'])
+})
+
+test('HEDDLE_BROWSER_ARGS takes a JSON array for a flag with a space, and refuses a malformed one', () => {
+  assert.deepEqual(environmentArgs(undefined), [])
+  assert.deepEqual(environmentArgs('   '), [])
+  assert.deepEqual(environmentArgs('--a --b=1'), ['--a', '--b=1'])
+  assert.deepEqual(environmentArgs('["--log-net-log=/tmp/a dir/n.json", "--v=1"]'), ['--log-net-log=/tmp/a dir/n.json', '--v=1'])
+  assert.throws(() => environmentArgs('[--a'), /HEDDLE_BROWSER_ARGS starts with '\[' but is not JSON/)
+  assert.throws(() => environmentArgs('[1, 2]'), /a JSON array of strings/)
+  assert.throws(() => chromeArgs({ profile: '/p' }, { HEDDLE_BROWSER_ARGS: '["--a", 3]' }), /a JSON array of strings/, 'a launch refuses it rather than half-applying it')
 })
 
 

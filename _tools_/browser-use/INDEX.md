@@ -1,6 +1,6 @@
 ---
 title: Browser Use
-version: 1.2.0
+version: 1.3.0
 description: A browser this repository drives over the Chrome DevTools protocol, with the harness browser's tool surface, one command per tool and one long-lived session behind them.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-17, asking for a browser tool under _tools_ that replicates the DSH browser MCP
@@ -105,7 +105,8 @@ try {
 locations, and `HEDDLE_BROWSER=/path/to/chrome` names one that is elsewhere. Nothing is installed by
 npm. The profile and the session record live under `.heddle-tmp/browser/` in this checkout;
 `HEDDLE_BROWSER_HOME` moves them, and removing the profile forgets every login. `cli.mjs status` says
-what is running, `cli.mjs stop` ends it.
+what is running, `cli.mjs stop` ends it. `HEDDLE_BROWSER_ARGS` adds Chrome flags to every start (spaces, or a
+JSON array), e.g. `--log-net-log=/tmp/net.json`; a running host keeps its flags until it is stopped.
 
 **Watching it work.** The command line is headed by default, so a person can watch and sign in; a check
 is headless by default. The tool's own surface verifier runs headed with
