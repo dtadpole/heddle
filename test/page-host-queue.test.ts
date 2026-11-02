@@ -43,6 +43,7 @@ interface Harness {
   setDraft(text: string): void
   files(): unknown[]
   setFiles(files: unknown[]): void
+  advance(ms: number): void
 }
 
 /** The page's queue functions over a scripted fetch: `turn` answers each POST in order, `list` answers GET queue. */
@@ -51,6 +52,7 @@ function harness(turn: Answer[], list: () => unknown[] = () => [], remove: Answe
     turn,
     list,
     removeAnswers: remove,
+    clock: { now: 0 },
     posts: [] as { requestId: string }[],
     notes: [] as string[],
     Response: undefined,
@@ -66,6 +68,9 @@ function harness(turn: Answer[], list: () => unknown[] = () => [], remove: Answe
     const queue = []
     const NOT_FORWARDED = new Set([502, 503, 504])
     const hostQueueReads = new Map()
+    const admittedRequests = new Set()
+    const UNCONFIRMED_RETRY_MS = 5000
+    const Date = { now: () => clock.now }
     function queueOf() { return queue }
     function renderQueue() {}
     function renderPendingAttachments() {}
@@ -73,7 +78,8 @@ function harness(turn: Answer[], list: () => unknown[] = () => [], remove: Answe
     function add(kind, text) { notes.push(text) }
     let requestCounter = 0
     function newRequestId() { return 'request-' + (++requestCounter) }
-    const setTimeout = (fn) => setImmediate(fn)
+    // The backoff between attempts runs at once; the unconfirmed row's later read is left to the test (sync()).
+    const setTimeout = (fn, ms) => { if (ms !== UNCONFIRMED_RETRY_MS) setImmediate(fn) }
     const reply = async (answer) => {
       const value = typeof answer === 'function' ? await answer() : answer
       if (value === 'throw' || value === undefined) throw new Error('the connection dropped')
@@ -97,6 +103,7 @@ function harness(turn: Answer[], list: () => unknown[] = () => [], remove: Answe
     ${source('restoreSend')}
     ${source('postQueued')}
     ${source('hostEnqueue')}
+    ${source('settleSend')}
     ${source('syncHostQueue')}
     ${source('hostRemove')}
     ${source('removeItem')}
@@ -111,9 +118,10 @@ function harness(turn: Answer[], list: () => unknown[] = () => [], remove: Answe
       setDraft: (text) => { field.value = text },
       files: () => pendingAttachments,
       setFiles: (files) => { pendingAttachments = files },
+      advance: (ms) => { clock.now += ms },
     })
     `,
-    { ...context, setImmediate, JSON, Error, SyntaxError, Promise, Map, Set, Array, String, Math, Date },
+    { ...context, setImmediate, JSON, Error, SyntaxError, Promise, Map, Set, Array, String, Math },
   ) as Harness
 }
 
@@ -219,5 +227,78 @@ test('a removal keeps its row until the host answers, and a failed one puts it b
     [['keep me', 'host']],
     'the host still holds it, and so does the dock',
   )
-  assert.ok(page.notes.some((note) => /could not be removed/.test(note)))
+  assert.ok(page.notes.some((note) => /not confirmed/.test(note)))
+})
+
+test('a 202 whose id is empty is no receipt: it is retried with the same id', async () => {
+  const page = harness([{ status: 202, body: { queued: true, id: '' } }, { status: 202, body: { queued: true, id: 'inbox-2', pending: true } }])
+  await page.enqueue('empty id')
+  assert.deepEqual(plain(page.posts.map((post) => post.requestId)), ['request-1', 'request-1'])
+  assert.deepEqual(plain(page.queue.map((row) => [row.status, row.hostId])), [['host', 'inbox-2']])
+})
+
+test('an unconfirmed row the host already claimed is settled by posting the same request again', async () => {
+  const page = harness(['throw', 'throw', 'throw', { status: 202, body: { queued: true, id: 'inbox-9', duplicate: true, pending: false } }], () => [])
+  await page.enqueue('claimed while unconfirmed')
+  assert.equal(page.queue[0]?.status, 'unknown')
+  await page.sync()
+  assert.equal(page.posts.length, 3, 'not asked again before the retry time')
+  page.advance(5000)
+  await page.sync()
+  await settle()
+  await settle()
+  assert.deepEqual(plain(page.posts.map((post) => post.requestId)), ['request-1', 'request-1', 'request-1', 'request-1'], 'the same request, once more')
+  assert.equal(page.queue.length, 0, 'the host says its turn took it: the row is settled, not left Not confirmed')
+})
+
+test('an unconfirmed row the host still holds is adopted when the same request is posted again', async () => {
+  let listed: unknown[] = []
+  const page = harness(['throw', 'throw', 'throw', async () => {
+    listed = [hostRow('inbox-4', 'request-1', 'pending while unconfirmed')]
+    return { status: 202, body: { queued: true, id: 'inbox-4', duplicate: true, pending: true } }
+  }], () => listed)
+  await page.enqueue('pending while unconfirmed')
+  page.advance(5000)
+  await page.sync()
+  await settle()
+  await settle()
+  await settle()
+  assert.deepEqual(plain(page.queue.map((row) => [row.status, row.hostId])), [['host', 'inbox-4']])
+})
+
+test('a refusal after the host was seen holding the request does not give the message back', async () => {
+  let listed: unknown[] = []
+  let page: Harness
+  page = harness([
+    async () => {
+      // Accepted, its answer lost, and the host's event read before the retry.
+      listed = [hostRow('inbox-5', 'request-1', 'admitted then refused')]
+      await page.sync()
+      throw new Error('the connection dropped')
+    },
+    { status: 409, text: 'session is archived' },
+  ], () => listed)
+  await page.enqueue('admitted then refused')
+  assert.equal(page.draft(), '', 'the words are not given back: the host has the message')
+  assert.deepEqual(plain(page.queue.map((row) => [row.text, row.status])), [['admitted then refused', 'host']])
+})
+
+test('a removal settles by the host’s list even when a read replaced its row meanwhile', async () => {
+  const listed = [hostRow('inbox-1', 'request-1', 'still here')]
+  let fail: () => void = () => {}
+  const removal = () =>
+    new Promise<{ status: number }>((_, reject) => {
+      fail = () => reject(new Error('the connection dropped'))
+    })
+  const page = harness([{ status: 202, body: { queued: true, id: 'inbox-1', pending: true } }], () => listed, [removal])
+  await page.enqueue('still here')
+  await page.sync()
+  page.remove(page.queue[0]!.id)
+  await settle()
+  await page.sync()
+  assert.equal(page.queue[0]?.status, 'removing', 'a read during the removal keeps the mark on the new row')
+  fail()
+  for (let i = 0; i < 6; i += 1) await settle()
+  assert.deepEqual(plain(page.queue.map((row) => [row.text, row.status])), [['still here', 'host']], 'the host still lists it, so it is queued again, not stuck Removing…')
+  assert.ok(page.notes.some((note) => /not confirmed/.test(note)))
 })
