@@ -461,8 +461,18 @@ test('the page is served under a strict script policy that allows its own inline
     await browser.send('Page.addScriptToEvaluateOnNewDocument', {
       source: "window.__csp = []; document.addEventListener('securitypolicyviolation', (event) => window.__csp.push(event.violatedDirective + ' ' + (event.blockedURI || 'inline')))",
     })
+    /**
+     * The workspace is registered before the page loads, and the turn is typed once boot has finished. A page that booted
+     * with no workspace has nowhere to send a first message ("Choose a workspace first"); it only sent one when the click
+     * beat boot's tree read, so this case raced boot (#243/#251 R3 bisect, developer-eleven 2026-11-02).
+     */
+    mkdirSync(server.work, { recursive: true })
+    writeFileSync(join(server.work, 'notes.md'), '# Notes\n\nSome *text*, a list:\n\n- one\n- two\n\n```js\nconst a = 1\n```\n')
+    writeFileSync(join(server.work, 'page.html'), '<!doctype html><html><head><style>h1 { color: teal }</style></head><body><h1>Preview</h1><p>static</p></body></html>')
+    await fetch(new URL('/api/workspaces', server.url), { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ path: server.work }) })
     await browser.goto(server.url)
     assert.ok(await browser.waitFor('document.getElementById("model-trigger") !== null', 20_000), 'the page runs under the policy')
+    assert.ok(await browser.waitFor('document.body.dataset.ready === "true"', 20_000), 'and boots')
     assert.deepEqual(JSON.parse(await browser.evaluate('JSON.stringify(window.__csp ?? null)')), [], 'and loading it breaks no directive')
 
     /**
@@ -470,10 +480,6 @@ test('the page is served under a strict script policy that allows its own inline
      * change that adds an inline script, a handler or an eval fails here instead of being blocked silently. A turn
      * streams, then a markdown file and an HTML preview open from the tree.
      */
-    mkdirSync(server.work, { recursive: true })
-    writeFileSync(join(server.work, 'notes.md'), '# Notes\n\nSome *text*, a list:\n\n- one\n- two\n\n```js\nconst a = 1\n```\n')
-    writeFileSync(join(server.work, 'page.html'), '<!doctype html><html><head><style>h1 { color: teal }</style></head><body><h1>Preview</h1><p>static</p></body></html>')
-    await fetch(new URL('/api/workspaces', server.url), { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ path: server.work }) })
     await browser.evaluate(`(() => { const field = document.querySelector('textarea'); field.value = 'say something'; field.dispatchEvent(new Event('input', { bubbles: true })); document.getElementById('send').click() })()`)
     assert.ok(await browser.waitFor('document.getElementById("log").innerText.includes("live content")', 20_000), 'a turn streams under the policy')
     /** Read before the reload: the listener installed on every new document starts its list again. */
