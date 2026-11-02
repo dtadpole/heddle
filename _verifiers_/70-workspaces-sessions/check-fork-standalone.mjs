@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
@@ -105,6 +105,43 @@ test('#232: a fork made after /permission read-only is read-only too', { timeout
     assert.ok(log.some((event) => event.type === 'permission/mode' && event.mode === 'read-only'), `the branch's log carries the mode switch\n${log.map((event) => event.type).join(' ')}`)
     const inBranch = await command(branch, '/permission')
     assert.match(String(inBranch.text), /current preset read-only/, `the branch is read-only, as its source was when it was forked\nsaw: ${JSON.stringify(inBranch)}`)
+  } catch (error) {
+    error.message += `\n--- server output (tail) ---\n${server.logs().slice(-1500)}`
+    throw error
+  } finally {
+    await server.close()
+    removeDir(home)
+  }
+})
+
+/**
+ * developer-eight's case: a `/compact` after the last turn reaches the branch too. Its summary call must not count as
+ * the next turn beginning, or the walk would stop before the compaction's replacement.
+ */
+test('#232: a fork made after /compact carries the compaction', { timeout: 90_000 }, async () => {
+  const home = isolatedHome('fork-standalone-compact')
+  const work = join(home, 'work')
+  mkdirSync(work, { recursive: true })
+  const { config, script } = scriptedConfig({ home, steps: [{ text: 'ready' }] })
+  writeFileSync(script, JSON.stringify({ steps: [{ text: `an answer ${'with some detail '.repeat(40)}` }, { purpose: 'compaction', text: 'the briefing of the conversation so far' }] }))
+  const server = startServer(home, work, config)
+  try {
+    const url = await server.url
+    const cookie = await cookieFor(url)
+    let session
+    for (const prompt of ['first', 'second', 'third']) {
+      const turn = await api(url, cookie, '/api/turn', { method: 'POST', body: JSON.stringify({ prompt: `${prompt} ${'context '.repeat(60)}`, folder: work, ...(session === undefined ? { new: true } : { session }) }) })
+      assert.equal(turn.status, 200, turn.text)
+      session ??= /session-[0-9a-f-]{36}/.exec(turn.text)?.[0]
+    }
+    const compacted = await api(url, cookie, `/api/sessions/${session}/commands`, { method: 'POST', body: JSON.stringify({ line: '/compact' }) })
+    assert.equal(compacted.status, 200, compacted.text)
+    const source = await events(url, cookie, session)
+    assert.ok(source.some((event) => event.type === 'compaction/end'), `the compaction landed in the source\n${source.map((event) => event.type).join(' ')}`)
+    const forked = await api(url, cookie, `/api/sessions/${session}/fork`, { method: 'POST', body: '{}' })
+    assert.equal(forked.status, 200, forked.text)
+    const log = await events(url, cookie, forked.body.session)
+    assert.ok(log.some((event) => event.type === 'compaction/end'), `the branch carries the compaction\nsource: ${source.map((event) => event.type).join(' ')}\nbranch: ${log.map((event) => event.type).join(' ')}`)
   } catch (error) {
     error.message += `\n--- server output (tail) ---\n${server.logs().slice(-1500)}`
     throw error
