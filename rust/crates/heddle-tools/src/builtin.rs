@@ -347,6 +347,127 @@ fn requested_display_path(cwd: &std::path::Path, path: &str) -> String {
     }
 }
 
+/// DSH's read caps (`dsh-tool-fs` READ_LIMIT, READ_MAX_LINE_LENGTH and READ_MAX_BYTES): lines per window, the
+/// characters kept of one line, and the bytes of selected lines.
+pub const READ_LIMIT: usize = 2000;
+pub const READ_MAX_LINE_LENGTH: usize = 2000;
+pub const READ_MAX_BYTES: usize = 50 * 1024;
+
+/// One window of a text file's lines, numbered from 1, as DSH's read builds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadWindow {
+    pub offset: usize,
+    pub lines: Vec<(usize, String)>,
+    /// Every line of the file, counted to the end whatever the window kept.
+    pub total_lines: usize,
+    /// The window stopped at [`READ_MAX_BYTES`] of selected lines.
+    pub truncated_by_bytes: bool,
+    /// A kept line was cut at [`READ_MAX_LINE_LENGTH`] characters.
+    pub cut_line: bool,
+}
+
+/// The lines `offset` (1-based) onward, at most `limit` of them, as DSH's read window (`dsh-tool-fs` read-render
+/// buildWindow): lines split on LF, a final LF making no extra line, a CR before the LF stripped, a line over
+/// [`READ_MAX_LINE_LENGTH`] characters cut with `... (line truncated to N chars)`, and the window stopped once the
+/// selected lines would pass [`READ_MAX_BYTES`], while the total keeps counting to the end. Characters are counted
+/// in UTF-16 units, as the TypeScript build and DSH count them; a cut never splits a character.
+pub fn read_window(text: &str, offset: usize, limit: usize) -> ReadWindow {
+    let mut pieces: Vec<&str> = text.split('\n').collect();
+    if pieces.last() == Some(&"") {
+        pieces.pop();
+    }
+    let mut window = ReadWindow {
+        offset,
+        lines: Vec::new(),
+        total_lines: 0,
+        truncated_by_bytes: false,
+        cut_line: false,
+    };
+    let mut output_bytes = 0;
+    for piece in pieces {
+        window.total_lines += 1;
+        if window.truncated_by_bytes || window.total_lines < offset || window.lines.len() >= limit {
+            continue;
+        }
+        let line = piece.strip_suffix('\r').unwrap_or(piece);
+        let cut = line.encode_utf16().count() > READ_MAX_LINE_LENGTH;
+        let kept = if cut {
+            let mut units = 0;
+            let end = line
+                .char_indices()
+                .find(|(_, c)| {
+                    units += c.len_utf16();
+                    units > READ_MAX_LINE_LENGTH
+                })
+                .map_or(line.len(), |(at, _)| at);
+            format!(
+                "{}... (line truncated to {READ_MAX_LINE_LENGTH} chars)",
+                &line[..end]
+            )
+        } else {
+            line.to_owned()
+        };
+        let size = kept.len() + usize::from(!window.lines.is_empty());
+        if output_bytes + size > READ_MAX_BYTES {
+            window.truncated_by_bytes = true;
+            continue;
+        }
+        output_bytes += size;
+        window.cut_line |= cut;
+        window.lines.push((window.total_lines, kept));
+    }
+    window
+}
+
+/// DSH's read envelope (`dsh-tool-fs` formatReadOutput): the path, the numbered lines, then a footer that names the
+/// next offset when lines remain or says the end of the file was reached.
+pub fn format_read_window(path: &str, window: &ReadWindow) -> String {
+    let end_line = window
+        .lines
+        .last()
+        .map_or(window.offset.saturating_sub(1), |(number, _)| *number);
+    let footer = if window.truncated_by_bytes {
+        format!(
+            "(Output capped. Showing lines {}-{end_line}. Use offset={} to continue.)",
+            window.offset,
+            end_line + 1
+        )
+    } else if end_line < window.total_lines {
+        format!(
+            "(Showing lines {}-{end_line} of {}. Use offset={} to continue.)",
+            window.offset,
+            window.total_lines,
+            end_line + 1
+        )
+    } else {
+        format!("(End of file - total {} lines)", window.total_lines)
+    };
+    let body = if window.lines.is_empty() {
+        footer
+    } else {
+        let numbered: Vec<String> = window
+            .lines
+            .iter()
+            .map(|(number, text)| format!("{number}: {text}"))
+            .collect();
+        format!("{}\n\n{footer}", numbered.join("\n"))
+    };
+    format!("<path>{path}</path>\n<type>file</type>\n<content>\n{body}\n</content>")
+}
+
+/// A read window argument: absent, a positive integer, or the sentence DSH refuses it with.
+fn window_arg(args: &ToolArgs, name: &str) -> Result<Option<usize>, String> {
+    match args.get(name) {
+        None => Ok(None),
+        Some(value) => match value.as_f64() {
+            Some(number) if number.is_finite() && number.fract() == 0.0 && number >= 1.0 => {
+                Ok(Some(number.min(usize::MAX as f64) as usize))
+            }
+            _ => Err(format!("{name} must be a positive integer")),
+        },
+    }
+}
+
 fn read_file_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
     let read = Arc::clone(&sandbox);
     tool_fn(
@@ -356,7 +477,9 @@ fn read_file_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
             json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "File to read, relative to the workspace or absolute inside it." }
+                    "path": { "type": "string", "description": "File to read, relative to the workspace or absolute inside it." },
+                    "offset": { "type": "number", "description": "1-based first line to return. Defaults to 1." },
+                    "limit": { "type": "number", "description": format!("Maximum number of lines to return. Defaults to {READ_LIMIT}.") }
                 },
                 "required": ["path"],
                 "additionalProperties": false,
@@ -372,6 +495,23 @@ fn read_file_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
                     return Ok(ToolResult::refused(
                         codes::BAD_ARGS,
                         "read_file needs a path",
+                    ));
+                }
+                // A line window, as DSH's read takes one (`dsh-tool-fs` parseReadArgs): `offset` and `limit` are
+                // positive integers and `limit` is at most READ_LIMIT, checked before the path is touched
+                // (live-testing issue #263: the tool took only a path, so a model could never ask for a later part
+                // of a large file).
+                let (offset_arg, limit_arg) =
+                    match (window_arg(&args, "offset"), window_arg(&args, "limit")) {
+                        (Ok(offset), Ok(limit)) => (offset, limit),
+                        (Err(refused), _) | (_, Err(refused)) => {
+                            return Ok(ToolResult::refused(codes::BAD_ARGS, refused));
+                        }
+                    };
+                if limit_arg.is_some_and(|limit| limit > READ_LIMIT) {
+                    return Ok(ToolResult::refused(
+                        codes::BAD_ARGS,
+                        format!("limit must be less than or equal to {READ_LIMIT}"),
                     ));
                 }
                 let target = sandbox.assert_readable(&path, context.mode())?;
@@ -407,11 +547,37 @@ fn read_file_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
                         format!("cannot read \"{shown}\": invalid UTF-8 text"),
                     ));
                 };
-                let data = serde_json::Map::from_iter([
+                let offset = offset_arg.unwrap_or(1);
+                let window = read_window(&text, offset, limit_arg.unwrap_or(READ_LIMIT));
+                if !window.truncated_by_bytes
+                    && offset > window.total_lines
+                    && !(window.total_lines == 0 && offset == 1)
+                {
+                    return Ok(ToolResult::refused(
+                        codes::FS_NOT_FOUND,
+                        format!(
+                            "offset {offset} is out of range for \"{shown}\" ({} lines)",
+                            window.total_lines
+                        ),
+                    ));
+                }
+                // Asked for a window, or larger than one default window (READ_LIMIT lines or READ_MAX_BYTES), the answer is
+                // DSH's numbered envelope with the offset to continue from. Stated difference: a file read without a
+                // window that is no larger comes back as its exact text, as before, long lines included, where DSH
+                // numbers every read.
+                let windowed = offset_arg.is_some() || limit_arg.is_some();
+                let whole = window.total_lines <= READ_LIMIT && text.len() <= READ_MAX_BYTES;
+                let mut data = serde_json::Map::from_iter([
                     ("path".to_owned(), json!(target)),
                     ("bytes".to_owned(), json!(text.len())),
                 ]);
-                Ok(ToolResult::ok(text).with_data(data))
+                if !windowed && whole {
+                    return Ok(ToolResult::ok(text).with_data(data));
+                }
+                data.insert("offset".to_owned(), json!(offset));
+                data.insert("lines".to_owned(), json!(window.lines.len()));
+                data.insert("totalLines".to_owned(), json!(window.total_lines));
+                Ok(ToolResult::ok(format_read_window(&shown, &window)).with_data(data))
             })
         },
     )
@@ -1622,6 +1788,130 @@ mod tests {
             .unwrap();
         assert!(result.error.is_none(), "{:?}", result.error);
         assert_eq!(result.output, text);
+    }
+
+    #[test]
+    fn read_window_numbers_lines_as_dsh_does() {
+        // Live-testing issue #263: DSH's read window. A final LF makes no extra line, a CR before LF is stripped.
+        let text = "one\r\ntwo\nthree\nfour\nfive\n";
+        let window = read_window(text, 2, 2);
+        assert_eq!(window.total_lines, 5);
+        assert_eq!(
+            format_read_window("/w/f.txt", &window),
+            "<path>/w/f.txt</path>\n<type>file</type>\n<content>\n2: two\n3: three\n\n(Showing lines 2-3 of 5. Use offset=4 to continue.)\n</content>"
+        );
+        let end = read_window(text, 5, 2);
+        assert_eq!(
+            format_read_window("/w/f.txt", &end),
+            "<path>/w/f.txt</path>\n<type>file</type>\n<content>\n5: five\n\n(End of file - total 5 lines)\n</content>"
+        );
+        let empty = read_window("", 1, READ_LIMIT);
+        assert_eq!(
+            format_read_window("/w/e.txt", &empty),
+            "<path>/w/e.txt</path>\n<type>file</type>\n<content>\n(End of file - total 0 lines)\n</content>"
+        );
+        assert_eq!(read_window("\n", 1, 10).total_lines, 1);
+        assert_eq!(read_window("a\n\nb", 1, 10).total_lines, 3);
+    }
+
+    #[test]
+    fn read_window_cuts_a_long_line_and_caps_the_bytes() {
+        let long = "x".repeat(READ_MAX_LINE_LENGTH + 5);
+        let window = read_window(&long, 1, READ_LIMIT);
+        assert!(window.cut_line);
+        assert_eq!(
+            window.lines[0].1,
+            format!(
+                "{}... (line truncated to 2000 chars)",
+                "x".repeat(READ_MAX_LINE_LENGTH)
+            )
+        );
+        // 1000 lines of 99 characters: each kept line costs 100 bytes with its newline, so 512 fit in 50 KB.
+        let text = format!("{}\n", "y".repeat(99)).repeat(1000);
+        let capped = read_window(&text, 1, READ_LIMIT);
+        assert!(capped.truncated_by_bytes);
+        assert_eq!(capped.total_lines, 1000);
+        assert_eq!(capped.lines.len(), 512);
+        assert!(format_read_window("/w/big.txt", &capped).ends_with(
+            "\n\n(Output capped. Showing lines 1-512. Use offset=513 to continue.)\n</content>"
+        ));
+    }
+
+    #[test]
+    fn a_line_cut_never_splits_a_character() {
+        // Stated difference: DSH and the TypeScript build cut at 2000 UTF-16 units, so 1999 letters then an emoji
+        // keep the emoji's first half; this build keeps whole characters and drops the emoji.
+        let line = format!("{}\u{1f600}z", "a".repeat(1999));
+        let window = read_window(&line, 1, READ_LIMIT);
+        assert_eq!(
+            window.lines[0].1,
+            format!("{}... (line truncated to 2000 chars)", "a".repeat(1999))
+        );
+    }
+
+    #[tokio::test]
+    async fn read_file_takes_dshs_window_and_refuses_a_bad_one() {
+        let root = tempdir();
+        std::fs::write(root.path().join("five.txt"), "a\nb\nc\nd\ne\n").unwrap();
+        let shown = root.path().join("five.txt").display().to_string();
+        let read = tool("read_file", sandbox(root.path()));
+        let call = |arguments: serde_json::Value| {
+            let read = Arc::clone(&read);
+            let cwd = root.path().to_path_buf();
+            async move {
+                read.run(
+                    args(arguments),
+                    context_in(cwd, SandboxMode::DangerFullAccess),
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let window = call(json!({ "path": "five.txt", "offset": 3, "limit": 2 })).await;
+        assert_eq!(
+            window.output,
+            format!(
+                "<path>{shown}</path>\n<type>file</type>\n<content>\n3: c\n4: d\n\n(Showing lines 3-4 of 5. Use offset=5 to continue.)\n</content>"
+            )
+        );
+        // Without a window a small file still reads as its exact text.
+        assert_eq!(
+            call(json!({ "path": "five.txt" })).await.output,
+            "a\nb\nc\nd\ne\n"
+        );
+        let past = call(json!({ "path": "five.txt", "offset": 9 })).await;
+        assert_eq!(past.error.as_ref().unwrap().code, codes::FS_NOT_FOUND);
+        assert_eq!(
+            past.error.unwrap().message,
+            format!("offset 9 is out of range for \"{shown}\" (5 lines)")
+        );
+        for (arguments, sentence) in [
+            (
+                json!({ "path": "five.txt", "offset": 0 }),
+                "offset must be a positive integer",
+            ),
+            (
+                json!({ "path": "five.txt", "limit": 1.5 }),
+                "limit must be a positive integer",
+            ),
+            (
+                json!({ "path": "five.txt", "limit": 2001 }),
+                "limit must be less than or equal to 2000",
+            ),
+        ] {
+            let refused = call(arguments).await;
+            let error = refused.error.unwrap();
+            assert_eq!(error.code, codes::BAD_ARGS);
+            assert_eq!(error.message, sentence);
+        }
+        // A file over one default window is not returned whole: lines 1-2000 and the offset to go on from.
+        let many: String = (1..=2500).map(|n| format!("line {n}\n")).collect();
+        std::fs::write(root.path().join("many.txt"), many).unwrap();
+        let big = call(json!({ "path": "many.txt" })).await;
+        assert!(big.output.contains(
+            "\n2000: line 2000\n\n(Showing lines 1-2000 of 2500. Use offset=2001 to continue.)"
+        ));
+        assert!(!big.output.contains("2001: line 2001"));
     }
 
     #[tokio::test]

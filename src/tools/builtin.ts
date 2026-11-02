@@ -385,6 +385,78 @@ export function bashWallTime(requested: unknown, defaultMs: number, maxMs: numbe
 }
 
 /** Build the standard tools around one sandbox. */
+/** DSH's read caps (`dsh-tool-fs` READ_LIMIT, READ_MAX_LINE_LENGTH and READ_MAX_BYTES): lines per window, the
+ * characters kept of one line, and the bytes of selected lines. */
+export const READ_LIMIT = 2000
+export const READ_MAX_LINE_LENGTH = 2000
+export const READ_MAX_BYTES = 50 * 1024
+
+/** One window of a text file's lines, numbered from 1, as DSH's read builds it. */
+export interface ReadWindow {
+  readonly offset: number
+  readonly lines: readonly { readonly number: number; readonly text: string }[]
+  /** Every line of the file, counted to the end whatever the window kept. */
+  readonly totalLines: number
+  /** The window stopped at READ_MAX_BYTES of selected lines. */
+  readonly truncatedByBytes: boolean
+  /** A kept line was cut at READ_MAX_LINE_LENGTH characters. */
+  readonly cutLine: boolean
+}
+
+/**
+ * The lines `offset` (1-based) onward, at most `limit` of them, as DSH's read window (`dsh-tool-fs` read-render
+ * buildWindow): lines split on LF, a final LF making no extra line, a CR before the LF stripped, a line over
+ * READ_MAX_LINE_LENGTH characters cut with `... (line truncated to N chars)`, and the window stopped once the selected
+ * lines would pass READ_MAX_BYTES, while the total keeps counting to the end.
+ */
+export function readWindow(text: string, offset: number, limit: number): ReadWindow {
+  const pieces = text.split('\n')
+  if (pieces[pieces.length - 1] === '') pieces.pop()
+  const lines: { number: number; text: string }[] = []
+  let totalLines = 0
+  let outputBytes = 0
+  let truncatedByBytes = false
+  let cutLine = false
+  for (const piece of pieces) {
+    totalLines += 1
+    if (truncatedByBytes || totalLines < offset || lines.length >= limit) continue
+    const line = piece.endsWith('\r') ? piece.slice(0, -1) : piece
+    const cut = line.length > READ_MAX_LINE_LENGTH
+    const kept = cut ? `${line.substring(0, READ_MAX_LINE_LENGTH)}... (line truncated to ${READ_MAX_LINE_LENGTH} chars)` : line
+    const size = Buffer.byteLength(kept, 'utf8') + (lines.length > 0 ? 1 : 0)
+    if (outputBytes + size > READ_MAX_BYTES) {
+      truncatedByBytes = true
+      continue
+    }
+    outputBytes += size
+    cutLine ||= cut
+    lines.push({ number: totalLines, text: kept })
+  }
+  return { offset, lines, totalLines, truncatedByBytes, cutLine }
+}
+
+/**
+ * DSH's read envelope (`dsh-tool-fs` formatReadOutput): the path, the numbered lines, then a footer that names the next
+ * offset when lines remain or says the end of the file was reached.
+ */
+export function formatReadWindow(path: string, window: ReadWindow): string {
+  const endLine = window.lines.at(-1)?.number ?? Math.max(0, window.offset - 1)
+  const footer = window.truncatedByBytes
+    ? `(Output capped. Showing lines ${window.offset}-${endLine}. Use offset=${endLine + 1} to continue.)`
+    : endLine < window.totalLines
+      ? `(Showing lines ${window.offset}-${endLine} of ${window.totalLines}. Use offset=${endLine + 1} to continue.)`
+      : `(End of file - total ${window.totalLines} lines)`
+  const body = window.lines.length > 0 ? `${window.lines.map((line) => `${line.number}: ${line.text}`).join('\n')}\n\n${footer}` : footer
+  return `<path>${path}</path>\n<type>file</type>\n<content>\n${body}\n</content>`
+}
+
+/** A read window argument: absent, a positive integer, or the sentence DSH refuses it with. */
+function windowArg(value: unknown, name: string): number | undefined | { refused: string } {
+  if (value === undefined) return undefined
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 1) return value
+  return { refused: `${name} must be a positive integer` }
+}
+
 export function builtinTools(
   sandbox: SandboxService,
   options: { readonly bashTimeoutMs?: number; readonly bashMaxTimeoutMs?: number; readonly bashOutputLimit?: number } = {},
@@ -451,7 +523,11 @@ export function builtinTools(
       description: 'Read a text file and return its contents. Refused for a path outside the sandbox in confined modes.',
       parameters: {
         type: 'object',
-        properties: { path: { type: 'string', description: 'File to read, relative to the workspace or absolute inside it.' } },
+        properties: {
+          path: { type: 'string', description: 'File to read, relative to the workspace or absolute inside it.' },
+          offset: { type: 'number', description: '1-based first line to return. Defaults to 1.' },
+          limit: { type: 'number', description: `Maximum number of lines to return. Defaults to ${READ_LIMIT}.` },
+        },
         required: ['path'],
         additionalProperties: false,
       },
@@ -459,6 +535,19 @@ export function builtinTools(
     run: async (args, context): Promise<ToolResult> => {
       const path = String(args.path ?? '')
       if (path.length === 0) return { output: '', error: { code: 'BAD_ARGS', message: 'read_file needs a path' } }
+      /**
+       * A line window, as DSH's read takes one (`dsh-tool-fs` parseReadArgs): `offset` and `limit` are positive
+       * integers and `limit` is at most READ_LIMIT, checked before the path is touched (live-testing issue #263: the
+       * tool took only a path, so a model could never ask for a later part of a large file).
+       */
+      const offsetArg = windowArg(args.offset, 'offset')
+      const limitArg = windowArg(args.limit, 'limit')
+      for (const arg of [offsetArg, limitArg]) {
+        if (typeof arg === 'object') return { output: '', error: { code: 'BAD_ARGS', message: arg.refused } }
+      }
+      if (typeof limitArg === 'number' && limitArg > READ_LIMIT) {
+        return { output: '', error: { code: 'BAD_ARGS', message: `limit must be less than or equal to ${READ_LIMIT}` } }
+      }
       const target = sandbox.assertReadable(path, context.mode, context.cwd)
       /**
        * A missing file and a directory are classified and named, as DSH's read tool does (`dsh-tool-fs`
@@ -485,7 +574,22 @@ export function builtinTools(
       } catch {
         return { output: '', error: { code: 'FS_NOT_TEXT', message: `cannot read "${shown}": invalid UTF-8 text` } }
       }
-      return { output: text, data: { path: target, bytes: text.length } }
+      const offset = typeof offsetArg === 'number' ? offsetArg : 1
+      const window = readWindow(text, offset, typeof limitArg === 'number' ? limitArg : READ_LIMIT)
+      if (!window.truncatedByBytes && offset > window.totalLines && !(window.totalLines === 0 && offset === 1)) {
+        return { output: '', error: { code: 'FS_NOT_FOUND', message: `offset ${offset} is out of range for "${shown}" (${window.totalLines} lines)` } }
+      }
+      /**
+       * Asked for a window, or larger than one default window (READ_LIMIT lines or READ_MAX_BYTES), the answer is
+       * DSH's numbered envelope with the offset to continue from. Stated difference: a file read without a window
+       * that is no larger comes back as its exact text, as before, long lines included, where DSH numbers every read.
+       */
+      const windowed = offsetArg !== undefined || limitArg !== undefined
+      if (!windowed && window.totalLines <= READ_LIMIT && bytes.length <= READ_MAX_BYTES) return { output: text, data: { path: target, bytes: text.length } }
+      return {
+        output: formatReadWindow(shown, window),
+        data: { path: target, bytes: text.length, offset, lines: window.lines.length, totalLines: window.totalLines },
+      }
     },
   }
 
