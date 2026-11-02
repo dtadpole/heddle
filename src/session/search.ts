@@ -316,10 +316,16 @@ const CLOSE = '\uFDD1'
  * first ranking key — is the number of marks, which is how DSH counts it (lib/index.js:969-975).
  */
 export function markPhrase(document: PreparedDocument, phrase: readonly string[]): { matchCount: number; marked: string } | null {
+  const groups = phraseGroups(document, phrase)
+  return groups.length === 0 ? null : { matchCount: groups.length, marked: markGroups(document, groups) }
+}
+
+/** The marks {@link markPhrase} makes, as token ranges `[first, last]`; none for an empty phrase. */
+function phraseGroups(document: PreparedDocument, phrase: readonly string[]): [number, number][] {
   const size = phrase.length
-  if (size === 0) return null
-  const { tokens, chars } = document
   const groups: [number, number][] = []
+  if (size === 0) return groups
+  const { tokens } = document
   for (let index = 0; index + size <= tokens.length; index += 1) {
     let equal = true
     for (let offset = 0; offset < size; offset += 1) {
@@ -333,7 +339,12 @@ export function markPhrase(document: PreparedDocument, phrase: readonly string[]
     if (last !== undefined && index <= last[1]) last[1] = index + size - 1
     else groups.push([index, index + size - 1])
   }
-  if (groups.length === 0) return null
+  return groups
+}
+
+/** The document's text with each mark of `groups` wrapped in the highlight markers. */
+function markGroups(document: PreparedDocument, groups: readonly (readonly [number, number])[]): string {
+  const { tokens, chars } = document
   const pieces: string[] = []
   let cursor = 0
   for (const [first, last] of groups) {
@@ -343,7 +354,7 @@ export function markPhrase(document: PreparedDocument, phrase: readonly string[]
     cursor = end
   }
   pieces.push(chars.slice(cursor).join(''))
-  return { matchCount: groups.length, marked: pieces.join('') }
+  return pieces.join('')
 }
 
 /** `normalizeMarkedText` (lib/index.js:349-367): whitespace collapsed, markers removed, where the first match starts. */
@@ -413,7 +424,9 @@ interface Candidate {
   readonly length: number
   readonly time: string
   readonly seq: number
-  readonly marked: string
+  /** The document and its marks: the marked text is made for the twenty sessions answered only (#257). */
+  readonly document: PreparedDocument
+  readonly groups: readonly (readonly [number, number])[]
 }
 
 function compareText(left: string, right: string): number {
@@ -444,8 +457,10 @@ export function rankSessions(
 }
 
 /**
- * {@link rankSessions} as steps, pausing after each session: the order does not depend on where it paused, because
- * the sessions' order ends with the id and a session's best document with its seq.
+ * {@link rankSessions} as steps, pausing after each session and each snippet: the order does not depend on where it
+ * paused, because the sessions' order ends with the id and a session's best document with its seq. A document's marked
+ * text, which for a long answer is the whole answer again, is made only for the twenty sessions answered (#257): made
+ * for every matching document, a common word over a large store allocated hundreds of megabytes per query.
  */
 function* rankSteps(
   sessions: Iterable<{ readonly id: string; readonly documents: readonly PreparedDocument[] }>,
@@ -458,28 +473,29 @@ function* rankSteps(
     yield
     let top: Candidate | undefined
     for (const document of session.documents) {
-      const marked = markPhrase(document, phrase)
-      if (marked === null) continue
+      const groups = phraseGroups(document, phrase)
+      if (groups.length === 0) continue
       const candidate: Candidate = {
         sessionId: session.id,
-        matchCount: marked.matchCount,
+        matchCount: groups.length,
         length: document.chars.length,
         time: document.time,
         seq: document.seq,
-        marked: marked.marked,
+        document,
+        groups,
       }
       if (top === undefined || betterEvent(candidate, top) < 0) top = candidate
     }
     if (top !== undefined) best.push(top)
   }
   best.sort(betterSession)
-  return {
-    items: best.slice(0, SESSION_SEARCH_RESULT_LIMIT).map((hit) => ({
-      sessionId: hit.sessionId,
-      snippet: truncateCodePoints(makeSnippet(hit.marked, SESSION_SEARCH_SNIPPET_MAX_CODE_POINTS), SESSION_SEARCH_SNIPPET_MAX_CODE_POINTS),
-    })),
-    hasMore: best.length > SESSION_SEARCH_RESULT_LIMIT,
+  const items: SessionSearchHit[] = []
+  for (const hit of best.slice(0, SESSION_SEARCH_RESULT_LIMIT)) {
+    yield
+    const marked = markGroups(hit.document, hit.groups)
+    items.push({ sessionId: hit.sessionId, snippet: truncateCodePoints(makeSnippet(marked, SESSION_SEARCH_SNIPPET_MAX_CODE_POINTS), SESSION_SEARCH_SNIPPET_MAX_CODE_POINTS) })
   }
+  return { items, hasMore: best.length > SESSION_SEARCH_RESULT_LIMIT }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
