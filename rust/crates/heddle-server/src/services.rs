@@ -289,6 +289,12 @@ pub trait SessionService: Send + Sync {
         Err(ServiceError::new("this session store keeps no queue"))
     }
 
+    /// The row a request queued, claimed or not, so a retry answers it (#162).
+    fn queued_by_request(&self, id: &str, request_id: &str) -> Option<QueueRow> {
+        let _ = (id, request_id);
+        None
+    }
+
     /// The session's queued prompts, oldest first (#162).
     fn queued(&self, id: &str) -> Vec<QueueRow> {
         let _ = id;
@@ -309,6 +315,12 @@ pub trait SessionService: Send + Sync {
         content: Vec<Value>,
     ) -> Result<bool, ServiceError> {
         let _ = (id, row, content);
+        Ok(false)
+    }
+
+    /// Move a queued prompt into the running turn's next step; whether it was still queued (#162).
+    fn steer_queued(&self, id: &str, row: &str) -> Result<bool, ServiceError> {
+        let _ = (id, row);
         Ok(false)
     }
 

@@ -438,6 +438,7 @@ impl ServerBuilder {
             .route("/api/sessions/{id}/queue", get(queue_list))
             .route("/api/sessions/{id}/queue/remove", post(queue_remove))
             .route("/api/sessions/{id}/queue/edit", post(queue_edit))
+            .route("/api/sessions/{id}/queue/steer", post(queue_steer))
             .route("/api/sessions/{id}/title", post(title_session))
             .route("/api/sessions/{id}/permission", post(permission_session))
             .route("/api/sessions/{id}/steer", post(steer_session))
@@ -2515,15 +2516,32 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
     {
         kick_queue(&state, &session);
     }
-    if body.bool("queue") == Some(true) {
+    // A queued send to an archived session is refused before anything reaches its log, as web.ts refuses it.
+    let queued_send = body.bool("queue") == Some(true);
+    if queued_send
+        && meta
+            .as_ref()
+            .and_then(|meta| meta.rest.get("archived"))
+            .and_then(Value::as_bool)
+            == Some(true)
+    {
+        return respond::json(
+            StatusCode::CONFLICT,
+            &json!({"error": format!("session {session} is archived"), "code": "session/archived"}),
+        );
+    }
+    // A detached send to a session whose queue holds rows goes behind them (held rows first, then the new one); a
+    // streamed caller keeps its own turn, as web.ts has it.
+    if queued_send
+        || (body.bool("detach") == Some(true)
+            && !state.harness().sessions.queued(&session).is_empty())
+    {
         let request_id = body.non_empty("requestId").map(str::to_owned);
         let sessions = state.harness().sessions.clone();
-        let already = request_id.as_deref().and_then(|request| {
-            sessions
-                .queued(&session)
-                .into_iter()
-                .find(|row| row.request_id.as_deref() == Some(request))
-        });
+        // Claimed or not: a retry of a request the host already took is answered with that row.
+        let already = request_id
+            .as_deref()
+            .and_then(|request| sessions.queued_by_request(&session, request));
         let busy = state.runs().is_running(&session) || state.harness().turns.is_live(&session);
         if already.is_some() || busy || !sessions.queued(&session).is_empty() {
             let duplicate = already.is_some();
@@ -3241,18 +3259,48 @@ async fn queue_edit(
             &json!({"outcome": "claimed", "id": row, "error": format!("queued message {row} is no longer waiting")}),
         );
     };
-    if !current
-        .content
-        .iter()
-        .all(|part| part.get("type").and_then(Value::as_str) == Some("text"))
-    {
-        return respond::error(
-            StatusCode::BAD_REQUEST,
-            "a queued message with an attachment cannot be edited; remove it and send it again",
+    // The text is rewritten and every attachment kept, in place, as web.ts does.
+    let mut content = vec![json!({"type": "text", "text": text})];
+    content.extend(
+        current
+            .content
+            .iter()
+            .filter(|part| part.get("type").and_then(Value::as_str) != Some("text"))
+            .cloned(),
+    );
+    match sessions.replace_queued(&id, row, content) {
+        Ok(true) => respond::json(StatusCode::OK, &json!({"outcome": "edited", "id": row})),
+        Ok(false) => respond::json(
+            StatusCode::CONFLICT,
+            &json!({"outcome": "claimed", "id": row, "error": format!("queued message {row} is no longer waiting")}),
+        ),
+        Err(error) => respond::error(StatusCode::INTERNAL_SERVER_ERROR, &error.message),
+    }
+}
+
+/// `POST /api/sessions/{id}/queue/steer {id}` — moves the row into the running turn's next step in one operation;
+/// `409 session/steer-unavailable` with nothing running, `409 {outcome: 'claimed'}` once its turn took it.
+async fn queue_steer(
+    State(state): State<AppState>,
+    SessionPath(id): SessionPath,
+    body: JsonBody,
+) -> Response {
+    let id = id.as_str().to_owned();
+    let sessions = state.harness().sessions.clone();
+    if !sessions.exists(&id) {
+        return respond::no_session(&id);
+    }
+    let Some(row) = body.non_empty("id") else {
+        return respond::error(StatusCode::BAD_REQUEST, "an id is required");
+    };
+    if !(state.runs().is_running(&id) || state.harness().turns.is_live(&id)) {
+        return respond::json(
+            StatusCode::CONFLICT,
+            &json!({"code": "session/steer-unavailable", "error": format!("session {id} has no running turn to steer into")}),
         );
     }
-    match sessions.replace_queued(&id, row, vec![json!({"type": "text", "text": text})]) {
-        Ok(true) => respond::json(StatusCode::OK, &json!({"outcome": "edited", "id": row})),
+    match sessions.steer_queued(&id, row) {
+        Ok(true) => respond::json(StatusCode::OK, &json!({"outcome": "steered", "id": row})),
         Ok(false) => respond::json(
             StatusCode::CONFLICT,
             &json!({"outcome": "claimed", "id": row, "error": format!("queued message {row} is no longer waiting")}),
@@ -3371,6 +3419,14 @@ async fn run_queued(state: &AppState, session: &str, row: crate::services::Queue
     };
     let outcome = state.harness().turns.clone().run_turn(request).await;
     drop(guard);
+    // A failed queued turn holds the rest, as DSH's driver goes idle after an error without waking for pending input;
+    // a stopped one holds it too (the stop route already has).
+    if outcome.is_err() || cancel.is_cancelled() {
+        held_queues()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(session.to_owned());
+    }
     let (outcome_name, mut verdict, failure) =
         turn_verdict(outcome, cancel.is_cancelled(), session, false);
     verdict.insert("turn".into(), Value::String(stream::new_client_id()));

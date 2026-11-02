@@ -311,6 +311,14 @@ impl SessionService for StoreSessions {
             .map_err(|error| ServiceError::new(error.to_string()))
     }
 
+    fn queued_by_request(&self, id: &str, request_id: &str) -> Option<QueueRow> {
+        let handle = self.handle(id)?;
+        heddle_session::inbox::queued_by_request(self.service.store(), &handle, request_id)
+            .ok()
+            .flatten()
+            .map(queue_row)
+    }
+
     fn queued(&self, id: &str) -> Vec<QueueRow> {
         let Some(handle) = self.handle(id) else {
             return Vec::new();
@@ -339,6 +347,14 @@ impl SessionService for StoreSessions {
             .ok_or_else(|| ServiceError::new(format!("no session {id}")))?;
         let parts = parts_of(content)?;
         heddle_session::inbox::replace_queued(self.service.store(), &handle, row, parts)
+            .map_err(|error| ServiceError::new(error.to_string()))
+    }
+
+    fn steer_queued(&self, id: &str, row: &str) -> Result<bool, ServiceError> {
+        let handle = self
+            .handle(id)
+            .ok_or_else(|| ServiceError::new(format!("no session {id}")))?;
+        heddle_session::inbox::steer_queued(self.service.store(), &handle, row)
             .map_err(|error| ServiceError::new(error.to_string()))
     }
 
