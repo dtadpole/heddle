@@ -113,7 +113,7 @@ export const TOOL_HELP = {
   drag: '{"from_uid": "1_3", "to_uid": "1_5"} drag one element onto another',
   press_key: '{"key": "Control+A"} press a key or a chord',
   type_text: '{"text": "hello"} type into the focused element',
-  upload_file: '{"uid": "1_3", "filePaths": ["/path/to/file"]} give a file input files',
+  upload_file: '{"uid": "1_3", "filePaths": ["/path/to/file"]} give a file input files, or click the control that opens one',
   handle_dialog: '{"action": "accept"|"dismiss"} answer the page dialog',
   take_screenshot: '{"format": "png"|"jpeg"|"webp", "uid": "1_3", "fullPage": true} capture the page',
   evaluate_script: '{"function": "() => document.title"} run a function in the page',
@@ -338,7 +338,7 @@ export function createTools(browser, { stateDir }) {
 
     async upload_file(args = {}) {
       const page = pageFor('upload_file', args)
-      if (typeof args.uid !== 'string') throw new Error('upload_file needs the uid of a file input')
+      if (typeof args.uid !== 'string') throw new Error('upload_file needs the uid of a file input or of the control that opens one')
       const result = await uploadFile(page, { uid: args.uid, filePaths: args.filePaths })
       return withSnapshot(page, result, args.includeSnapshot)
     },
