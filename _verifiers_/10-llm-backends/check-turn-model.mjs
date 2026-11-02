@@ -88,7 +88,10 @@ test('a turn naming a model its endpoint does not offer is refused with the swit
     const elsewhere = await call(server, 'POST', '/api/turn', { prompt: 'hello', endpoint: 'beta', model: 'a1' })
     assert.equal(elsewhere.status, 400, elsewhere.text)
     assert.equal(elsewhere.text, "no model named 'a1' on endpoint 'beta'; configured: b1\n")
-    assert.deepEqual(await sessions(), [], 'no session was created for either')
+    // A session that does not exist is still a 404 first, on both builds, whatever model is named.
+    const missing = await call(server, 'POST', '/api/turn', { prompt: 'hello', session: 'session-00000000-0000-4000-8000-000000000000', model: 'nope' })
+    assert.equal(missing.status, 404, missing.text)
+    assert.deepEqual(await sessions(), [], 'no session was created for any of them')
     assert.equal(alpha.requests.length + beta.requests.length, 0, 'and no provider was asked')
 
     // A model the endpoint offers runs, and is recorded.
