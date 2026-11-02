@@ -236,6 +236,31 @@ pub fn is_healthy_finish(reason: &str) -> bool {
     HEALTHY_FINISH_REASONS.contains(&reason)
 }
 
+/// Why a summary call's answer cannot be a checkpoint, from how it finished; `None` when it finished normally (#207,
+/// `summaryFinishFailure`).
+///
+/// A summary cut at its output limit stops mid-sentence, and the facts it had not reached are gone once it replaces
+/// the history. DSH's `dsh-compaction-basic` `finishError` refuses it as "summarization truncated at the token cap
+/// (incomplete checkpoint)", code `MAX_TOKENS`; any other finish the loop does not call healthy ended the summary
+/// early too, and is refused the same way.
+pub fn summary_finish_failure(endpoint: &str, finish_reason: &str) -> Option<crate::ModelError> {
+    if finish_reason == "max_output_tokens" {
+        return Some(crate::ModelError::new(
+            "summarization truncated at the token cap (incomplete checkpoint)",
+            endpoint,
+            "MAX_TOKENS",
+        ));
+    }
+    if !is_healthy_finish(finish_reason) {
+        return Some(crate::ModelError::new(
+            format!("summarization ended '{finish_reason}' (incomplete checkpoint)"),
+            endpoint,
+            "INCOMPLETE",
+        ));
+    }
+    None
+}
+
 /// The loop's word for a provider's finish reason (`canonicalFinishReason`).
 ///
 /// 1. A known provider spelling becomes the canonical one (`end_turn`, `completed` → `stop`; `tool_use`,
@@ -505,6 +530,28 @@ mod tests {
             canonical_finish_reason(Some("length"), 1),
             "max_output_tokens"
         );
+    }
+
+    #[test]
+    fn a_summary_cut_at_its_output_limit_or_ended_early_is_no_checkpoint() {
+        // #207: DSH's `finishError` refuses a `max-tokens` summary as MAX_TOKENS.
+        let cut = summary_finish_failure("double", "max_output_tokens").expect("refused");
+        assert_eq!(
+            cut.to_string(),
+            "summarization truncated at the token cap (incomplete checkpoint)"
+        );
+        assert_eq!(cut.code, "MAX_TOKENS");
+        assert_eq!(cut.endpoint, "double");
+        for reason in ["content_filter", "incomplete", "unknown"] {
+            let early = summary_finish_failure("double", reason).expect("refused");
+            assert_eq!(
+                early.to_string(),
+                format!("summarization ended '{reason}' (incomplete checkpoint)")
+            );
+            assert_eq!(early.code, "INCOMPLETE");
+        }
+        assert!(summary_finish_failure("double", "stop").is_none());
+        assert!(summary_finish_failure("double", "tool_calls").is_none());
     }
 
     #[test]

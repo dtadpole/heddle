@@ -205,7 +205,8 @@ fn a_turn_its_process_left_at_a_running_call_reads_as_interrupted_and_is_closed_
     );
     assert_eq!(
         std::fs::read_to_string(Path::new(&lock)).unwrap(),
-        format!("{}\n", std::process::id())
+        heddle_session::writer_lock::format_lock(&heddle_session::writer_lock::own_lock()),
+        "the lock names this process, its boot and its start (#202)"
     );
 }
 

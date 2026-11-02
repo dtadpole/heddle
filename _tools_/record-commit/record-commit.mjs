@@ -11,7 +11,8 @@
 // commits in the live checkout: it fetches, creates a temporary worktree at the fetched
 // origin/main, copies only the staged files there, checks each one's base against
 // origin, unions append-only logs, runs the frontmatter validator over the whole tree,
-// commits with explicit paths, pushes to main, reads the pushed bytes back from
+// commits with explicit paths, and parks the commit on refs/heads/records/<seat>, read
+// back. With --main it pushes to main instead, reads the pushed bytes back from
 // origin/main, and only then fast-forwards the live tree with reflection-sync.
 //
 // Input (exactly one of):
@@ -31,9 +32,21 @@
 // there) refuses the whole run before anything is committed: silently committing the
 // rest is how two of three files once went missing with an exit 0.
 //
-//   0  committed, read back, live tree synced (or --no-sync)
+// Parking is the default, and main is never pushed: reflection main takes pull requests
+// only, and a seat's direct push would land in the middle of the owner's work whenever
+// its protection is off. The commit goes to refs/heads/records/<seat>, created from
+// origin/main or appended to; the seat is --seat, else the TEAM.yaml key of
+// $DSH_SESSION_ID, and no seat refuses the run before anything is committed. The last
+// line is 'parked on records/<seat> <sha>', and the coordinator gets the parked branches
+// merged. The live tree is not synced: main lacks the record.
+//
+// --main tries the direct push first. A protected main (GitHub GH006 or a ruleset's
+// GH013) refuses every direct push, which no replay can win, and the same commit is then
+// parked as above.
+//
+//   0  committed, read back, live tree synced (or --no-sync); or parked and read back
 //   1  refused before the commit: a stale base on the first attempt, validator, bad
-//      arguments
+//      arguments; or no seat is known to park on
 //   2  the record would not carry every given file (refused, nothing committed: a file
 //      unchanged, or changed by another writer while this run was pushing), or the
 //      pushed commit does not carry it as expected
@@ -80,6 +93,75 @@ export function messageWarnings(message, paths = []) {
 
 export function isLogPath(path, extra = []) {
   return LOG_PATTERN.test(path) || extra.includes(path)
+}
+
+// GitHub's protected-branch refusal (GH006), a ruleset's (GH013), or the porcelain line
+// '[remote rejected] (protected branch hook declined)'. Not a race: the remote did not move.
+const PROTECTED = /\bGH006\b|\bGH013\b|protected branch|must be made through a pull request/i
+
+export function isProtectedRejection(text) {
+  return PROTECTED.test(String(text ?? ''))
+}
+
+// A refusal's reason is in the remote's lines and the porcelain '!' status, not in git's
+// last line ('error: failed to push some refs'), which was all a refused run once showed.
+export function rejectionReasons(text, limit = 8) {
+  const seen = new Set()
+  for (const raw of String(text ?? '').split('\n')) {
+    const line = raw.trim()
+    if (!/^remote:\s*\S/.test(line) && !/^!\s/.test(line)) continue
+    if (/^remote:\s*(To |Create a pull request|https?:\/\/)/i.test(line)) continue
+    seen.add(line.replace(/\s+/g, ' '))
+    if (seen.size >= limit) break
+  }
+  return [...seen]
+}
+
+export function protectedDetail(text) {
+  const line = String(text ?? '').split('\n').find((l) => PROTECTED.test(l)) ?? ''
+  return line.replace(/^\s*(remote:\s*)?(error:\s*)?/i, '').trim()
+}
+
+export const SEAT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+
+// The seat is the key of the member whose session_id is this session's, in any
+// _projects_/*/TEAM.yaml of the record checkout. A line scan: the rosters keep each
+// member as '- key: K' followed by an indented 'session_id: S'.
+export function seatFromTeam(repo, sessionId) {
+  if (!repo || !sessionId) return null
+  const projects = join(repo, '_projects_')
+  if (!existsSync(projects)) return null
+  const names = readdirSync(projects, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort()
+  for (const name of names) {
+    const roster = join(projects, name, 'TEAM.yaml')
+    if (!existsSync(roster)) continue
+    let key = null
+    for (const line of readFileSync(roster, 'utf8').split('\n')) {
+      if (/^\S/.test(line)) key = null
+      const keyed = /^\s*-\s+key:\s*['"]?([^'"\s#]+)/.exec(line)
+      if (keyed) {
+        key = keyed[1]
+        continue
+      }
+      const sid = /^\s+session_id:\s*['"]?([^'"\s#]+)/.exec(line)
+      if (sid && key && sid[1] === sessionId) return key
+    }
+  }
+  return null
+}
+
+const nonEmptyLines = (buffer) => (buffer ?? Buffer.alloc(0)).toString('utf8').split('\n').filter(Boolean)
+
+// A log's own lines are the staged ones origin/main lacked; a commit parked on an
+// existing records branch adds only those to the branch's version of the log.
+export function ownLines(file) {
+  const have = new Set(nonEmptyLines(file.origin))
+  return nonEmptyLines(file.content).filter((line) => !have.has(line))
+}
+
+export function parkedContent(file, tipContent) {
+  if (file.kind !== 'log') return file.content
+  return unionLines(tipContent, Buffer.from(ownLines(file).map((line) => `${line}\n`).join(''), 'utf8'))
 }
 
 // The committed log is origin's lines in their order, then the staged lines origin
@@ -234,10 +316,115 @@ export function findPython(explicit, repo = null) {
   return null
 }
 
+// Run fn with the given files as origin/main has them (absent where origin lacks them),
+// then put the record's content back, whatever fn did.
+function withOriginContent(tmp, prepared, fn) {
+  for (const file of prepared) {
+    const target = join(tmp, file.path)
+    if (file.origin === null) rmSync(target, { force: true })
+    else writeFileSync(target, file.origin)
+  }
+  try {
+    return fn()
+  } finally {
+    for (const file of prepared) {
+      const target = join(tmp, file.path)
+      mkdirSync(dirname(target), { recursive: true })
+      writeFileSync(target, file.expected)
+      if (file.mode !== 0) chmodSync(target, file.mode)
+    }
+  }
+}
+
 function cleanupWorktree(repo, root) {
   const removed = git(repo, ['worktree', 'remove', '--force', join(root, 'tree')], { allowFailure: true })
   if (removed.status !== 0) git(repo, ['worktree', 'prune'], { allowFailure: true })
   rmSync(root, { recursive: true, force: true })
+}
+
+// Push the commit to refs/heads/records/<seat>: by default, or after a protected main
+// refused it under --main. A missing branch is created at the commit, which sits on origin/main. A branch that
+// origin/main already contains is fast-forwarded to it. Otherwise the commit is rebuilt
+// on the branch tip: a file takes the staged bytes, a log gets its own lines added. The
+// branch only ever moves forward; when another run moves it first, this one rebuilds.
+function park({ tmp, config, prepared, commit, builtOn, why, report }) {
+  const { remote, seat } = config
+  report.push(`  ${why}`)
+  if (!seat) {
+    report.push(`  refusing: no seat to park on; pass --seat NAME, or run in a session listed in a _projects_/*/TEAM.yaml of ${config.repo}. Nothing was pushed.`)
+    return { code: REFUSED }
+  }
+  if (!SEAT_PATTERN.test(seat)) {
+    report.push(`  refusing: the seat ${JSON.stringify(seat)} is not a branch-safe name. Nothing was pushed.`)
+    return { code: REFUSED }
+  }
+  const ref = `records/${seat}`
+  const identity = ['-c', `user.name=${config.identity.name}`, '-c', `user.email=${config.identity.email}`]
+  const paths = prepared.map((file) => file.path)
+  for (let tries = 0; ; tries += 1) {
+    const listed = git(tmp, ['ls-remote', remote, `refs/heads/${ref}`], { allowFailure: true })
+    if (listed.status !== 0) {
+      report.push(`  refusing: could not read ${ref} on ${remote}: ${String(listed.stderr || '').trim()}`)
+      return { code: REFUSED }
+    }
+    const tip = listed.stdout.trim().split(/\s+/)[0] || null
+    let candidate = commit
+    let how = `created from ${remote}/${config.branch} ${builtOn.slice(0, 7)}`
+    if (tip !== null) {
+      git(tmp, ['fetch', '-q', remote, `refs/heads/${ref}`])
+      if (tip === commit) {
+        how = `already carried by ${ref}; nothing new to append`
+      } else if (git(tmp, ['merge-base', '--is-ancestor', tip, commit], { allowFailure: true }).status === 0) {
+        how = `fast-forwarded from ${tip.slice(0, 7)}, which ${remote}/${config.branch} already contains`
+      } else {
+        git(tmp, ['checkout', '-q', '--detach', tip])
+        for (const file of prepared) {
+          const target = join(tmp, file.path)
+          mkdirSync(dirname(target), { recursive: true })
+          writeFileSync(target, parkedContent(file, show(tmp, tip, file.path)))
+          if (file.mode !== 0) chmodSync(target, file.mode)
+        }
+        git(tmp, ['add', '--', ...paths])
+        const staged = git(tmp, ['diff', '--cached', '--name-only']).stdout.split('\n').filter(Boolean)
+        if (staged.length === 0) {
+          candidate = tip
+          how = `already carried by ${ref}; nothing new to append`
+        } else {
+          git(tmp, [...identity, 'commit', '-q', '-m', config.message])
+          candidate = git(tmp, ['rev-parse', 'HEAD']).stdout.trim()
+          how = `appended to ${ref} ${tip.slice(0, 7)}`
+        }
+      }
+    }
+    const push = candidate === tip ? { status: 0 } : git(tmp, ['push', '--porcelain', remote, `${candidate}:refs/heads/${ref}`], { allowFailure: true })
+    if (push.status !== 0) {
+      const text = `${push.stdout ?? ''}${push.stderr ?? ''}`
+      const why = text.trim().split('\n').filter(Boolean).at(-1) ?? ''
+      if (isProtectedRejection(text) || tries >= (config.replays ?? 5)) {
+        report.push(`  refusing: the push to ${ref} was rejected too (${why}). Nothing was parked.`)
+        return { code: REFUSED }
+      }
+      report.push(`  ${ref} moved while parking (${why}); rebuilding on its new tip`)
+      continue
+    }
+    const landed = git(tmp, ['ls-remote', remote, `refs/heads/${ref}`]).stdout.trim().split(/\s+/)[0]
+    const problems = landed === candidate ? [] : [`${ref} is ${String(landed).slice(0, 12)}, not the parked ${candidate.slice(0, 12)}`]
+    for (const file of prepared) {
+      const got = show(tmp, candidate, file.path)
+      if (got === null) problems.push(`${file.path}: ${ref} does not have the file`)
+      else if (file.kind !== 'log' && !got.equals(file.content)) problems.push(`${file.path}: ${ref} does not carry the staged bytes`)
+      else if (file.kind === 'log') {
+        const have = new Set(nonEmptyLines(got))
+        if (ownLines(file).some((line) => !have.has(line))) problems.push(`${file.path}: a staged line is missing from ${ref}`)
+      }
+    }
+    if (problems.length > 0) {
+      for (const problem of problems) report.push(`  READ-BACK ${problem}`)
+      return { code: READ_BACK_FAILED, commit: candidate }
+    }
+    report.push(`  parked (seat ${seat}, ${config.seatSource ?? 'given'}): ${how}; ${ref} ${candidate.slice(0, 7)} carries all ${prepared.length} given file(s), ${config.branch} does not`)
+    return { code: OK, commit: candidate, parked: { ref, sha: candidate } }
+  }
 }
 
 function attempt({ config, report, rebuild = false }) {
@@ -334,18 +521,40 @@ function attempt({ config, report, rebuild = false }) {
         report.push(`  python: ${found.command} (${found.why})`)
         commandArgs = [validatorPath, '--root', tmp]
       }
-      const run = spawnSync(command, commandArgs, { cwd: tmp, encoding: 'utf8' })
-      const lines = `${run.stdout ?? ''}${run.stderr ?? ''}`.trim().split('\n').filter(Boolean)
-      const errors = lines.filter((line) => /^error\b/.test(line))
-      const warnings = lines.filter((line) => /^warning\b/.test(line))
-      const summary = lines.filter((line) => /^checked \d+ file\(s\)/.test(line))
-      for (const line of errors) report.push(`  frontmatter: ${line}`)
-      if (errors.length > 0 || run.status !== 0) {
-        for (const line of lines.filter((l) => !/^warning\b/.test(l) && !/^checked \d/.test(l))) report.push(`  frontmatter: ${line}`)
+      const validate = () => {
+        const run = spawnSync(command, commandArgs, { cwd: tmp, encoding: 'utf8' })
+        const lines = `${run.stdout ?? ''}${run.stderr ?? ''}`.trim().split('\n').filter(Boolean)
+        return { status: run.status, lines, errors: lines.filter((line) => /^error\b/.test(line)) }
+      }
+      const after = validate()
+      const warnings = after.lines.filter((line) => /^warning\b/.test(line))
+      const summary = after.lines.filter((line) => /^checked \d+ file\(s\)/.test(line))
+      // An error origin/main already has is not this record's, and a seat cannot fix main:
+      // on 2026-11-01 the GHE convergence left main with 35 errors, and every record was
+      // refused for them. Only the errors this record adds refuse it; the validator runs
+      // again with the given files as origin has them to tell the two apart. A failure
+      // with no error line at all is a broken validator, and still refuses.
+      let added = after.errors
+      let inherited = []
+      if (after.errors.length > 0) {
+        const had = new Set(withOriginContent(tmp, prepared, validate).errors)
+        added = after.errors.filter((line) => !had.has(line))
+        inherited = after.errors.filter((line) => had.has(line))
+      }
+      if (added.length > 0 || (after.status !== 0 && after.errors.length === 0)) {
+        for (const line of added) report.push(`  frontmatter: ${line}`)
+        if (added.length === 0) {
+          for (const line of after.lines.filter((l) => !/^warning\b/.test(l) && !/^checked \d/.test(l))) report.push(`  frontmatter: ${line}`)
+        }
+        if (inherited.length > 0) report.push(`  frontmatter: ${inherited.length} more error(s) already on ${mainRef}, not this record's`)
         report.push('  frontmatter: the validator failed; nothing committed')
         return { code: REFUSED, files: prepared, report }
       }
       for (const line of summary) report.push(`  frontmatter: ${line}`)
+      if (inherited.length > 0) {
+        if (config.verbose) for (const line of inherited) report.push(`  frontmatter: already on ${mainRef}: ${line}`)
+        else report.push(`  frontmatter: ${inherited.length} error(s) already on ${mainRef}, none added by this record, so none blocking (--verbose lists them)`)
+      }
       if (warnings.length > 0) {
         if (config.verbose) for (const line of warnings) report.push(`  frontmatter: ${line}`)
         else report.push(`  frontmatter: ${warnings.length} warning(s), none blocking (--verbose lists them)`)
@@ -353,7 +562,8 @@ function attempt({ config, report, rebuild = false }) {
     }
 
     if (dryRun) {
-      report.push(`  dry run: would commit ${prepared.length} file(s) and push ${mainRef}`)
+      const then = config.main ? `push ${mainRef}` : `park it on records/${config.seat}, not pushing ${mainRef}`
+      report.push(`  dry run: would commit ${prepared.length} file(s) and ${then}`)
       return { code: OK, files: prepared, report, dryRun: true }
     }
 
@@ -379,15 +589,27 @@ function attempt({ config, report, rebuild = false }) {
     // kept losing to frequent pushes. When they touch a given file, the attempt is rebuilt
     // from a fresh origin, where a log is unioned and anything else is refused.
     let builtOn = originMain
+    if (!config.main) {
+      const why = `${branch} is not pushed: parking is the default (--main would try a direct push first)`
+      const parked = park({ tmp, config, prepared, commit, builtOn, why, report })
+      return { ...parked, files: prepared, report }
+    }
     for (let replays = 0; ; replays += 1) {
       const push = git(tmp, ['push', '--porcelain', remote, `HEAD:refs/heads/${branch}`], { allowFailure: true })
       if (push.status === 0) break
+      const pushText = `${push.stdout ?? ''}${push.stderr ?? ''}`
+      if (isProtectedRejection(pushText)) {
+        const why = `push rejected: ${branch} is protected (${protectedDetail(pushText)}); no direct push can land, so the commit is parked`
+        const parked = park({ tmp, config, prepared, commit, builtOn, why, report })
+        return { ...parked, files: prepared, report }
+      }
       git(tmp, ['fetch', '-q', remote], { allowFailure: true })
       const moved = git(tmp, ['rev-parse', mainRef], { allowFailure: true })
       const remoteTip = moved.status === 0 ? moved.stdout.trim() : builtOn
       const detail = `${push.stdout ?? ''}${push.stderr ?? ''}`.trim().split('\n').filter(Boolean).at(-1) ?? ''
       if (remoteTip === builtOn) {
         report.push(`  push rejected: ${detail}`)
+        for (const line of rejectionReasons(pushText)) report.push(`    ${line}`)
         return { code: REFUSED, files: prepared, report }
       }
       const touched = git(tmp, ['diff', '--name-only', builtOn, remoteTip, '--', ...paths], { allowFailure: true })
@@ -444,6 +666,18 @@ function runSync({ repo, remote, branch, report }) {
 
 export function recordCommit(config) {
   const report = []
+  if (!config.main) {
+    // Checked before anything is fetched or committed: by default every record is parked.
+    const problem = !config.seat
+      ? `no seat to park on; pass --seat NAME, or run in a session listed in a _projects_/*/TEAM.yaml of ${config.repo}`
+      : !SEAT_PATTERN.test(config.seat)
+        ? `the seat ${JSON.stringify(config.seat)} is not a branch-safe name`
+        : null
+    if (problem) {
+      report.push(`record-commit: refusing: ${problem}. Nothing was committed, and ${config.branch} is never pushed without --main.`)
+      return { code: REFUSED, lines: report }
+    }
+  }
   let last
   for (let tries = 0; tries <= (config.retries ?? 2); tries += 1) {
     last = attempt({ config, report, rebuild: tries > 0 })
@@ -455,6 +689,11 @@ export function recordCommit(config) {
   }
   if (last.code !== OK) return { code: last.code, lines: report }
   if (last.dryRun) return { code: OK, lines: report }
+  if (last.parked) {
+    report.push(`  sync: skipped, the record is parked and ${config.branch} does not have it; the live tree is left as it was`)
+    report.push(`parked on ${last.parked.ref} ${last.parked.sha}`)
+    return { code: OK, lines: report, parked: last.parked }
+  }
   if (config.sync) {
     const synced = runSync({ repo: config.repo, remote: config.remote, branch: config.branch, report })
     if (!synced) {
@@ -485,6 +724,8 @@ function parseArgs(argv) {
     dryRun: false,
     verbose: false,
     retries: 2,
+    seat: null,
+    main: false,
     identity: IDENTITY,
     help: false,
   }
@@ -511,6 +752,8 @@ function parseArgs(argv) {
     else if (arg === '--dry-run') args.dryRun = true
     else if (arg === '--verbose') args.verbose = true
     else if (arg === '--retries') args.retries = Number(value((i += 1), '--retries'))
+    else if (arg === '--seat') args.seat = value((i += 1), '--seat')
+    else if (arg === '--main') args.main = true
     else if (arg === '--author') {
       const text = value((i += 1), '--author')
       const match = /^(.*)<([^>]+)>$/.exec(text)
@@ -531,8 +774,10 @@ const USAGE = `usage: record-commit.mjs --message TEXT (--file PATH ... | --stag
   --append PATH    treat PATH as append-only even if it is not a .jsonl log
   --validator PATH frontmatter validator (default: <tree>/shared/_tools/frontmatter-validator/validate-frontmatter.py)
   --python PATH    python with PyYAML (default: the first that imports yaml)
+  --seat NAME      park on records/NAME (default: this session's TEAM.yaml key)
+  --main           push main directly, parking only if main refuses as protected (default: always park, never push main)
   --no-validate / --no-sync / --dry-run / --verbose / --retries N
-  exit 0 committed and read back, 1 refused, 2 read-back failed, 3 live tree not synced`
+  exit 0 parked on records/<seat> and read back, or with --main pushed and read back; 1 refused, 2 read-back failed, 3 live tree not synced`
 
 // Node runs the main module from its real path, so compare real paths: through a symlink
 // such as macOS /tmp the plain comparison was false and the command silently did nothing,
@@ -570,7 +815,10 @@ if (invokedAsScript()) {
         for (const warning of messageWarnings(args.message, files.map((file) => file.path))) {
           console.error(`record-commit: warning: ${warning}`)
         }
-        const result = recordCommit({ ...args, files, sync: !args.noSync })
+        const teamSeat = args.seat ? null : seatFromTeam(args.repo, process.env.DSH_SESSION_ID)
+        const seat = args.seat ?? teamSeat
+        const seatSource = args.seat ? '--seat' : teamSeat ? `the TEAM.yaml key of ${process.env.DSH_SESSION_ID}` : null
+        const result = recordCommit({ ...args, seat, seatSource, files, sync: !args.noSync })
         for (const line of result.lines) console.log(line)
         process.exitCode = result.code
       }

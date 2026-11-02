@@ -45,6 +45,22 @@ Another judges DSH's refusal to archive a session with running work (R-developer
 running work is refused with the work named, and stop: true stops it and archives` — the `409` names the turn in
 progress, or the running subagent of an idle parent, and `stop: true` stops it and archives.
 
+Since 1 Nov `check-failed-fragment.mjs` judges a turn whose provider stream broke mid-answer (#173): the turn fails and
+the page still draws the partial with its failure line, while the next turn's request, a fork's first request and a
+`/compact` summary request carry the cut turn's prompt and not its fragment.
+
+Since 1 Nov `check-compact-restart.mjs` judges a `/compact` cut by a restart (#206): the server is killed while the
+summary is held, and after the restart the first read already draws the row as "Compaction cancelled." without writing,
+the next turn's write-open appends a stopped `compaction/failed` and the `command/done` before its prompt, a second
+restart appends nothing more, and a new `/compact` still compacts.
+
+Since 1 Nov `check-plan-review-crash.mjs` judges a plan review across a crash (#228). The server is killed while
+`exit_plan_mode`'s `plan-review` question waits. After the restart the review reads `cancelled` (`interrupted`) and is
+not open, an Approve is refused with `409` and writes nothing, the session stays in plan mode, and `/plan off` still
+leaves it. That is DSH's "fails closed". Its control approves a live review: plan mode is left, and the request after
+the tool result carries the approval's sentence, without the plan-mode policy and without the "switched back to the
+default mode" notice.
+
 ## Where it stands, 2026-10-11
 
 **22 checks, all passing — verdict `0`.** The tree group was written **before** the mechanism it judges,

@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 
-import type { GenerateRequest } from '../llm/types.ts'
+import { reasoningLevelsFor, type EndpointConfig, type GenerateRequest } from '../llm/types.ts'
 import { defaultSessionRoot, SessionStore } from '../session/store.ts'
 import { SessionService } from '../session/service.ts'
 import type { TitleAnswer } from '../session/title.ts'
@@ -11,6 +11,7 @@ export const name = 'session'
 /** The model service as the title call reads it: looked up when a call starts, so a profile without one has none. */
 interface TitleModel {
   generate?(request: GenerateRequest, signal?: AbortSignal): Promise<TitleAnswer>
+  endpoint?(name: string): EndpointConfig | undefined
 }
 
 /** The session plugin: the service class plus its own config schema. */
@@ -44,6 +45,9 @@ export default class SessionPlugin extends SessionService {
      * turn's own request used (`../session/title.ts`). The service is read **when a call starts** rather than injected,
      * so the session plugin still loads in a profile without a model, and such a profile keeps the plain first-message
      * name. Unloading this plugin abandons any call still running, as DSH's service teardown does.
+     *
+     * The route's reasoning levels come from the same catalogue the model switcher and the default fill read
+     * (`reasoningLevelsFor` over the model service's endpoint), so the title asks for the least of them (#215).
      */
     const detach = this.store.titles.attach(
       (request, signal) => {
@@ -51,7 +55,14 @@ export default class SessionPlugin extends SessionService {
         if (typeof model?.generate !== 'function') return Promise.reject(new Error('no model service is loaded'))
         return model.generate(request, signal)
       },
-      { log: (message) => ctx.logger.debug(message) },
+      {
+        levels: (endpoint, model) => {
+          const service = ctx.get('model') as TitleModel | undefined
+          const configured = typeof service?.endpoint === 'function' ? service.endpoint(endpoint) : undefined
+          return configured === undefined ? undefined : reasoningLevelsFor(configured, model)
+        },
+        log: (message) => ctx.logger.debug(message),
+      },
     )
     ctx.effect(() => detach)
   }
