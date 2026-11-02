@@ -32,13 +32,18 @@ type Reply =
   | { readonly partial: string }
 
 /** An OpenAI-compatible double answering each chat request with the next reply in the queue. */
-async function provider(replies: readonly Reply[]) {
+async function provider(replies: readonly Reply[], onRequest?: (count: number) => void) {
   const queue = [...replies]
   let requests = 0
+  const bodies: string[] = []
   const server = createServer((request, response: ServerResponse) => {
-    request.resume()
+    let body = ''
+    request.setEncoding('utf8')
+    request.on('data', (piece: string) => { body += piece })
     request.on('end', () => {
       requests += 1
+      bodies.push(body)
+      onRequest?.(requests)
       const reply = queue.shift() ?? { status: 500, body: 'the queue is empty' }
       if ('status' in reply) {
         response.writeHead(reply.status, { 'content-type': 'application/json', ...(reply.headers ?? {}) })
@@ -61,16 +66,24 @@ async function provider(replies: readonly Reply[]) {
   return {
     baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`,
     requests: () => requests,
+    bodies: () => bodies,
     close: () => new Promise<void>((resolve) => { server.close(() => resolve()); server.closeAllConnections() }),
   }
 }
 
 let counter = 0
-async function turn(replies: readonly Reply[], retryPolicy?: unknown) {
-  const double = await provider(replies)
+async function turn(replies: readonly Reply[], retryPolicy?: unknown, options: { readonly steerAfterRequest?: { readonly count: number; readonly text: string } } = {}) {
   const ctx = new Context()
   const sessions = new SessionService(ctx, { root: join(scratch, `sessions-${++counter}`) })
   const session = sessions.start({ cwd: scratch })
+  /**
+   * A steer as the web route writes one (`ctx.session.userContent`), sent 60 ms after the given request arrived, so it
+   * lands inside the retry wait that the request's refusal starts (#250).
+   */
+  const steer = options.steerAfterRequest
+  const double = await provider(replies, steer === undefined ? undefined : (count) => {
+    if (count === steer.count) setTimeout(() => sessions.userContent(session, [{ type: 'text', text: steer.text }]), 60)
+  })
   const sandbox = new SandboxService(ctx, { workspaceRoot: scratch, backend: 'none' })
   new ToolRegistry(ctx, new ApprovalService(ctx, { mode: 'allow' }), sandbox, sessions)
   new ContextService(ctx, sessions.store, { instructionsMaxBytes: 100_000, contextWindow: 100_000 })
@@ -87,7 +100,7 @@ async function turn(replies: readonly Reply[], retryPolicy?: unknown) {
     .filter((message) => message.role === 'assistant')
     .map((message) => message.content.map((part) => (part.type === 'text' ? part.text : '')).join(''))
   await double.close()
-  return { ...outcome, events, answers, requests: double.requests() }
+  return { ...outcome, events, answers, requests: double.requests(), bodies: double.bodies() }
 }
 
 const fast = { mode: 'normal', backoff: { initialDelayMs: 10, maxDelayMs: 50, jitterRatio: 0 } }
@@ -154,4 +167,32 @@ test('an endpoint without a policy retries with DSH defaults', async () => {
   assert.equal(retry?.mode, 'normal')
   assert.equal(retry?.maxRetries, 5)
   assert.ok(typeof retry?.delayMs === 'number' && retry.delayMs >= 450 && retry.delayMs <= 550, `the first default delay is 500 ± 10%: ${retry?.delayMs}`)
+})
+
+test('a message steered during a retry wait is in the retried request, which answers it (#250)', async () => {
+  const run = await turn(
+    [{ status: 429, headers: { 'retry-after': '0.2' } }, { text: 'answered with the steer' }],
+    { ...fast, backoff: { ...fast.backoff, maxDelayMs: 1_000 } },
+    { steerAfterRequest: { count: 1, text: 'STEERED-250 mention this' } },
+  )
+  assert.equal(run.error, undefined, run.error?.message)
+  assert.equal(run.requests, 2, 'the refused request and its retry, and no round after it')
+  assert.ok(!run.bodies[0]?.includes('STEERED-250'), 'the first request went out before the steer')
+  assert.ok(run.bodies[1]?.includes('STEERED-250'), `the retried request carries the steer: ${run.bodies[1]}`)
+  const types = run.events.map((event) => event.type)
+  const steered = run.events.findIndex((event) => JSON.stringify(event).includes('STEERED-250'))
+  const retried = types.lastIndexOf('model/request')
+  assert.ok(steered > types.indexOf('llm/retry') && steered < types.indexOf('llm/retry-started'), `the steer was written during the wait: ${types.join(' ')}`)
+  assert.ok(steered < retried, 'and before the retried request')
+  const recorded = run.events.filter((event) => event.type === 'model/request').map((event) => event.messages)
+  assert.equal(recorded.length, 2)
+  assert.equal(recorded[1], (recorded[0] as number) + 1, 'the retried request is recorded with the steered message counted')
+  assert.deepEqual(run.answers, ['answered with the steer'])
+})
+
+test('a retry whose wait nothing landed in sends the same request', async () => {
+  const run = await turn([{ status: 503 }, { text: 'same request' }], fast)
+  assert.equal(run.error, undefined, run.error?.message)
+  assert.equal(run.bodies.length, 2)
+  assert.equal(run.bodies[1], run.bodies[0], 'the retried body is the refused one, byte for byte')
 })

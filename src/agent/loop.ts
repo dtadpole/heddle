@@ -558,23 +558,22 @@ async function runTurnBody(
      * — but the message must say the failure came from a hook rather than from the model, or a typo in
      * a policy reads as a provider outage. A listener that means to refuse can say so with `HookRefusal`.
      */
-    let prepared: { messages: readonly Message[]; tools: readonly ToolSpec[] }
-    try {
-      prepared = ctx.waterfall(
-        'agent/pre-step',
-        { messages: report.messages, tools, round: round + 1 },
-        () => ({ messages: report.messages, tools }),
-      )
-    } catch (error) {
-      const reason = isHookRefusal(error) ? (error as Error).message : `a hook failed at agent/pre-step — ${(error as Error).message}`
-      throw new Error(reason)
+    const preStep = (messages: readonly Message[]): { messages: readonly Message[]; tools: readonly ToolSpec[] } => {
+      let answered: { messages: readonly Message[]; tools: readonly ToolSpec[] }
+      try {
+        answered = ctx.waterfall('agent/pre-step', { messages, tools, round: round + 1 }, () => ({ messages, tools }))
+      } catch (error) {
+        const reason = isHookRefusal(error) ? (error as Error).message : `a hook failed at agent/pre-step — ${(error as Error).message}`
+        throw new Error(reason)
+      }
+      /**
+       * The session's preset is applied again to what the hook answered (developer-five's review of A96): a listener
+       * may add a registered tool, and one outside the preset would otherwise reach the model's tool list even though a
+       * call to it is refused. A profile without presets is unchanged.
+       */
+      return preset !== undefined ? { ...answered, tools: presetToolSpecs(preset, answered.tools) } : answered
     }
-    /**
-     * The session's preset is applied again to what the hook answered (developer-five's review of A96): a listener may
-     * add a registered tool, and one outside the preset would otherwise reach the model's tool list even though a call
-     * to it is refused. A profile without presets is unchanged.
-     */
-    if (preset !== undefined) prepared = { ...prepared, tools: presetToolSpecs(preset, prepared.tools) }
+    let prepared = preStep(report.messages)
 
     const calls: { id: string; name: string; arguments: string }[] = []
     let roundText = ''
@@ -727,6 +726,34 @@ async function runTurnBody(
             if (!(await waitForRetry(plan.delayMs, signal))) throw error
             ctx.session.store.append(options.session, { type: 'llm/retry-started', retryId, round, retry: plan.retry })
             providerRetries = plan.retry
+            /**
+             * A message that landed during the failed call or its wait is part of the retried request (#250).
+             *
+             * A steer (or a teammate's mail) written then sits on the surface before the retried request, because no
+             * answer run is open to hold it. Sending the request prepared before the wait left it out, and the next
+             * attempt's reading then counted it as said before the call, so no round answered it: the model never saw
+             * it, and the history read as if the retried answer had. DSH's retry re-runs the step, which builds its
+             * request from the session again. So the request is derived again from the surface, as the overflow retry
+             * below derives it, and goes through the pre-step hook again, because it is a new message list. A wait that
+             * nothing landed in sends the same request.
+             */
+            if (hasNewInput(inputBefore, userInputSeqs(ctx, options.session))) {
+              const generationBefore = ctx.session.surface(options.session).replaceGeneration
+              report = ctx.context.assemble(options.session, {
+                cwd: instructionCwd,
+                tools,
+                ...(system !== undefined ? { system } : {}),
+                endpoint: options.endpoint,
+                ...(options.model !== undefined ? { model: options.model } : {}),
+              })
+              prepared = preStep(report.messages)
+              lastContext = {
+                estimatedTokens: report.estimatedTokens,
+                thresholdTokens: report.thresholdTokens,
+                pruned: report.pruned,
+                compacted: ctx.session.surface(options.session).replaceGeneration > generationBefore,
+              }
+            }
             continue
           }
         }
