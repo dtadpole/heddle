@@ -389,6 +389,14 @@ pub trait ModelService: Send + Sync {
     /// declares — `reasoningLevelFor(...) !== undefined`.
     fn declares_level(&self, endpoint: &str, model: Option<&str>, effort: &str) -> bool;
 
+    /// `selectionProblem(ctx.model.endpoint(endpoint), model)`: the sentence that refuses a model the endpoint does
+    /// not offer, or `None` when it offers it or the endpoint is unknown here (#239). The default refuses nothing,
+    /// for doubles that do not model a catalogue.
+    fn model_problem(&self, endpoint: &str, model: &str) -> Option<String> {
+        let _ = (endpoint, model);
+        None
+    }
+
     fn has(&self, endpoint: &str) -> bool {
         self.names().iter().any(|name| name == endpoint)
     }

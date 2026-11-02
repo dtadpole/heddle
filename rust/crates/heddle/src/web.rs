@@ -952,6 +952,13 @@ impl ServerModels for Models {
             .and_then(|config| config.reasoning_level_for(model, effort))
             .is_some()
     }
+
+    /// The switch route's own rule (`selection_problem`), asked of a model a turn names (#239).
+    fn model_problem(&self, endpoint: &str, model: &str) -> Option<String> {
+        self.service
+            .endpoint(endpoint)
+            .and_then(|config| heddle_config::selection_problem(&config, Some(model), None))
+    }
 }
 
 /// The server's view of `heddle-sandbox`'s service.

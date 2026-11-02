@@ -2258,6 +2258,13 @@ fn without_nagle(
     })
 }
 
+/// Whether the session is a subagent's (`origin: "subagent"`, a delegate or a teammate): it runs on its own model.
+fn is_subagent_session(meta: Option<&SessionMeta>) -> bool {
+    meta.and_then(|meta| meta.rest.get("origin"))
+        .and_then(Value::as_str)
+        == Some("subagent")
+}
+
 /// The body of the `409` a turn into a one-shot subagent's session gets, or `None` when the session takes turns —
 /// web.ts `subagentTurnRefusal`.
 ///
@@ -2382,6 +2389,33 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
             return preset_fixed(recorded);
         }
     }
+    // A model the endpoint does not offer is refused before anything is opened or written (#239), as the switch
+    // route refuses it and as DSH's `requireModel` does (`session/model-unavailable`): recording it made every
+    // following turn fail with a name nobody could choose from the menu. It comes after the refusals above, in
+    // web.ts's order, so a missing session is still a 404. The endpoint judged is the one this turn will use, as far
+    // as it is known before a session is opened (the request's, a resumed session's record, then the defaults); a
+    // folder's existing session is only known once opened, and is judged again below. A subagent's session (a
+    // teammate's) runs on its own model, not one a composer names (#175), so it is not judged.
+    let resumed_meta = resume.and_then(|id| sessions.meta(id));
+    if let Some(model) = requested_model
+        && !is_subagent_session(resumed_meta.as_ref())
+    {
+        let recorded = resumed_meta
+            .as_ref()
+            .map(|meta| session_request_selection(Some(meta)))
+            .unwrap_or_default();
+        if let Some(prospect) = turn_selection(
+            requested_endpoint,
+            requested_model,
+            None,
+            &recorded,
+            state.options().default_endpoint.as_deref(),
+            models,
+        ) && let Some(problem) = models.model_problem(&prospect.endpoint, model)
+        {
+            return respond::text(StatusCode::BAD_REQUEST, format!("{problem}\n"));
+        }
+    }
     let session = if let Some(resume) = resume {
         // A resumed session keeps the selection it recorded; only a session this request creates is
         // born with the request's choice (web.ts passes `{ resume }` alone).
@@ -2463,6 +2497,14 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
                 models.names().join(", ")
             ),
         );
+    }
+    // The named model against the endpoint now known for certain (a folder's existing session), before the record
+    // is written.
+    if let Some(model) = requested_model
+        && !is_subagent_session(meta.as_ref())
+        && let Some(problem) = models.model_problem(&selection.endpoint, model)
+    {
+        return respond::text(StatusCode::BAD_REQUEST, format!("{problem}\n"));
     }
     let unchanged = meta.as_ref().is_some_and(|meta| {
         meta.endpoint.as_deref() == Some(selection.endpoint.as_str())
