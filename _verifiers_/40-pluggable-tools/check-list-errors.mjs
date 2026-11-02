@@ -11,70 +11,22 @@ import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { isolatedHome, readTranscript, removeDir, repoRoot, runCli, scriptedConfig, sessionsUnder } from '../../_tools_/verify-runner/lib.mjs'
-
-function profile(home) {
-  const dir = join(home, 'list-errors-profile')
-  mkdirSync(dir, { recursive: true })
-  writeFileSync(join(dir, 'cordis.yml'), '[]\n')
-  writeFileSync(
-    join(dir, 'heddle.patch.yml'),
-    `- insert:
-    - id: console
-      name: ${repoRoot}/src/plugins/console-exporter.ts
-    - id: session
-      name: ${repoRoot}/src/plugins/session.ts
-      config:
-        root: ${join(home, 'sessions')}
-    - id: model
-      name: ${repoRoot}/src/plugins/model.ts
-    - id: context
-      name: ${repoRoot}/src/context/service.ts
-      inject: [model, session]
-      config:
-        contextWindow: 200000
-    - id: sandbox
-      name: ${repoRoot}/src/sandbox/service.ts
-      config:
-        mode: danger-full-access
-        workspaceRoot: ${home}
-    - id: approvals
-      name: ${repoRoot}/src/approvals/service.ts
-      config:
-        mode: allow
-    - id: tools
-      name: ${repoRoot}/src/plugins/tools.ts
-      inject: [approvals, sandbox]
-      config:
-        allow: [list_dir]
-`,
-  )
-  return dir
-}
+import { oneToolCall } from './fs-tool-turn.mjs'
 
 /** Run one turn whose model lists `relative` under the scratch folder, given as an absolute path; return the tool results. */
 async function listResult(relative, layout = () => {}) {
-  const home = isolatedHome('list-errors')
-  try {
-    const scratch = join(home, 'scratch')
-    mkdirSync(scratch, { recursive: true })
-    writeFileSync(join(scratch, 'plain.txt'), 'preserved')
-    layout(scratch)
-    const path = join(scratch, relative)
-    const { config } = scriptedConfig({ home, steps: [{ toolCall: { name: 'list_dir', arguments: { path } } }, { text: 'done' }] })
-    const run = await runCli(['--profile', profile(home), '--sandbox-root', home, '--turn', 'list it'], {
-      env: { HOME: home, HEDDLE_HOME: join(home, '.heddle'), HEDDLE_CONFIG: config },
-    })
-    // A refused call is a denial, which a `--turn` run reports with exit 1; the transcript is the verdict.
-    assert.ok(run.code === 0 || run.code === 1, `the turn ran (exit ${run.code})\n${run.stdout}${run.stderr}`)
-    const session = sessionsUnder(join(home, 'sessions'))[0]
-    const results = readTranscript(join(home, 'sessions', session))
-      .filter((event) => event.type === 'message' && event.message?.role === 'tool')
-      .map((event) => (event.message.content ?? []).map((part) => part.text ?? '').join(''))
-    return { results, path }
-  } finally {
-    removeDir(home)
-  }
+  const { results, scripted } = await oneToolCall({
+    label: 'list-errors',
+    tool: 'list_dir',
+    layout: (home) => {
+      const scratch = join(home, 'scratch')
+      mkdirSync(scratch, { recursive: true })
+      writeFileSync(join(scratch, 'plain.txt'), 'preserved')
+      layout(scratch)
+    },
+    args: (home) => ({ path: join(home, 'scratch', relative) }),
+  })
+  return { results, path: scripted.path }
 }
 
 test('a missing directory is FS_NOT_FOUND and names it, as DSH says it', async () => {

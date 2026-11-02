@@ -34,11 +34,21 @@ pub struct MemoryStore {
     sessions: Mutex<HashMap<SessionId, MemorySession>>,
     /// When set, `create` and `fork` fail with this reason.
     fail_creates: Mutex<Option<String>>,
+    /// Per-session surfaces a test sets (`surface_nodes`); a session without one answers `None`.
+    surfaces: Mutex<HashMap<SessionId, Vec<u64>>>,
 }
 
 impl MemoryStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Say which seqs are on a session's surface, as a compaction leaves it.
+    pub fn set_surface(&self, session: &str, nodes: Vec<u64>) {
+        self.surfaces
+            .lock()
+            .expect("the surfaces lock")
+            .insert(session.to_owned(), nodes);
     }
 
     /// Add an existing session (a Lead, or a member a previous process left).
@@ -164,6 +174,14 @@ impl TeamStore for MemoryStore {
         };
         self.insert_child(child, events)?;
         Ok(true)
+    }
+
+    fn surface_nodes(&self, session: &str) -> Option<Vec<u64>> {
+        self.surfaces
+            .lock()
+            .expect("the surfaces lock")
+            .get(session)
+            .cloned()
     }
 
     fn append(&self, session: &str, event: Value) -> Result<(), PortError> {

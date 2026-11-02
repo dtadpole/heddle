@@ -54,6 +54,13 @@ summary is held, and after the restart the first read already draws the row as "
 the next turn's write-open appends a stopped `compaction/failed` and the `command/done` before its prompt, a second
 restart appends nothing more, and a new `/compact` still compacts.
 
+Since 1 Nov `check-plan-review-crash.mjs` judges a plan review across a crash (#228). The server is killed while
+`exit_plan_mode`'s `plan-review` question waits. After the restart the review reads `cancelled` (`interrupted`) and is
+not open, an Approve is refused with `409` and writes nothing, the session stays in plan mode, and `/plan off` still
+leaves it. That is DSH's "fails closed". Its control approves a live review: plan mode is left, and the request after
+the tool result carries the approval's sentence, without the plan-mode policy and without the "switched back to the
+default mode" notice.
+
 ## Where it stands, 2026-10-11
 
 **22 checks, all passing — verdict `0`.** The tree group was written **before** the mechanism it judges,

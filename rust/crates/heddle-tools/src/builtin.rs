@@ -4,12 +4,17 @@
 //! not that the catalogue is large. Every spec description is copied verbatim from the TypeScript build:
 //! it is what the model is told, so the two binaries must tell it the same thing.
 
+use std::cmp::Ordering;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
+use icu_collator::options::{AlternateHandling, CollatorOptions, Strength};
+use icu_collator::preferences::{CollationCaseFirst, CollationNumericOrdering};
+use icu_collator::{Collator, CollatorBorrowed, CollatorPreferences};
 use serde_json::json;
 
 use crate::gates::SandboxGate;
@@ -290,6 +295,18 @@ fn write_file_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
                     ));
                 }
                 let target = sandbox.assert_writable(&path, context.mode())?;
+                // An existing target that is not a regular file, such as a folder, is refused and named before
+                // anything is written, as DSH's writeText probes it (`dsh-fs-local`): not the platform's unnamed
+                // `Is a directory (os error 21)` (live-testing issue #237).
+                if let Ok(info) = tokio::fs::metadata(&target).await
+                    && !info.is_file()
+                {
+                    let shown = requested_display_path(&context.cwd, &path);
+                    return Ok(ToolResult::refused(
+                        codes::FS_NOT_REGULAR_FILE,
+                        format!("cannot write \"{shown}\": not a regular file"),
+                    ));
+                }
                 tokio::fs::create_dir_all(parent_of(&target)).await?;
                 let content = string_arg(&args, "content");
                 tokio::fs::write(&target, &content).await?;
@@ -382,7 +399,14 @@ fn read_file_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
                     }
                     Err(error) => return Err(error.into()),
                 }
-                let text = tokio::fs::read_to_string(&target).await?;
+                // Bytes that are not UTF-8 text are refused and the file named, as DSH's fatal decode does (`dsh-fs-local`
+                // decodeUtf8): not the platform's unnamed `stream did not contain valid UTF-8` (live-testing issue #234).
+                let Ok(text) = String::from_utf8(tokio::fs::read(&target).await?) else {
+                    return Ok(ToolResult::refused(
+                        codes::FS_NOT_TEXT,
+                        format!("cannot read \"{shown}\": invalid UTF-8 text"),
+                    ));
+                };
                 let data = serde_json::Map::from_iter([
                     ("path".to_owned(), json!(target)),
                     ("bytes".to_owned(), json!(text.len())),
@@ -411,6 +435,33 @@ fn listing_refusal(shown: &str, error: &std::io::Error) -> ToolResult {
             format!("cannot list \"{shown}\": {error}"),
         ),
     }
+}
+
+/// The order `list_dir` gives a folder's entries: DSH's (`dsh-fs-local` listDirectory sorts the children with
+/// `name.localeCompare`), which the TypeScript build shares. That is ICU collation with the options Node's default
+/// `Intl.Collator` resolves to under an English locale: tertiary strength (`sensitivity: "variant"`), punctuation
+/// not ignorable (`ignorePunctuation: false`), case-first off and numeric off. Names that collate equal keep byte
+/// order, because Node's `readdir` hands them over sorted by bytes (libuv's scandir) before its stable sort. The
+/// collator is built once.
+///
+/// Live-testing issue #247: the build sorted by bytes, so `B.txt` came before `a.txt` and `é.txt` after `plain.txt`.
+/// Stated difference: the Rust build always uses root collation, where Node follows the process locale (`LANG`); under
+/// an English locale they agree. If the collator could not be built, the order falls back to bytes.
+fn listing_order(left: &OsStr, right: &OsStr) -> Ordering {
+    static COLLATOR: LazyLock<Option<CollatorBorrowed<'static>>> = LazyLock::new(|| {
+        let mut options = CollatorOptions::default();
+        options.strength = Some(Strength::Tertiary);
+        options.alternate_handling = Some(AlternateHandling::NonIgnorable);
+        let mut preferences = CollatorPreferences::default();
+        preferences.case_first = Some(CollationCaseFirst::False);
+        preferences.numeric_ordering = Some(CollationNumericOrdering::False);
+        Collator::try_new(preferences, options).ok()
+    });
+    let collated = match COLLATOR.as_ref() {
+        Some(collator) => collator.compare(&left.to_string_lossy(), &right.to_string_lossy()),
+        None => Ordering::Equal,
+    };
+    collated.then_with(|| left.cmp(right))
 }
 
 fn list_dir_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
@@ -455,22 +506,22 @@ fn list_dir_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
                     }
                     Err(error) => return Ok(listing_refusal(&shown, &error)),
                 }
-                let mut entries = Vec::new();
+                let mut entries: Vec<(std::ffi::OsString, tokio::fs::DirEntry)> = Vec::new();
                 let mut dir = match tokio::fs::read_dir(&target).await {
                     Ok(dir) => dir,
                     Err(error) => return Ok(listing_refusal(&shown, &error)),
                 };
                 loop {
                     match dir.next_entry().await {
-                        Ok(Some(entry)) => entries.push(entry),
+                        Ok(Some(entry)) => entries.push((entry.file_name(), entry)),
                         Ok(None) => break,
                         Err(error) => return Ok(listing_refusal(&shown, &error)),
                     }
                 }
-                entries.sort_by_key(|entry| entry.file_name());
+                entries.sort_by(|(left, _), (right, _)| listing_order(left, right));
                 let mut lines = Vec::with_capacity(entries.len());
-                for entry in &entries {
-                    let name = entry.file_name().to_string_lossy().into_owned();
+                for (name, entry) in &entries {
+                    let name = name.to_string_lossy().into_owned();
                     // Follow the entry like the TypeScript `statSync` does: a symlink to a directory is a
                     // directory in the listing. A broken link falls back to the entry's own type.
                     let metadata = match tokio::fs::metadata(entry.path()).await {
@@ -822,10 +873,28 @@ pub struct ShellEnd {
     pub limit_ms: u64,
 }
 
-/// `bash`'s answer for a command that ended: the stop or the wall time, else the combined output cut to
-/// `output_limit` with the sandbox's reading (a runner failure outranks a denial) or a nonzero exit, each with the
-/// sandbox facts. Shared by the foreground run and the jobs row's promoting run (`heddle-jobs`), so a call answers
-/// the same however it was run.
+/// A finished command's stdout, then its stderr in a `[stderr]` section, as DSH's bash renders a run
+/// (`dsh-tool-bash` renderResult): when stdout has text that does not end in a newline, one is added before the
+/// marker; with no stderr, stdout alone. The jobs row's `job_output` reads mark stderr the same way. Live-testing
+/// issue #246: both builds glued the streams, so `printf out; printf err >&2` came back as `outerr` and a warning
+/// read as ordinary output. Stated differences kept: heddle cuts the combined text ([`truncate_output_at`]), keeps
+/// its error line first, and keeps its own answer for a run that printed nothing.
+pub fn marked_streams(stdout: &str, stderr: &str) -> String {
+    if stderr.is_empty() {
+        return stdout.to_owned();
+    }
+    let separator = if !stdout.is_empty() && !stdout.ends_with('\n') {
+        "\n"
+    } else {
+        ""
+    };
+    format!("{stdout}{separator}[stderr]\n{stderr}")
+}
+
+/// `bash`'s answer for a command that ended: the stop or the wall time, else stdout and the marked stderr
+/// ([`marked_streams`]) cut to `output_limit` with the sandbox's reading (a runner failure outranks a denial) or a
+/// nonzero exit, each with the sandbox facts. Shared by the foreground run and the jobs row's promoting run
+/// (`heddle-jobs`), so a call answers the same however it was run.
 pub fn shell_result(
     sandbox: &dyn SandboxGate,
     end: &ShellEnd,
@@ -854,7 +923,7 @@ pub fn shell_result(
         let data = serde_json::Map::from_iter([("sandbox".to_owned(), facts())]);
         return ToolResult::refused(code, message).with_data(data);
     }
-    let trimmed = truncate_output_at(&format!("{}{}", end.stdout, end.stderr), output_limit);
+    let trimmed = truncate_output_at(&marked_streams(&end.stdout, &end.stderr), output_limit);
     let code = end.code.unwrap_or(1);
     let outcome = match confined {
         None => SandboxOutcome::Exited,
@@ -1086,6 +1155,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_write_aimed_at_a_folder_is_fs_not_regular_file_and_leaves_it_as_it_was() {
+        // Live-testing issue #237: the raw `Is a directory (os error 21)` named no path and came back as TOOL_FAILED;
+        // DSH's writeText probes the target and refuses a non-file as FS_NOT_REGULAR_FILE (`dsh-fs-local`).
+        let root = tempdir();
+        std::fs::create_dir_all(root.path().join("folder")).unwrap();
+        std::fs::write(root.path().join("folder/plain.txt"), "preserved").unwrap();
+        let write = tool("write_file", sandbox(root.path()));
+        let result = write
+            .run(
+                args(json!({ "path": "./folder", "content": "ordinary text" })),
+                context_in(root.path(), SandboxMode::DangerFullAccess),
+            )
+            .await
+            .expect("a refusal, not a tool failure");
+        let error = result.error.as_ref().expect("refused");
+        assert_eq!(error.code, codes::FS_NOT_REGULAR_FILE);
+        assert_eq!(
+            error.message,
+            format!(
+                "cannot write \"{}/folder\": not a regular file",
+                root.path().display()
+            )
+        );
+        assert_eq!(result.output, "");
+        assert!(root.path().join("folder").is_dir());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("folder/plain.txt")).unwrap(),
+            "preserved"
+        );
+
+        let result = write
+            .run(
+                args(json!({ "path": "folder/plain.txt", "content": "recovered" })),
+                context_in(root.path(), SandboxMode::DangerFullAccess),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.error, None);
+        assert!(
+            result.output.starts_with("wrote 9 bytes to ")
+                && result.output.ends_with("folder/plain.txt"),
+            "{}",
+            result.output
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("folder/plain.txt")).unwrap(),
+            "recovered"
+        );
+    }
+
+    #[tokio::test]
     async fn a_sandbox_denial_is_the_sandbox_refusal_and_never_a_write() {
         let root = tempdir();
         let write = tool("write_file", Arc::new(FakeSandbox::refusing(root.path())));
@@ -1124,6 +1244,62 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn listing_order_is_dshs_localecompare_not_byte_order() {
+        // Live-testing issue #247's six names, then punctuation, digits, a space, a folder and case. Each expected
+        // order is what Node's `localeCompare` gives under en-US after readdir's byte-sorted hand-over.
+        let sorted = |names: &[&str]| {
+            let mut names: Vec<&OsStr> = names.iter().map(OsStr::new).collect();
+            names.sort_by(|left, right| listing_order(left, right));
+            names
+                .into_iter()
+                .map(|name| name.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            sorted(&[
+                "plain.txt",
+                "\u{e9}.txt",
+                "e.txt",
+                "c.txt",
+                "B.txt",
+                "a.txt"
+            ]),
+            [
+                "a.txt",
+                "B.txt",
+                "c.txt",
+                "e.txt",
+                "\u{e9}.txt",
+                "plain.txt"
+            ]
+        );
+        assert_eq!(
+            sorted(&[
+                "Zed", "zed", "alpha", "9nine", "10ten", "-dash", "_under", ".hidden", "Docs",
+                "a b", "a~b", "a#b",
+            ]),
+            [
+                "_under", "-dash", ".hidden", "10ten", "9nine", "a b", "a#b", "a~b", "alpha",
+                "Docs", "zed", "Zed",
+            ]
+        );
+    }
+
+    #[test]
+    fn names_that_collate_equal_keep_byte_order() {
+        // A zero-width joiner is ignorable, and precomposed and decomposed é are canonically equal, so each pair
+        // collates equal; Node keeps readdir's byte order for them, whatever order they arrive in.
+        for names in [
+            ["a\u{200d}b", "ab", "\u{e9}", "e\u{301}"],
+            ["e\u{301}", "\u{e9}", "ab", "a\u{200d}b"],
+        ] {
+            let mut names: Vec<&OsStr> = names.iter().map(OsStr::new).collect();
+            names.sort_by(|left, right| listing_order(left, right));
+            assert_eq!(names, ["ab", "a\u{200d}b", "e\u{301}", "\u{e9}"]);
+        }
+    }
+
     #[tokio::test]
     async fn list_dir_follows_a_symlink_to_a_directory() {
         let root = tempdir();
@@ -1257,7 +1433,49 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.error.as_ref().unwrap().code, codes::EXIT);
-        assert!(result.output.contains("out") && result.output.contains("err"));
+        assert_eq!(result.output, "out\n[stderr]\nerr\n");
+    }
+
+    #[tokio::test]
+    async fn stdout_and_stderr_come_back_apart_with_a_stderr_marker_as_dsh_renders_them() {
+        // Live-testing issue #246: both builds glued the streams, `printf out; printf err >&2` -> `outerr`.
+        let root = tempdir();
+        let bash = tool("bash", sandbox(root.path()));
+        let mut seen = Vec::new();
+        for command in [
+            "printf out; printf err >&2",
+            "printf 'out\\n'; printf err >&2",
+            "printf err >&2",
+            "printf out",
+        ] {
+            let result = bash
+                .run(
+                    args(json!({ "command": command })),
+                    context_in(root.path(), SandboxMode::DangerFullAccess),
+                )
+                .await
+                .unwrap();
+            assert!(result.error.is_none(), "{command}: {result:?}");
+            seen.push(result.output);
+        }
+        assert_eq!(
+            seen,
+            [
+                "out\n[stderr]\nerr",
+                "out\n[stderr]\nerr",
+                "[stderr]\nerr",
+                "out"
+            ]
+        );
+    }
+
+    #[test]
+    fn marked_streams_adds_a_newline_only_when_stdout_lacks_one() {
+        assert_eq!(marked_streams("out", "err"), "out\n[stderr]\nerr");
+        assert_eq!(marked_streams("out\n", "err"), "out\n[stderr]\nerr");
+        assert_eq!(marked_streams("", "err"), "[stderr]\nerr");
+        assert_eq!(marked_streams("out", ""), "out");
+        assert_eq!(marked_streams("", ""), "");
     }
 
     #[test]
@@ -1360,6 +1578,50 @@ mod tests {
             .unwrap();
         assert!(result.error.is_none());
         assert_eq!(result.output, "hello");
+    }
+
+    #[tokio::test]
+    async fn a_file_that_is_not_utf8_text_is_fs_not_text_and_names_the_file() {
+        // Live-testing issue #234: the platform's `stream did not contain valid UTF-8` named no file and came back as
+        // TOOL_FAILED; DSH's fatal decode refuses it as FS_NOT_TEXT (`dsh-fs-local` decodeUtf8).
+        let root = tempdir();
+        std::fs::create_dir_all(root.path().join("notes")).unwrap();
+        std::fs::write(root.path().join("notes/binary.dat"), [0xc3, 0x28]).unwrap();
+        let read = tool("read_file", sandbox(root.path()));
+        let result = read
+            .run(
+                args(json!({ "path": "notes/binary.dat" })),
+                context_in(root.path(), SandboxMode::DangerFullAccess),
+            )
+            .await
+            .expect("a refusal, not a tool failure");
+        let error = result.error.as_ref().expect("refused");
+        assert_eq!(error.code, codes::FS_NOT_TEXT);
+        assert_eq!(
+            error.message,
+            format!(
+                "cannot read \"{}/notes/binary.dat\": invalid UTF-8 text",
+                root.path().display()
+            )
+        );
+        assert_eq!(result.output, "");
+    }
+
+    #[tokio::test]
+    async fn a_utf8_file_of_several_byte_characters_still_reads_exactly() {
+        let root = tempdir();
+        let text = "caf\u{e9} \u{4e2d}\u{6587} \u{1f600}";
+        std::fs::write(root.path().join("wide.txt"), text).unwrap();
+        let read = tool("read_file", sandbox(root.path()));
+        let result = read
+            .run(
+                args(json!({ "path": "wide.txt" })),
+                context_in(root.path(), SandboxMode::DangerFullAccess),
+            )
+            .await
+            .unwrap();
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(result.output, text);
     }
 
     #[tokio::test]

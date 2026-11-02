@@ -51,6 +51,8 @@ pub mod codes {
     pub const FS_NOT_FOUND: &str = "FS_NOT_FOUND";
     /// A path a tool was asked to read is not a regular file, such as a directory (DSH's `FS_NOT_REGULAR_FILE`).
     pub const FS_NOT_REGULAR_FILE: &str = "FS_NOT_REGULAR_FILE";
+    /// A file a tool was asked to read as text is not valid UTF-8 (DSH's `FS_NOT_TEXT`).
+    pub const FS_NOT_TEXT: &str = "FS_NOT_TEXT";
     /// A path a tool was asked to list is not a directory, such as a file (DSH's `FS_NOT_DIRECTORY`).
     pub const FS_NOT_DIRECTORY: &str = "FS_NOT_DIRECTORY";
     /// The OS refused to open a path a tool was asked to list (DSH's `FS_PERMISSION_DENIED`).

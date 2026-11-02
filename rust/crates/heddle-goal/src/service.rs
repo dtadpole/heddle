@@ -862,7 +862,13 @@ pub struct GoalService {
     activation: Mutex<HashMap<String, GoalActivation>>,
     /// Serializes read-fold-append.
     writing: Mutex<()>,
+    /// What a person's pause calls to abort the session's running turn (issue #190), set by the round driver's
+    /// composition, which holds the runtime; absent, a pause only pauses.
+    pause_interrupter: std::sync::OnceLock<PauseInterrupter>,
 }
+
+/// Aborts a session's running turn, keeping queued input, for a person's pause.
+pub type PauseInterrupter = Arc<dyn Fn(&str) + Send + Sync>;
 
 impl GoalService {
     /// The service over `log`, with the system clock and random ids.
@@ -874,7 +880,13 @@ impl GoalService {
             default_max_goal_rounds: config.default_max_goal_rounds,
             activation: Mutex::new(HashMap::new()),
             writing: Mutex::new(()),
+            pause_interrupter: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Install what a person's pause calls to abort the session's running turn; the first one set stays.
+    pub fn set_pause_interrupter(&self, interrupter: PauseInterrupter) {
+        let _ = self.pause_interrupter.set(interrupter);
     }
 
     /// The same service with another clock — for tests.
@@ -1015,7 +1027,22 @@ impl GoalService {
     }
 
     /// Pause an active goal and disarm it.
+    ///
+    /// This is a **person's** pause (the composer's `/goal pause`, the goal bar's POST): it also aborts the turn
+    /// already running in the session, as Stop does, keeping queued input (issue #190). DSH's round driver: "a
+    /// host-initiated pause also aborts the turn already running, while a model-initiated pause inside its own turn
+    /// finishes normally". The model's own goal tool and the round driver use [`Self::pause_in_turn`].
     pub fn pause(&self, session: &str, goal: &GoalRef) -> Result<GoalView, GoalError> {
+        let view = self.pause_in_turn(session, goal)?;
+        if let Some(interrupt) = self.pause_interrupter.get() {
+            interrupt(session);
+        }
+        Ok(view)
+    }
+
+    /// Pause without touching the running turn: the model's own pause inside its turn, which finishes normally, and
+    /// the round driver's pause after a stopped round, when a turn that began since is not the pause's to end.
+    pub fn pause_in_turn(&self, session: &str, goal: &GoalRef) -> Result<GoalView, GoalError> {
         self.transition(
             session,
             goal,
@@ -1477,6 +1504,43 @@ mod tests {
             "a replacement is a new identity"
         );
         assert_eq!(second.goal.revision, 1);
+    }
+
+    /// Issue #190: a person's pause calls the interrupter for the session (the running turn is aborted, as DSH's
+    /// host-initiated pause aborts it); the model's own pause inside its turn, `pause_in_turn`, does not.
+    #[test]
+    fn a_persons_pause_aborts_the_running_turn_and_the_models_own_pause_does_not() {
+        let (_log, service) = fixture("s1");
+        let aborted = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen = Arc::clone(&aborted);
+        service.set_pause_interrupter(Arc::new(move |session: &str| {
+            seen.lock().unwrap().push(session.to_owned());
+        }));
+        let created = service
+            .create(
+                "s1",
+                CreateGoal {
+                    objective: "one".into(),
+                    max_goal_rounds: None,
+                },
+            )
+            .unwrap();
+        let paused = service
+            .pause_in_turn("s1", &created.goal.goal_ref())
+            .unwrap();
+        assert_eq!(paused.goal.phase, GoalPhase::Paused);
+        assert!(
+            aborted.lock().unwrap().is_empty(),
+            "the model's own pause leaves its turn running"
+        );
+        let resumed = service.resume("s1", &paused.goal.goal_ref()).unwrap();
+        let paused = service.pause("s1", &resumed.goal.goal_ref()).unwrap();
+        assert_eq!(paused.goal.phase, GoalPhase::Paused);
+        assert_eq!(
+            *aborted.lock().unwrap(),
+            vec!["s1".to_owned()],
+            "a person's pause aborts the session's running turn"
+        );
     }
 
     #[test]

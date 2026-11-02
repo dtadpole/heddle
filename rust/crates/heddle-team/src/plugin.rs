@@ -117,6 +117,8 @@ pub struct TeamPluginDeps {
 pub struct TeamPlugin {
     pub service: Arc<TeamService>,
     pub tools: TeamTools,
+    /// The store the policy is written through, for [`TeamPlugin::on_session_event`].
+    store: Arc<dyn TeamStore>,
 }
 
 impl TeamPlugin {
@@ -151,6 +153,7 @@ impl TeamPlugin {
                 emit(lead);
             }
         });
+        let policy_store = Arc::clone(&store);
         let spawn_store = Arc::clone(&store);
         let on_spawn: OnSpawn = Arc::new(move |lead: &str, member: &str| {
             let _ = ensure_policy(&*spawn_store, &[lead, member]);
@@ -170,7 +173,25 @@ impl TeamPlugin {
                 on_spawn: Some(on_spawn),
             },
         );
-        Self { service, tools }
+        Self {
+            service,
+            tools,
+            store: policy_store,
+        }
+    }
+
+    /// A session event, forwarded by the composition (issue #185): after a `compaction/end` in a session that carries
+    /// the team policy, the note is written again when the compaction shadowed it, before the turn's next request.
+    pub fn on_session_event(&self, session: &str, kind: &str) {
+        if kind != "compaction/end" {
+            return;
+        }
+        let Ok(events) = self.store.read(session) else {
+            return;
+        };
+        if has_policy_note(&events) {
+            let _ = ensure_policy(&*self.store, &[session]);
+        }
     }
 
     /// The `web` command's startup edge: recover every team in the store. Print
@@ -214,17 +235,38 @@ impl TeamRunner for AgentRunner {
 
 /// Make the collaboration policy durable in each named session that exists and does not hold it yet
 /// (`ensurePolicy`): append [`crate::policy::policy_note_record`] once per session.
+///
+/// A note counts only while it is on the surface (issue #185): a compaction shadows it with the history it folds,
+/// and the member would run on without the team rules. DSH carries the policy in every member's system prompt, which
+/// compaction never shadows; here the note is written again. A store that cannot fold a surface falls back to "a note
+/// anywhere in the log".
 pub fn ensure_policy(store: &dyn TeamStore, sessions: &[&str]) -> Result<(), PortError> {
     for id in sessions {
         if !store.exists(id) {
             continue;
         }
-        if has_policy_note(&store.read(id)?) {
+        if policy_on_surface(store, id, &store.read(id)?) {
             continue;
         }
         store.append(id, policy_note_record())?;
     }
     Ok(())
+}
+
+/// Whether one of the session's policy notes is on its surface (or, for a store that cannot say, in its log).
+fn policy_on_surface(store: &dyn TeamStore, session: &str, events: &[Value]) -> bool {
+    let notes: Vec<u64> = events
+        .iter()
+        .filter(|event| has_policy_note(std::slice::from_ref(event)))
+        .filter_map(|event| event.get("seq").and_then(Value::as_u64))
+        .collect();
+    if notes.is_empty() {
+        return false;
+    }
+    match store.surface_nodes(session) {
+        Some(surface) => notes.iter().any(|seq| surface.contains(seq)),
+        None => true,
+    }
 }
 
 #[cfg(test)]
@@ -474,5 +516,39 @@ mod tests {
         ensure_policy(&store, &["session-lead"]).unwrap();
         assert_eq!(notes(), 1, "the policy is written once, not once per write");
         assert!(store.events("session-nowhere").is_empty());
+    }
+
+    /// Issue #185: a policy note a compaction shadowed no longer counts; the note is written again, and a note still
+    /// on the surface is not doubled.
+    #[test]
+    fn a_policy_note_a_compaction_shadowed_is_written_again() {
+        let store = MemoryStore::new();
+        store.add_session(SessionMetaView {
+            id: "session-lead".to_owned(),
+            ..SessionMetaView::default()
+        });
+        ensure_policy(&store, &["session-lead"]).unwrap();
+        let notes = || {
+            store
+                .events("session-lead")
+                .iter()
+                .filter(|event| has_policy_note(std::slice::from_ref(event)))
+                .filter_map(|event| event["seq"].as_u64())
+                .collect::<Vec<_>>()
+        };
+        let first = notes();
+        assert_eq!(first.len(), 1);
+        store.set_surface("session-lead", first.clone());
+        ensure_policy(&store, &["session-lead"]).unwrap();
+        assert_eq!(notes(), first, "a note on the surface is not doubled");
+        // A compaction shadowed it: the surface no longer holds its seq.
+        store.set_surface("session-lead", vec![]);
+        ensure_policy(&store, &["session-lead"]).unwrap();
+        let again = notes();
+        assert_eq!(
+            again.len(),
+            2,
+            "the note is written again after the compaction"
+        );
     }
 }
