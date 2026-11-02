@@ -1,5 +1,5 @@
 import { contextWindowFromModelList } from '../llm/model-info.ts'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync, statSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { networkInterfaces } from 'node:os'
@@ -41,6 +41,7 @@ import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.
 import { SessionFlagError } from '../session/store.ts'
 import { normalizeSessionTitle, TITLE_INVALID } from '../session/title-text.ts'
 import { activitySessions, refusalSentence, rowActivity, sessionActivity, stopRowActivity } from '../session/activity.ts'
+import { pendingInbox, queueSteer, steeringOpen } from '../session/inbox.ts'
 import { handleScheduleRoute } from '../schedule/http.ts'
 import type { ScheduleService } from '../schedule/service.ts'
 import { handleJobsRoute } from '../jobs/http.ts'
@@ -2276,6 +2277,15 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
            */
           turns,
           /**
+           * The steers still waiting in the session's next-step inbox (#31), with their ids and text: what DSH's queue
+           * shows as steering until the loop claims them. A reloaded page or a second tab draws them from here.
+           */
+          pendingSteers: pendingInbox(ctx.session.store, handle)['next-step'].flatMap((message) => {
+            const source = message.source as { kind?: unknown; steerId?: unknown } | undefined
+            if (source?.kind !== 'steer' || typeof source.steerId !== 'string') return []
+            return [{ steerId: source.steerId, text: message.content.map((part) => ('text' in part && typeof part.text === 'string' ? part.text : '')).join('') }]
+          }),
+          /**
            * How far this transcript reaches: the last recorded event's `seq`, or 0 for an empty session.
            *
            * A page opening a session clears its transcript and reads this answer, while the event stream keeps
@@ -2514,14 +2524,38 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     /**
-     * Recording the message is the delivery.
-     *
-     * `ctx.session.user` writes the same event the composer's own turn would have written, so the appending
-     * is measured by the loop's next round and streamed to every reader by the one write path — there is no
-     * second channel a steer could travel on without becoming a second truth.
+     * The turn's own gate, not only the running count: the loop shuts it in the same tick as its final "nothing
+     * pending" decision, which comes before this server's count drops. A steer in that window would be accepted
+     * and then wait for the next turn with the page showing "Steering…" (developer-ten's review of #31).
      */
-    ctx.session.userContent(handle, [{ type: 'text', text: prompt }, ...steerAttachments])
-    respond(response, 200, 'application/json', `${JSON.stringify({ accepted: true, session: id }, null, 2)}\n`)
+    if (!steeringOpen(ctx.session.store, handle)) {
+      respond(
+        response,
+        409,
+        'application/json',
+        `${JSON.stringify({ error: 'the current turn no longer accepts steering', code: 'session/steer-unavailable' })}\n`,
+      )
+      return
+    }
+    /**
+     * Queueing the message in the next-step inbox is the delivery (#31), as DSH's steer is
+     * (`send(message, 'next-step', true)`).
+     *
+     * The running loop writes it at its next step boundary, which is after the result of any tool call still
+     * running, so the log never holds a user message between a call and its result. Measured before, when the
+     * route wrote the message at once: a steer sent during a shell call sat between the call and its output, and
+     * the page drew it above the tool row. A turn that ends with the steer still pending takes another step
+     * for it, and a stopped turn leaves it for the next turn to claim before its prompt.
+     */
+    /**
+     * The steer's id travels in its source, so the message the loop writes when it claims the steer names it, and in
+     * the answer, so the page keeps the row as "steering" until that message arrives (DSH's queue shows a steer until
+     * it is claimed). Without it the page dropped the row on this 200 and the steer was visible nowhere until the
+     * step boundary (#31).
+     */
+    const steerId = `steer-${randomUUID()}`
+    queueSteer(ctx.session.store, handle, [{ type: 'text', text: prompt }, ...steerAttachments], { kind: 'steer', steerId })
+    respond(response, 200, 'application/json', `${JSON.stringify({ accepted: true, session: id, steerId }, null, 2)}\n`)
     return
   }
 
@@ -3888,14 +3922,17 @@ export function transcriptTurns(
         usageSum = undefined
         usageStart = turns.length
         const attachments = attachmentsOf(message.content ?? [])
+        const steerSource = message.source as { kind?: unknown; steerId?: unknown } | undefined
+        const steerId = steerSource?.kind === 'steer' && typeof steerSource.steerId === 'string' ? steerSource.steerId : undefined
         /** A message the harness wrote names its trigger in `source`; a person's message has none. */
         const source = message.source as { kind?: unknown } | undefined
-        const trigger = typeof source === 'object' && source !== null && typeof source.kind === 'string' && source.kind !== '' ? (source as ChatTurn['trigger']) : undefined
+        const trigger = typeof source === 'object' && source !== null && typeof source.kind === 'string' && source.kind !== '' && source.kind !== 'steer' ? (source as ChatTurn['trigger']) : undefined
         turns.push({
           kind: 'user',
           text: blocksText(message.content ?? []),
           ...(attachments.length > 0 ? { attachments } : {}),
           ...(typeof event.at === 'string' ? { time: event.at } : {}),
+          ...(steerId !== undefined ? { steerId } : {}),
           ...(trigger !== undefined ? { trigger } : {}),
         })
       }
@@ -4065,6 +4102,11 @@ export interface TurnAttachment {
 
 export interface ChatTurn {
   readonly kind: 'user' | 'assistant' | 'reasoning' | 'tool' | 'command'
+  /**
+   * A user row the loop wrote by claiming a steer names the steer's id (#31), so a page that missed the live claim
+   * (a reload, a reconnect, a second tab) can retire its "Steering…" row from this view.
+   */
+  readonly steerId?: string
   /**
    * When the logged event happened, as its own `at` — the **user message's clock**, which the page shows beside
    * the bubble and the copy button (DSH's `MessageIconActions` reads the same event time). It is the recorded

@@ -163,3 +163,58 @@ fn the_reference_keeps_the_keyboard_on_its_row() {
         "const target = control ?? row ?? document.getElementById('shortcut-reference-search')"
     ));
 }
+
+/// The approval card answers from the keyboard as DSH's `ApprovalFlow` does: Escape rejects, Enter on its focusable
+/// body allows once, a button keeps its own Enter, and the keyboard reference lists both keys as "Approval area"
+/// (#158). Executed by `test/page-shortcuts.test.ts` and judged in a browser by
+/// `_verifiers_/80-web-ui/check-approval-keys.mjs`.
+#[test]
+fn the_approval_card_answers_from_the_keyboard() {
+    assert!(PAGE_SOURCE.contains(
+        "<div id=\"approval-body\" tabindex=\"0\" role=\"group\" aria-label=\"Approval details\">"
+    ));
+    assert!(PAGE_SOURCE.contains("function approvalKeyOutcome(event, place)"));
+    assert!(
+        PAGE_SOURCE.contains("if (event.key === 'Enter' && place.onButton) return null"),
+        "a focused button keeps its own Enter"
+    );
+    assert!(
+        PAGE_SOURCE.contains("return event.key === 'Enter' ? 'allowed-once' : 'rejected'"),
+        "Enter allows once and Escape rejects"
+    );
+    assert!(PAGE_SOURCE.contains("approvalCard.addEventListener('keydown', (event) => {"));
+    assert!(
+        PAGE_SOURCE.contains("if (pending === null || allow.disabled) return"),
+        "one answer at a time"
+    );
+    assert!(PAGE_SOURCE.contains("{ label: 'Allow once', alias: '', keys: 'Enter' }"));
+    assert!(PAGE_SOURCE.contains("{ label: 'Reject', alias: '', keys: 'Esc' }"));
+    assert!(PAGE_SOURCE.contains("rows.push({ group: 'Approval area'"));
+    assert!(
+        PAGE_SOURCE.contains("hideApproval(keyboardWasInCard)"),
+        "an answer that lands closes the card knowing where the keyboard was"
+    );
+    assert!(
+        PAGE_SOURCE.contains(
+            "if (keyboardWasInCard && keyboardLeftFree && !composer.hidden && !field.disabled) field.focus({ preventScroll: true })"
+        ),
+        "the closed card hands the keyboard to the composer"
+    );
+    assert!(
+        PAGE_SOURCE.contains("  if (keyEvent.repeat) return\n  submitDraft("),
+        "a held Enter sends once"
+    );
+    assert!(
+        PAGE_SOURCE
+            .contains("const keyboardHome = keyboardWasInCard ? document.activeElement : null"),
+        "an answer remembers the element the press came from"
+    );
+    assert!(
+        PAGE_SOURCE.contains("if (approvalCard.hidden) hideApproval(true)"),
+        "an answer that does not land gives the keyboard back, to the composer when the card closed"
+    );
+    assert!(
+        PAGE_SOURCE.contains("    note.textContent = refusal\n    note.hidden = false"),
+        "the refusal's note is set after the card is drawn again"
+    );
+}

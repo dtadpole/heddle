@@ -123,7 +123,7 @@ function harness(admission: Admission = 'streamed', outcome = 'done'): Harness {
     }};
     const noop = () => {};
     const settleReasoning = noop, settleChat = noop, refreshRunningStatus = noop,
-      renderScheduleCards = noop, scheduleTreeRefresh = noop, scheduleGoalRefresh = noop,
+      renderScheduleCards = noop, claimSteer = noop, scheduleTreeRefresh = noop, scheduleGoalRefresh = noop,
       scheduleTodoRefresh = noop, paintRunningMarks = noop, renderComposerState = noop,
       add = noop, paintDock = noop, noteCompletion = noop, markBranchable = noop,
       attachEditedFiles = noop, attachTurnUsage = noop;

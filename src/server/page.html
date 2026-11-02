@@ -2328,6 +2328,10 @@
   #approval-card .head { display: flex; align-items: center; gap: .45rem; font-size: 13px; font-weight: 600; color: #e0b15c; }
   #approval-card .dot { width: 7px; height: 7px; border-radius: 50%; background: #e0b15c; }
   #approval-card p { margin: .45rem 0 .6rem; font-size: 13px; line-height: 1.5; color: var(--text-2); }
+  /** The question's body is focusable, as DSH's is, so Enter has a target that is not a button (#158). */
+  #approval-body { border-radius: 6px; }
+  #approval-body:focus { outline: none; }
+  #approval-body:focus-visible { outline: 1px solid color-mix(in oklab, var(--text) 45%, transparent); outline-offset: 2px; }
   #approval-card #approval-note { margin: -.2rem 0 .5rem; color: #d38b8b; font-size: 12px; }
   #approval-card .actions { display: flex; justify-content: flex-end; gap: .5rem; }
   #approval-card button { height: 32px; padding: 0 .8rem; font: inherit; font-size: 13px; border-radius: 10px; cursor: pointer; }
@@ -3738,7 +3742,8 @@
   -->
   <div id="approval-card" role="alertdialog" aria-labelledby="approval-title" hidden>
     <div class="head"><span class="dot" aria-hidden="true"></span><span id="approval-title">Waiting for approval</span></div>
-    <p id="approval-reason"></p>
+    <!-- DSH's focusable body (`dsh-client-ui-approval`: tabIndex 0, role group, "Approval details"): Enter there allows once. -->
+    <div id="approval-body" tabindex="0" role="group" aria-label="Approval details"><p id="approval-reason"></p></div>
     <p id="approval-note" hidden></p>
     <div class="actions">
       <button type="button" id="approval-reject">Reject</button>
@@ -9048,6 +9053,8 @@ async function showSession(id) {
     return false
   }
   try {
+    /** The view's place in this page's order of events, so its steer list is read against rows accepted later. */
+    const viewAsked = ++steerClock
     /** The seat's choice count when this view was asked for: a choice made after it outranks the view. */
     const selectionAt = selectionSeq
     const response = await fetch('/api/sessions/' + encodeURIComponent(id))
@@ -9062,6 +9069,8 @@ async function showSession(id) {
       if (current !== id) adoptViewSelection(id, body, selectionAt)
       return false
     }
+    /** The dock's steering rows follow the view's waiting steers (#31): a reload or a second tab sees them too. */
+    reconcileSteers(id, body, viewAsked)
     /**
      * The session's own model choice, when it has one. A session that has never recorded one leaves the
      * seat where it is, which is what lets a person pick a backend **before** the turn that creates the
@@ -9935,6 +9944,13 @@ function reacquireBaselines() {
         searchIndex = null
         await renderTree()
         await refreshSessions()
+        /**
+         * And the dock's steering rows (#31): a steer claimed while the page was away never reached `claimSteer`, so the
+         * shown session's view is read again and the rows reconciled from it. A replay usually brings the claim back on its
+         * own; this read is for a `reset` (a server restart, a cursor too old) and for a return online, where no replay
+         * comes.
+         */
+        await refreshSteers(composerKey)
       } while (baselineAgain)
     } catch (error) {
       setNote('could not read the workspaces: ' + (error && error.message))
@@ -9958,6 +9974,7 @@ window.addEventListener('online', () => followConnection('online'))
 events.addEventListener('session', (message) => {
   const payload = JSON.parse(message.data)
   const event = payload.event
+  if (event.type === 'message' && event.message?.role === 'user') claimSteer(payload.session, event.message)
   /**
    * Another page (or this one) changed the shown session's model selection: the seat follows it, as every DSH
    * client follows the session's `modelSelection` (#46).
@@ -11015,13 +11032,13 @@ async function sendNow(text, attachments = []) {
 }
 
 /** Add one message to the wait: at the end for an ordinary submit, at the front for a steer that could not land. */
-function enqueue(text, where, attachments = []) {
+function enqueue(text, where, attachments = [], key = composerKey) {
   const item = { id: `queued-${++queueSeq}`, text, attachments, status: 'pending' }
-  const queue = queueOf()
+  const queue = queueOf(key)
   if (where === 'steer') queue.unshift(item)
   else queue.push(item)
   renderQueue()
-  void pumpQueue()
+  void pumpQueue(key)
 }
 
 /**
@@ -11032,20 +11049,41 @@ function enqueue(text, where, attachments = []) {
  * window closed. So a refusal falls back rather than failing: the message is not lost, it is next in the wait.
  */
 async function deliverSteered(text, attachments = []) {
-  if (await steerNow(text, attachments)) return
-  enqueue(text, 'steer', attachments)
+  /** The session is the one the person steered, captured before the request: a switch mid-request moves nothing. */
+  const key = composerKey
+  const steered = await steerNow(text, attachments, key)
+  if (steered === false) {
+    enqueue(text, 'steer', attachments, key)
+    return
+  }
+  if (steered !== '') {
+    const queue = queueOf(key)
+    queue.unshift({ id: `queued-${++queueSeq}`, text, attachments, status: 'steering', steerId: steered })
+    settleSteered(queue, key, queue[0].id, steered)
+  }
 }
 
-/** One steer attempt. `true` means the message is in the running turn; `false` means it was refused. */
-async function steerNow(text, attachments = []) {
-  if (composerKey === QUEUE_KEY_NONE) return false
+/**
+ * One steer attempt: the steer's id when the running turn accepted it, `''` when the server wrote it at once, or
+ * `false` when it was refused.
+ *
+ * An accepted steer waits in the session's next-step inbox until the loop claims it at its step boundary (#31,
+ * DSH's steer). Its row stays in the dock as "steering" until the message the claim writes, whose source names the
+ * steer's id, arrives on the stream (`claimSteer`). DSH's queue shows a steer the same way. Dropping the row on
+ * this answer left the steer visible nowhere until the claim, for up to a whole model step.
+ */
+async function steerNow(text, attachments = [], key = composerKey) {
+  if (key === QUEUE_KEY_NONE) return false
   try {
-    const response = await fetch(`/api/sessions/${encodeURIComponent(composerKey)}/steer`, {
+    const response = await fetch(`/api/sessions/${encodeURIComponent(key)}/steer`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ prompt: text, ...(attachments.length > 0 ? { attachments: attachments.map((item) => item.path) } : {}) }),
     })
-    if (response.ok) return true
+    if (response.ok) {
+      const body = await response.json().catch(() => ({}))
+      return typeof body.steerId === 'string' ? body.steerId : ''
+    }
     if (response.status === 409) return false
     const detail = await response.text().catch(() => '')
     add('denied', `could not steer: ${detail.trim().replace(/\s+/g, ' ').slice(0, 200) || response.status}`)
@@ -11064,22 +11102,31 @@ async function steerNow(text, attachments = []) {
  * whatever the composer holds; a row is that operation on a row.
  */
 async function steerItem(id) {
-  const queue = queueOf()
-  const at = queue.findIndex((item) => item.id === id)
-  if (at === -1) return
-  const item = queue[at]
-  if (item !== undefined && item.status !== 'sending' && (await steerNow(item.text, item.attachments ?? []))) {
-    const landed = queue.findIndex((entry) => entry.id === id)
-    if (landed !== -1) queue.splice(landed, 1)
-    renderQueue()
-    void pumpQueue()
+  /** The row's own session and queue, captured before the request (a switch mid-request moves nothing). */
+  const key = composerKey
+  const queue = queueOf(key)
+  const item = queue.find((entry) => entry.id === id)
+  /** A row already on its way (a steer or the pump's send) or already steering is not sent twice. */
+  if (item === undefined || item.status === 'sending' || item.status === 'steering') return
+  /**
+   * Reserved before the request: the pump, the chord and a second click all skip a `sending` row, so the same
+   * message cannot reach the server twice under two steer ids (developer-twelve's review of e29c2b26).
+   */
+  item.status = 'sending'
+  renderQueue()
+  const steered = await steerNow(item.text, item.attachments ?? [], key)
+  if (steered !== false) {
+    settleSteered(queue, key, id, steered)
+    void pumpQueue(keyOfQueue(queue, key))
     return
   }
-  const [moved] = queue.splice(at, 1)
-  if (moved !== undefined && moved.status === 'failed') moved.status = 'pending'
-  if (moved !== undefined) queue.unshift(moved)
+  const now = queue.findIndex((entry) => entry.id === id)
+  if (now === -1) return
+  const [moved] = queue.splice(now, 1)
+  moved.status = 'pending'
+  queue.unshift(moved)
   renderQueue()
-  void pumpQueue()
+  void pumpQueue(keyOfQueue(queue, key))
 }
 
 /**
@@ -11091,17 +11138,181 @@ async function steerItem(id) {
  * ordinary drain, which is what turns a closed window back into a queue.
  */
 async function steerQueue() {
-  const queue = queueOf()
+  /** The batch belongs to the session the chord was pressed in: every request names it, whatever is shown later. */
+  const key = composerKey
+  const queue = queueOf(key)
   for (const item of queue) if (item.status === 'failed') item.status = 'pending'
   renderQueue()
   for (const item of [...queue]) {
-    if (item.status === 'sending') continue
-    if (!(await steerNow(item.text, item.attachments ?? []))) break
-    const at = queue.findIndex((entry) => entry.id === item.id)
-    if (at !== -1) queue.splice(at, 1)
+    if (item.status !== 'pending') continue
+    // Reserved before its request, as in steerItem; a refusal gives it back to the queue and ends the batch.
+    item.status = 'sending'
     renderQueue()
+    const steered = await steerNow(item.text, item.attachments ?? [], key)
+    if (steered === false) {
+      item.status = 'pending'
+      renderQueue()
+      break
+    }
+    settleSteered(queue, key, item.id, steered)
   }
-  void pumpQueue()
+  void pumpQueue(keyOfQueue(queue, key))
+}
+
+/**
+ * This page's own clock: each steer answer and each view request takes the next tick, so a view can be read against
+ * the rows accepted after it was asked for (developer-twelve's re-review of bbddf7aa).
+ */
+let steerClock = 0
+
+/**
+ * Steer ids known to be claimed, per session: from a claim on the stream and from the claimed user rows of a view.
+ *
+ * Never forgotten. A late answer to the request that queued a steer, or a view that was asked for before the claim,
+ * can then never draw that steer again; an earlier version cleared this on every reconcile and lost a claim that
+ * landed between the request and its answer.
+ */
+const claimedSteers = new Map()
+
+function claimedFor(session) {
+  let claimed = claimedSteers.get(session)
+  if (claimed === undefined) {
+    claimed = new Set()
+    claimedSteers.set(session, claimed)
+  }
+  return claimed
+}
+
+/**
+ * Steer ids an authoritative view showed gone, per session: not waiting in a view asked for after their queueing was
+ * proven. Kept apart from the claims (nothing proves this page saw a claim) but just as final: the server never puts a
+ * claimed or cancelled steer back, so an older view that still lists one, or a late answer, cannot draw it again
+ * (developer-twelve's review of e29c2b26: a Rust claim splices the inbox before it writes the message, and a missed
+ * stream leaves the absence as the only evidence).
+ */
+const goneSteers = new Map()
+
+function goneFor(session) {
+  let gone = goneSteers.get(session)
+  if (gone === undefined) {
+    gone = new Set()
+    goneSteers.set(session, gone)
+  }
+  return gone
+}
+
+/** Mark a steer claimed and retire every row that carries it; `true` when a row went. */
+function retireSteer(session, steerId) {
+  claimedFor(session).add(steerId)
+  const queue = queues.get(session)
+  if (queue === undefined) return false
+  let removed = false
+  for (let at = queue.length - 1; at >= 0; at -= 1) {
+    if (queue[at].steerId === steerId) {
+      queue.splice(at, 1)
+      removed = true
+    }
+  }
+  return removed
+}
+
+/**
+ * A row the running turn accepted as a steer: kept as "steering" until its claim arrives, or retired at once when
+ * the server wrote it directly, when it is already known claimed, or when a view already drew a row for the same id.
+ */
+function settleSteered(queue, key, id, steerId) {
+  const at = queue.findIndex((entry) => entry.id === id)
+  if (at === -1) return
+  const drawn = steerId === '' ? undefined : queue.find((entry, index) => index !== at && entry.steerId === steerId)
+  if (steerId === '' || claimedFor(key).has(steerId) || goneFor(key).has(steerId) || drawn !== undefined) {
+    queue.splice(at, 1)
+    // The surviving row takes this answer's tick: the answer proves the steer was queued before any view asked for
+    // from now on, so an older view's silence can no longer retire it (developer-twelve's combined GET/POST race).
+    if (drawn !== undefined) drawn.acceptedAt = ++steerClock
+  } else {
+    queue[at].status = 'steering'
+    queue[at].steerId = steerId
+    queue[at].acceptedAt = ++steerClock
+  }
+  if (keyOfQueue(queue, key) === composerKey) renderQueue()
+}
+
+/**
+ * Make a session's steering rows agree with its view (`GET /api/sessions/{id}`), asked for at `askedAt` on this
+ * page's clock.
+ *
+ * - The view's claimed user rows (`steerId`) join the known claims, and every row they name retires.
+ * - A waiting steer (`pendingSteers`) that is not known claimed and has no row gets one, once.
+ * - A row the view does not list retires only when the view was asked for after the row was accepted, where
+ *   "accepted" is the tick at which this page got proof the steer was queued: its 200, or the answer of a view that
+ *   listed it. A view asked for after that proof was served after the queueing, so it would list the steer if it still
+ *   waited. The order views were asked in says nothing about the order they were served in, so a view's own ask tick
+ *   is never a row's acceptance.
+ *
+ * Called when a session is opened and after the event stream reconnects, so a claim missed while the stream was down,
+ * a reload, or a second tab all end with the dock DSH's queue would show.
+ */
+function reconcileSteers(session, body, askedAt) {
+  if (typeof session !== 'string' || session === QUEUE_KEY_NONE) return
+  const claimed = claimedFor(session)
+  for (const turn of Array.isArray(body?.turns) ? body.turns : []) {
+    if (turn?.kind === 'user' && typeof turn.steerId === 'string') claimed.add(turn.steerId)
+  }
+  const gone = goneFor(session)
+  const pending = (Array.isArray(body?.pendingSteers) ? body.pendingSteers : []).filter(
+    (entry) => typeof entry?.steerId === 'string' && !claimed.has(entry.steerId) && !gone.has(entry.steerId),
+  )
+  const waiting = new Set(pending.map((entry) => entry.steerId))
+  const queue = queues.get(session) ?? (pending.length > 0 ? queueOf(session) : undefined)
+  if (queue === undefined) return
+  let changed = false
+  for (let at = queue.length - 1; at >= 0; at -= 1) {
+    const row = queue[at]
+    if (row.status !== 'steering') continue
+    const vanished = !waiting.has(row.steerId) && typeof askedAt === 'number' && typeof row.acceptedAt === 'number' && askedAt > row.acceptedAt
+    if (vanished) gone.add(row.steerId)
+    if (claimed.has(row.steerId) || vanished) {
+      queue.splice(at, 1)
+      changed = true
+    }
+  }
+  for (const entry of [...pending].reverse()) {
+    if (queue.some((row) => row.steerId === entry.steerId)) continue
+    queue.unshift({
+      id: `queued-${++queueSeq}`,
+      text: String(entry.text ?? ''),
+      attachments: [],
+      status: 'steering',
+      steerId: entry.steerId,
+      // Proof of queueing arrived now, with this answer: not when the view was asked for.
+      acceptedAt: ++steerClock,
+    })
+    changed = true
+  }
+  if (changed && session === composerKey) renderQueue()
+}
+
+async function refreshSteers(session) {
+  if (typeof session !== 'string' || session === QUEUE_KEY_NONE) return
+  const askedAt = ++steerClock
+  try {
+    const response = await fetch(`/api/sessions/${encodeURIComponent(session)}`)
+    if (response.ok) reconcileSteers(session, await response.json(), askedAt)
+  } catch {
+    // The next reconnect or opening tries again.
+  }
+}
+
+/**
+ * The loop claimed a steer: the message it wrote names the steer's id in its source, and the row retires.
+ *
+ * Read for every session's stream, since the row lives in that session's queue whichever session the panel shows.
+ */
+function claimSteer(session, message) {
+  const steerId = message?.source?.kind === 'steer' ? message.source.steerId : undefined
+  if (typeof steerId !== 'string') return
+  // Remembered even with no row yet (claimed before its request answered), and every row carrying it retires.
+  if (retireSteer(session, steerId) && session === composerKey) renderQueue()
 }
 
 function removeItem(id) {
@@ -11117,7 +11328,8 @@ function removeItem(id) {
 function queueActions(item, isEditing) {
   const wrap = document.createElement('div')
   wrap.className = 'actions'
-  const sending = item.status === 'sending'
+  // A row being sent, or a steer waiting for the loop to claim it, refuses all three (DSH's rule for an in-flight row).
+  const sending = item.status === 'sending' || item.status === 'steering'
   /** A queue action's mark is DSH's outline artwork, not a font glyph: the page's own icons come from the same set. */
   const action = (icon, label, disabled, run) => {
     const button = document.createElement('button')
@@ -11210,10 +11422,10 @@ function queueRow(item) {
   preview.textContent = queuePreview(masked)
   preview.title = masked
   row.append(preview)
-  if (item.status === 'sending' || item.status === 'failed') {
+  if (item.status === 'sending' || item.status === 'failed' || item.status === 'steering') {
     const status = document.createElement('span')
     status.className = 'status'
-    status.textContent = item.status === 'sending' ? 'Sending…' : 'Not sent'
+    status.textContent = item.status === 'sending' ? 'Sending…' : item.status === 'steering' ? 'Steering…' : 'Not sent'
     row.append(status)
   }
   row.append(queueActions(item, false))
@@ -11716,6 +11928,12 @@ field.addEventListener('keydown', (keyEvent) => {
   if (keyEvent.isComposing || keyEvent.keyCode === 229) return
   if (keyEvent.shiftKey) return
   keyEvent.preventDefault()
+  /**
+   * A held Enter sends once, as DSH's composer keymap (`if (event?.repeat === true) return true`): its repeats are
+   * taken and send nothing, so an Enter held on the approval card cannot carry on into the composer and send the draft
+   * once the card hands the keyboard back (#158).
+   */
+  if (keyEvent.repeat) return
   submitDraft(keyEvent.ctrlKey || keyEvent.metaKey ? 'accelerated' : 'enter')
 })
 
@@ -17177,6 +17395,14 @@ const FIXED_INPUT_ACTIONS = [
   { label: 'Insert a new line', alias: 'newline', keys: SHORTCUTS_ON_MAC ? '⇧Enter' : 'Shift+Enter' },
   { label: 'Stop the current response', alias: 'cancel', keys: 'Esc Esc' },
 ]
+/**
+ * The approval card's keys, DSH's fixed `approval.allow` and `approval.reject` (`dsh-client-ui-approval`), drawn in
+ * the reference's "Approval area" group after the input actions. They carry no aliases, as DSH's do not (#158).
+ */
+const FIXED_APPROVAL_ACTIONS = [
+  { label: 'Allow once', alias: '', keys: 'Enter' },
+  { label: 'Reject', alias: '', keys: 'Esc' },
+]
 function chordText(shortcut, mac) {
   const glyph = keyForCode(shortcut.code).toUpperCase()
   if (mac) return `${shortcut.alt ? '⌥' : ''}${shortcut.shift ? '⇧' : ''}⌘${glyph}`
@@ -17202,6 +17428,7 @@ function shortcutReferenceRows(query, mac, table = SESSION_SHORTCUTS, overrides 
     rows.push({ group: 'Commands', label, alias, keys, fixed: false, action, bound: shortcut !== undefined, overridden: Object.prototype.hasOwnProperty.call(overrides, action) })
   }
   for (const action of FIXED_INPUT_ACTIONS) rows.push({ group: 'Message input', label: action.label, alias: action.alias, keys: action.keys, fixed: true })
+  for (const action of FIXED_APPROVAL_ACTIONS) rows.push({ group: 'Approval area', label: action.label, alias: action.alias, keys: action.keys, fixed: true })
   const wanted = String(query ?? '').trim()
   return wanted === '' ? rows : rows.filter((row) => [row.label, row.alias, row.keys].some((text) => subsequenceMatch(text, wanted)))
 }
@@ -22566,9 +22793,17 @@ function showApproval(request) {
   approvalCard.hidden = false
   document.getElementById('approval-note').hidden = true
 }
-function hideApproval() {
+/**
+ * Close the card. The keyboard goes back to the composer when the card held it, as DSH's composer takes the focus
+ * again when the approval's takeover of its slot ends; otherwise it would fall to the page and the next keys would go
+ * nowhere. A focus moved elsewhere in the meantime (a search, a dialog) stays where it is (#158).
+ */
+function hideApproval(keyboardWasInCard = approvalCard.contains(document.activeElement)) {
   approvalCard.hidden = true
   approvalPending = null
+  const active = document.activeElement
+  const keyboardLeftFree = active === null || active === document.body || approvalCard.contains(active)
+  if (keyboardWasInCard && keyboardLeftFree && !composer.hidden && !field.disabled) field.focus({ preventScroll: true })
 }
 /**
  * Answer a waiting question.
@@ -22577,12 +22812,20 @@ function hideApproval() {
  * question, an ask already timed out) is refused with 409, and hiding the card on that would leave the turn waiting
  * with no visible cause — the owner's "approved but still stuck". On a refusal the card is refreshed from the pending
  * list so it shows the question that is actually waiting, and the note says what happened.
+ *
+ * An answer that does not land leaves the keyboard where the press came from (#158): the buttons the answer turned off
+ * gave the focus to the page, so it goes back to the same element while the card still shows, or to the composer when
+ * the card closed meanwhile (another page answered first). An answer that lands has already handed it to the composer.
  */
 async function answerApproval(outcome) {
   const pending = approvalPending
-  if (pending === null) return
   const allow = document.getElementById('approval-allow')
   const reject = document.getElementById('approval-reject')
+  /** One answer at a time: the buttons are off while one is in flight, and a key must not post a second (#158). */
+  if (pending === null || allow.disabled) return
+  /** Read before the buttons go off: a focused button that is disabled hands the focus to the page. */
+  const keyboardWasInCard = approvalCard.contains(document.activeElement)
+  const keyboardHome = keyboardWasInCard ? document.activeElement : null
   allow.disabled = true
   reject.disabled = true
   const note = document.getElementById('approval-note')
@@ -22594,23 +22837,64 @@ async function answerApproval(outcome) {
     })
     const body = await response.json().catch(() => ({}))
     if (response.ok && body.answered === true) {
-      hideApproval()
+      hideApproval(keyboardWasInCard)
       void refreshApprovals(false)
       return
     }
-    note.textContent = body.error ?? 'that answer did not land: the question is no longer waiting'
-    note.hidden = false
+    const refusal = body.error ?? 'that answer did not land: the question is no longer waiting'
     await refreshApprovals()
+    /** Said after the refresh: a card drawn again for the question still waiting clears the note it finds. */
+    note.textContent = refusal
+    note.hidden = false
   } catch (error) {
     note.textContent = `could not answer the approval: ${(error && error.message) || error}`
     note.hidden = false
   } finally {
     allow.disabled = false
     reject.disabled = false
+    const active = document.activeElement
+    if (keyboardHome !== null && (active === null || active === document.body)) {
+      if (approvalCard.hidden) hideApproval(true)
+      else (approvalCard.contains(keyboardHome) ? keyboardHome : document.getElementById('approval-body')).focus({ preventScroll: true })
+    }
   }
 }
 document.getElementById('approval-allow').addEventListener('click', () => void answerApproval('allowed-once'))
 document.getElementById('approval-reject').addEventListener('click', () => void answerApproval('rejected'))
+/* approval-keys:begin */
+/**
+ * What a key does on the approval card, DSH's `ApprovalFlow` keydown (`dsh-client-ui-approval`) as a plain rule
+ * (test/page-shortcuts.test.ts): `null` leaves the key to whatever else would take it, `'swallow'` takes it without
+ * answering, and an outcome answers. Escape rejects and Enter allows once; a key typed into a field, a key with a
+ * modifier, and Enter on a button or link (which keeps its own Enter) are not the card's. A held repeat and a key an
+ * input method is composing are taken but answer nothing, so holding Enter cannot answer twice (#158).
+ */
+function approvalKeyOutcome(event, place) {
+  if (event.defaultPrevented || !place.inCard || place.inField) return null
+  if (event.key !== 'Enter' && event.key !== 'Escape') return null
+  if (event.key === 'Enter' && place.onButton) return null
+  if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return null
+  if (event.repeat || event.isComposing || event.keyCode === 229) return 'swallow'
+  return event.key === 'Enter' ? 'allowed-once' : 'rejected'
+}
+/* approval-keys:end */
+/**
+ * The card's own key handling, on the card and in the bubbling phase as DSH's is. The Esc Esc stop reads the same
+ * Escape first, in the capture phase, and `uiTakesEscape()` already breaks its sequence while the card shows, so an
+ * Escape that rejects never also counts toward a stop. A focused body or button is how the keyboard gets here.
+ */
+approvalCard.addEventListener('keydown', (event) => {
+  const target = event.target instanceof Element ? event.target : null
+  const outcome = approvalKeyOutcome(event, {
+    inCard: approvalCard.contains(document.activeElement),
+    inField: target !== null && target.closest('input, textarea, select, [contenteditable="true"], [contenteditable=""]') !== null,
+    onButton: target !== null && target.closest('button, a[href], [role="button"]') !== null,
+  })
+  if (outcome === null) return
+  event.preventDefault()
+  event.stopPropagation()
+  if (outcome !== 'swallow') void answerApproval(outcome)
+})
 events.addEventListener('approval', (message) => {
   try {
     const request = JSON.parse(message.data)

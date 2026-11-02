@@ -91,6 +91,7 @@ function harness() {
     paintSessionHeading: noop, renderTree: async () => {}, markSelection: noop, paintScheduleHeader: noop,
     renderModelSeat: noop, adoptViewSelection: noop, drawKeptEvents: noop, restoreChatScroll: noop,
     refreshGoal: async () => {}, refreshTodo: async () => {}, renderScheduleCards: noop,
+    reconcileSteers: noop, claimSteer: noop,
     renderScheduleDrawer: noop, refreshScheduleList: async () => {}, refreshScheduleCatalog: async () => {},
   }
   const api = runInNewContext(`
@@ -100,7 +101,7 @@ function harness() {
     let chosenEndpoint = null, chosenModel = null, chosenEffort = null;
     const defaultSelection = { model: 'default-model', effort: 'low' };
     const schedState = { drawer: null }, unreadSessions = new Set(), liveTurns = new Map(), sessionMetas = new Map();
-    let selectionSeq = 0;
+    let selectionSeq = 0, steerClock = 0;
     const runningSessions = new Set(), turnRounds = new Map(), knownWorkspaces = [];
     ${page.slice(treeStart, treeEnd)}
     ${snapshotHelpers}

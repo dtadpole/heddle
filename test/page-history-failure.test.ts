@@ -60,6 +60,7 @@ function harness(deferredCommands = false) {
     markSelection: noop, paintScheduleHeader: noop, renderModelSeat: noop,
     rememberChatScroll: noop, restoreChatScroll: () => calls.push('scroll'), refreshGoal: async () => {}, refreshTodo: async () => {},
     renderScheduleCards: () => calls.push('cards'), renderScheduleDrawer: noop,
+    reconcileSteers: noop, claimSteer: noop,
     refreshScheduleList: async () => {}, refreshScheduleCatalog: async () => {},
     scheduleGoalRefresh: noop, scheduleTodoRefresh: noop, refreshRunningStatus: noop,
     markRunning: noop, noteCompletion: (id: string, was: boolean, running: boolean) => calls.push(`completion:${id}:${was}:${running}`),
@@ -80,6 +81,7 @@ function harness(deferredCommands = false) {
     const liveTurns = new Map();
     let sessionLoading = null, composerKey = 'S', accessMode;
     let selectionSeq = 0, chosenEndpoint = null, chosenModel = null, chosenEffort = null;
+    let steerClock = 0;
     let defaultSelection = { model: 'default-model', effort: 'low' };
     const latestSelection = new Map(), serverSeats = new Map(), heldSeats = new Map();
     const recordedSelections = new Set(), pendingSaves = new Set();

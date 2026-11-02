@@ -104,6 +104,9 @@ function harness(options: { holdGoal?: boolean } = {}): Page {
     // The conversation chain's pieces of an open (#76, C74): live events kept aside during the history read, tagged with
     // the same showGeneration, and the reader's scroll place. The kept events are the page's own; drawing one is a stub.
     let sessionLoading = null;
+    // #31: an open reconciles the dock's steering rows with the view's waiting steers; nothing here steers.
+    let steerClock = 0;
+    function reconcileSteers() {}
     function rememberChatScroll() {}
     function restoreChatScroll() {}
     function drawSessionEvent() {}

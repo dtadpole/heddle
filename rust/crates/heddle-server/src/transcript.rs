@@ -115,6 +115,10 @@ pub struct ChatTurn {
     /// An assistant turn's markdown rendered as a document; set by the session route, never by the fold.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub html: Option<String>,
+    /// A user row the loop wrote by claiming a steer names the steer's id (#31), so a page that missed the live
+    /// claim (a reload, a reconnect, a second tab) can retire its "Steering…" row from this view.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub steer_id: Option<String>,
     /// A user message the harness wrote rather than a person - a goal round's `source` (`{kind: "goal", goalId,
     /// revision, round}`) or another trigger's - so the page draws it as DSH's bordered notice, not a bubble.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -144,6 +148,7 @@ impl ChatTurn {
             state: None,
             fork_seq: None,
             html: None,
+            steer_id: None,
             trigger: None,
             usage: None,
         }
@@ -157,7 +162,8 @@ fn trigger_of(source: Option<&Value>) -> Option<Value> {
             source
                 .get("kind")
                 .and_then(Value::as_str)
-                .is_some_and(|kind| !kind.is_empty())
+                // A claimed steer is the person's own words, drawn as their message with its steerId (#31), not a notice.
+                .is_some_and(|kind| !kind.is_empty() && kind != "steer")
         })
         .cloned()
 }
@@ -514,6 +520,14 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
                     if let Some(at) = event.get("at").and_then(Value::as_str) {
                         turn.time = Some(at.to_owned());
                     }
+                    turn.steer_id = message
+                        .get("source")
+                        .filter(|source| {
+                            source.get("kind").and_then(Value::as_str) == Some("steer")
+                        })
+                        .and_then(|source| source.get("steerId"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
                     turn.trigger = trigger_of(message.get("source"));
                     turns.push(turn);
                 }
