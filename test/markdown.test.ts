@@ -46,6 +46,44 @@ test('a link that would run script is refused, and the label survives', () => {
   }
 })
 
+test('actual render unknown Unicode attribute names preserve prose', () => {
+  // No anchors or footnotes: this control isolates the sanitizer from the anchor helper.
+  for (const name of ['é', '文字', '😀', 'unknowné', 'unknown文字', 'unknown😀']) {
+    const source = `normal **prose**\n\n<p ${name}="x">ok</p>\n\nfollowing *words*.`
+    const html = renderMarkdown(source)
+    assert.ok(!html.includes('class="unrendered"'), 'unknown names must not replace rendering with a fallback')
+    assert.ok(html.includes('normal <strong>prose</strong>'))
+    assert.ok(html.includes('<p>ok</p>'))
+    assert.ok(html.includes('following <em>words</em>.'))
+    assert.ok(!html.includes(`${name}="x"`))
+  }
+})
+
+test('actual render Unicode author anchor before href preserves rendering and strips unsafe URI', () => {
+  // Control for the pre-existing Rust byte-index helper defect; ASCII attribute names, Unicode values only.
+  for (const value of ['é', '文字', '😀']) {
+    for (const note of ['', ' claim[^n].\n\n[^n]: preserved **note**.']) {
+      const source = `normal **prose** <a id="author-${value}" title="${value}" href="#author-${value}">author ${value}</a> <a id="unsafe-${value}" href="java&#x09;script:alert(1)">unsafe ${value}</a>${note}`
+      const html = renderMarkdown(source)
+      assert.ok(!html.includes('class="unrendered"'), 'a caught failure must not silently replace rendering')
+      assert.ok(html.includes('normal <strong>prose</strong>'))
+      assert.ok(html.includes(`id="author-${value}"`))
+      assert.ok(html.includes(`title="${value}"`))
+      assert.ok(html.includes(`href="#author-${value}"`))
+      assert.ok(html.includes(`>author ${value}</a>`))
+      assert.ok(html.includes(`id="unsafe-${value}"`))
+      assert.ok(html.includes(`>unsafe ${value}</a>`))
+      assert.deepEqual(followed(html), [`#author-${value}`])
+      assert.ok(!html.includes('alert(1)'), 'unsafe URI stripped')
+      if (note.length > 0) {
+        assert.ok(html.includes('claim<sup>1</sup>'))
+        assert.ok(html.includes('preserved <strong>note</strong>'))
+        assert.ok(html.includes('↩'))
+      }
+    }
+  }
+})
+
 test('headings, paragraphs, and rules', () => {
   const html = renderMarkdown('# Title\n\nA paragraph.\n\n---\n\n## Second\n')
   assert.match(html, /<h1>Title<\/h1>/, 'a level-one heading')
@@ -384,6 +422,154 @@ test('a text the parser cannot render is shown as its own escaped words, not as 
   assert.ok(html.includes('&lt;b&gt;x&lt;/b&gt;') && !html.includes('<b>'), 'escaped, so nothing in them runs')
 })
 
+
+test('footnotes render plain numbered superscripts, cited definitions and one return marker per occurrence', () => {
+  const html = renderMarkdown('first[^Note] then[^b] again[^note].\n\n[^b]: bee *text*.\n[^Note]: the note.\n[^unused]: never cited.')
+  assert.match(html, /first<sup>1<\/sup> then<sup>2<\/sup> again<sup>1<\/sup>/)
+  assert.ok(html.indexOf('the note.') < html.indexOf('bee <em>text</em>'))
+  assert.match(html, /<section class="footnotes">/)
+  assert.match(html, /the note\. ↩ ↩<\/p>/)
+  assert.match(html, /bee <em>text<\/em>\. ↩<\/p>/)
+  assert.doesNotMatch(html, /\b(?:href|id)=|<a\b/)
+  assert.doesNotMatch(html, /never cited|\[\^Note\]:/)
+  assert.equal(renderMarkdown('missing[^x] here.'), '<p>missing[^x] here.</p>\n')
+  assert.equal(renderMarkdown('no notes at all'), '<p>no notes at all</p>\n')
+})
+
+test('footnote definitions retain indented block content without swallowing following prose', () => {
+  const html = renderMarkdown('claim[^n].\n\n[^n]: first *paragraph*.\n    continued.\n\n    second **paragraph**.\n\n    - item\n\nfollowing prose.')
+  assert.match(html, /<p>first <em>paragraph<\/em>\.\ncontinued\.<\/p>/)
+  assert.match(html, /<p>second <strong>paragraph<\/strong>\.<\/p>/)
+  assert.match(html, /<ul>\n<li>item/)
+  assert.ok(html.indexOf('<p>following prose.</p>') < html.indexOf('<section class="footnotes">'))
+  assert.doesNotMatch(renderMarkdown('x[^n]\n\n[^n]: first\n[^N]: duplicate'), /duplicate/)
+})
+
+test('footnotes respect code, escapes, ordinary reference links and per-document state', () => {
+  const html = renderMarkdown('`[^n]` \\[^n] real[^n] [link][r].\n\n```text\n[^fake]: code\n```\n\n[^n]: [link][r].\n\n[r]: https://example.com')
+  assert.match(html, /<code>\[\^n\]<\/code>/)
+  assert.match(html, /\[\^fake\]: code/)
+  assert.equal((html.match(/<sup>1<\/sup>/g) ?? []).length, 1)
+  assert.equal((html.match(/href="https:\/\/example.com"/g) ?? []).length, 2)
+  assert.equal(renderInline('alone[^n]'), 'alone[^n]')
+  assert.equal(renderMarkdown('alone[^n]'), '<p>alone[^n]</p>\n')
+  assert.doesNotMatch(renderMarkdown('[label[^n]](https://example.com)\n\n[^n]: note'), /<sup>/, 'a footnote inside link text stays literal')
+})
+
+test('footnote bodies and hostile labels pass the existing output and URL policies', () => {
+  const html = renderMarkdown('x[^a"&<>] x[^a-2] x[^a] x[^a].\n\n[^a"&<>]: inline <script>alert(1)</script> [bad](javascript:alert(1)) ![remote](https://tracker.example/x)\n[^a-2]: other\n[^a]: okay', { base: '/w' })
+  assert.doesNotMatch(html, /<script|href="javascript:|src="https:|onerror=/)
+  assert.match(html, /link refused/)
+  assert.equal((html.match(/<sup>\d+<\/sup>/g) ?? []).length, 4)
+  assert.doesNotMatch(html, /\b(?:href|id)=|<a\b/)
+  assert.match(html, /other/)
+  assert.match(html, /okay ↩ ↩/)
+
+})
+
+test('footnote lone UTF-16 surrogates from JSON retain ordinary prose and distinct definitions and plain references', () => {
+  const labels = ['\ud800', '\udc00', '\ud800\ud800', 'x\ud800', '\ud800x', '_ud800', '_udc00', '\ufffd', '\ud800\udc00']
+  const source = `normal **prose** ${labels.map((label) => `ref[^${label}] again[^${label}]`).join(' ')}.\n\n`
+    + labels.map((label, index) => `[^${label}]: definition ${index}.`).join('\n')
+    + '\n\nfollowing *prose*.'
+  const html = renderMarkdown(JSON.parse(JSON.stringify({ source })).source as string)
+  assert.match(html, /^<p>normal <strong>prose<\/strong> ref<sup>1<\/sup>/)
+  assert.match(html, /<p>following <em>prose<\/em>\.<\/p>/)
+  assert.doesNotMatch(html, /unrendered|\[\^/)
+  assert.equal((html.match(/<sup>\d+<\/sup>/g) ?? []).length, labels.length * 2)
+  assert.equal((html.match(/<li>/g) ?? []).length, labels.length, 'malformed code units and literal escape spellings remain distinct definitions')
+  assert.doesNotMatch(html, /\b(?:href|id)=|<a\b/)
+  for (let index = 0; index < labels.length; index += 1) {
+    assert.ok(html.includes(`definition ${index}. ↩ ↩`))
+    assert.equal((html.match(new RegExp(`<sup>${index + 1}</sup>`, 'g')) ?? []).length, 2)
+  }
+  assert.equal(renderMarkdown('ordinary **prose** afterwards'), '<p>ordinary <strong>prose</strong> afterwards</p>\n')
+})
+
+test('footnote punctuation and Unicode labels preserve numbering and repeated plain references', () => {
+  const labels = ['Note', 'é', '😀', 'a', 'a-2', 'a_2', '%', '_25', '-', '_2d', '_ud800', '!', '~']
+  const html = renderMarkdown(labels.map((label) => `x[^${label}] x[^${label}]`).join(' ')
+    + '\n\n' + labels.map((label, index) => `[^${label}]: note ${index}.`).join('\n'))
+  assert.equal((html.match(/<li>/g) ?? []).length, labels.length)
+  assert.doesNotMatch(html, /\b(?:href|id)=|<a\b|unrendered|\[\^/)
+  for (let index = 0; index < labels.length; index += 1) {
+    assert.equal((html.match(new RegExp(`<sup>${index + 1}</sup>`, 'g')) ?? []).length, 2)
+    assert.ok(html.includes(`note ${index}. ↩ ↩`))
+  }
+})
+
+// Actual renderer outputs, not a synthetic postpass fixture: the former fn-n/fnref-n anchors collide here.
+test('two concatenated answers have plain footnotes without duplicate generated IDs or cross-answer click targets', () => {
+  const answers = ['Alpha', 'Beta'].map((name) => renderMarkdown(`${name}[^n] again[^n].\n\n[^n]: ${name} **note**.\n\n    - ${name} item`))
+  const html = answers.join('')
+  assert.equal((html.match(/<section class="footnotes">/g) ?? []).length, 2)
+  assert.equal((html.match(/<sup>1<\/sup>/g) ?? []).length, 4)
+  assert.equal((html.match(/↩/g) ?? []).length, 4)
+  assert.doesNotMatch(html, /\b(?:href|id)=|<a\b/)
+  for (const name of ['Alpha', 'Beta']) {
+    assert.match(html, new RegExp(`${name} <strong>note</strong>`))
+    assert.match(html, new RegExp(`<li>${name} item</li>`))
+  }
+})
+
+test('plain footnote postpass preserves unrelated links and IDs even when author markup imitates generated footnotes', () => {
+  const raw = '<sup class="footnote-ref"><a href="#fn-n" id="fnref-n" data-footnote-ref>7</a></sup>'
+  const html = renderMarkdown(`claim[^n] [ordinary](#fn-n).\n\n${raw}\n\n<section class="footnotes" data-footnotes><ol><li id="fn-author">author <a href="#fnref-n" class="footnote-backref" data-footnote-backref>↩</a></li></ol></section>\n\n[^n]: [safe](https://example.com) <span id="fn-body">body</span> [fragment](#fn-body).`)
+  assert.match(html, /claim<sup>1<\/sup>/)
+  assert.match(html, /<sup class="footnote-ref"><a href="#fn-n" id="fnref-n"[^>]*>7<\/a><\/sup>/)
+  assert.match(html, /<li id="fn-author">/)
+  assert.match(html, /href="#fnref-n" class="footnote-backref"/)
+  assert.match(html, /href="#fn-n"[^>]*>ordinary<\/a>/)
+  assert.match(html, /href="https:\/\/example.com"/)
+  assert.match(html, /<span id="fn-body">body<\/span>/)
+  assert.match(html, /href="#fn-body"[^>]*>fragment<\/a>/)
+})
+
+test('footnote marker proper-prefix immediately before an actual citation preserves author text and NUL', () => {
+  // The old marker grew a trailing NUL on collision: the authored prefix then joined the citation's leading NUL.
+  const literal = 'literal\0heddle-footnote:'
+  const html = renderMarkdown(`${literal}[^n]\n\n[^n]: note`)
+  assert.match(html, /^<p>literal\0heddle-footnote:<sup>1<\/sup><\/p>/)
+  assert.match(html, /note ↩<\/p>/)
+  assert.doesNotMatch(html, /\b(?:href|id)=|<a\b/)
+})
+
+test('footnote markers preserve bare author tokens, numeric lookalikes and unrelated NULs', () => {
+  const literals = ['heddle-footnote:', 'heddle-footnote::', '\0heddle-footnote:0\0', '\0heddle-footnote:\0', 'harmless\0text']
+  for (const literal of literals) {
+    const html = renderMarkdown(`${literal}[^n]\n\n[^n]: note`)
+    assert.ok(html.startsWith(`<p>${literal}<sup>1</sup></p>`), JSON.stringify(literal))
+    assert.match(html, /note ↩<\/p>/)
+    assert.doesNotMatch(html, /\b(?:href|id)=|<a\b/)
+    assert.equal(renderInline(literal), literal)
+  }
+  assert.equal(renderMarkdown('ordinary paragraphs\n\nno footnotes'), '<p>ordinary paragraphs</p>\n<p>no footnotes</p>\n')
+})
+
+test('footnote rendering leaves escaped marker text and no-footnote literals to the ordinary parser', () => {
+  const source = 'author\0heddle-footnote\\:0\0'
+  const literal = 'author\0heddle-footnote:0\0'
+  assert.equal(renderMarkdown(source), `<p>${literal}</p>\n`)
+  assert.equal(renderInline(source), literal)
+  const html = renderMarkdown(`${source}[^n]\n\n[^n]: note`)
+  assert.ok(html.startsWith(`<p>${literal}<sup>1</sup></p>`))
+  assert.match(html, /note ↩<\/p>/)
+  assert.doesNotMatch(html, /\b(?:href|id)=|<a\b/)
+  renderMarkdown('x[^n]\n\n[^n]: note')
+  renderMarkdown('x'.repeat(65537))
+  assert.equal(renderInline('alone[^n]'), 'alone[^n]')
+  assert.equal(renderMarkdown('---\ntitle: [^n]\n---\n\nplain'), '<section class="frontmatter"><h2>frontmatter</h2><pre><code>title: [^n]</code></pre></section>\n<p>plain</p>\n')
+})
+
+test('footnote references inside notes, including cycles, terminate with complete backrefs', () => {
+  const html = renderMarkdown('x[^a].\n\n[^a]: a[^b] self[^a].\n[^b]: b[^a].')
+  assert.equal((html.match(/<li>/g) ?? []).length, 2)
+  assert.equal((html.match(/↩/g) ?? []).length, 4)
+  assert.match(html, /↩ ↩ ↩/)
+  assert.doesNotMatch(html, /\b(?:href|id)=|<a\b/)
+  const hostile = `x[^n]\n\n[^n]: ${'*a '.repeat(2000)}<b>x</b>${' a*'.repeat(2000)}`
+  assert.equal(renderMarkdown(hostile), `<pre class="unrendered"><code>${escapeHtml(hostile)}</code></pre>`)
+})
 
 test('parser work budget preserves hostile inline input as escaped text without recursion', () => {
   const huge = '*a '.repeat(800000) + 'x' + ' a*'.repeat(800000)
