@@ -80,7 +80,7 @@ function harness(admission: Admission = 'streamed', outcome = 'done'): Harness {
   const paints: Snapshot[] = []
   const names = ['runTurn', 'sendTurn', 'adoptSession', 'selectionForSeat', 'selectionForTurn', 'drawSessionEvent', 'drawKeptEvents', 'keptToDraw', 'refreshSessionStats', 'updateStatusBar',
     'addUsage', 'formatTokenCount', 'formatRate', 'formatCacheHit', 'formatDurationMs',
-    'formatExactCount', 'formatWindow', 'statPanelRows', 'isReplacementCopy', 'endLiveRetries']
+    'formatExactCount', 'formatWindow', 'statPanelRows', 'isReplacementCopy']
   const h = runInNewContext(`
     let current = 'S', composerKey = 'S';
     const view = 'chat';
@@ -116,8 +116,10 @@ function harness(admission: Admission = 'streamed', outcome = 'done'): Harness {
     const fetchSessionAccess = async () => {}, stopTurn = async () => {};
     let adoptionOrder = null;
     const windowFor = () => undefined;
-    // #251: a turn's end asks the transcript for model-retry rows still waiting; this harness draws none.
+    // #251: drawSessionEvent calls endLiveRetries at a turn's end, which asks the transcript for model-retry rows
+    // still waiting; this harness draws none.
     const log = { querySelectorAll: () => [] };
+    ${source('endLiveRetries')}
     const cells = new Map();
     const statusBar = { hidden: false, querySelector(selector) {
       if (!cells.has(selector)) cells.set(selector, { textContent: '', hidden: false });

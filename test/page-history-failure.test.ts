@@ -96,9 +96,11 @@ function harness(deferredCommands = false) {
     let followTail = false, ledgerRefetchTimer = null;
     const QUEUE_KEY_NONE = ''; let activeFolder = 'workspace', workspaceRoutes = 'present'; const firstTreeReady = Promise.resolve();
     let directTurnPending = 0, directPendingKey = null, stopRequested = false;
-    ${['historyFailureText', 'adoptViewSelection', 'selectionForSeat', 'showSession', 'keptToDraw', 'drawKeptEvents', 'drawSessionEvent', 'runTurn', 'endLiveRetries'].map(source).join('\n')}
+    ${['historyFailureText', 'adoptViewSelection', 'selectionForSeat', 'showSession', 'keptToDraw', 'drawKeptEvents', 'drawSessionEvent', 'runTurn'].map(source).join('\n')}
     ${lifecycleSource}
     ${listener};
+    // #251: drawSessionEvent calls endLiveRetries at a turn's end.
+    ${source('endLiveRetries')}
     ({ show: showSession, run: runTurn,
        state: () => ({ current, unavailable: unavailableSession, loading: sessionLoading !== null, selectedPath }),
        selection: () => ({ endpoint: chosenEndpoint, model: chosenModel, effort: chosenEffort }),
