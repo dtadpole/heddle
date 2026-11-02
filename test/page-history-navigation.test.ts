@@ -88,6 +88,8 @@ function harness() {
     renderComposerState: noop, chooseWorkspace: noop, paintEmptyState: noop, paintComposerAccess: noop,
     paintRunningMarks: noop, jobsSessionChanged: noop, applySessionAccess: noop, adoptSession: noop,
     refreshSessions: async () => {}, syncSelectionToSession: noop, showLedger: async () => {},
+    // C33: an open session's workspace is opened in the tree; this harness has no tree.
+    openCurrentGroup: async () => {},
     paintSessionHeading: noop, renderTree: async () => {}, markSelection: noop, paintScheduleHeader: noop,
     renderModelSeat: noop, adoptViewSelection: noop, drawKeptEvents: noop, restoreChatScroll: noop,
     refreshGoal: async () => {}, refreshTodo: async () => {}, renderScheduleCards: noop,
