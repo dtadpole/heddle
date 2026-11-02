@@ -83,6 +83,8 @@ export function queueRequest(
   const busy = turns?.isRunning(handle.id) === true
   if (!busy && pendingInbox(store, handle)['next-turn'].length === 0) return undefined
   const message = queueTurn(store, handle, content, undefined, requestId !== undefined ? { requestId } : {})
+  // A new send is the person acting again: a queue held by their Stop may drain once the session is free.
+  held.get(ctx)?.delete(handle.id)
   kick(ctx, handle.id)
   return { item: itemOf(message), duplicate: false }
 }
@@ -168,6 +170,21 @@ export async function handleQueueRoute(ctx: Context, url: URL, request: Incoming
 
 /** Sessions whose drain is waiting for the session to go idle, so each has one waiter at most. */
 const waiting = new WeakMap<Context, Set<string>>()
+/**
+ * Sessions a person stopped: their queue is kept and not drained on its own (DSH's `agent.cancel({ kind: 'user' },
+ * { keepInbox: true })`; #75), until the person sends again, or steers or edits a row.
+ */
+const held = new WeakMap<Context, Set<string>>()
+
+/** A person's Stop: keep the session's queue, and run none of it until they act again (#75). */
+export function holdQueue(ctx: Context, session: string): void {
+  held.get(ctx)?.add(session)
+}
+
+/** The person acted again in the session: its queue may drain once the session is free. */
+export function releaseQueue(ctx: Context, session: string): void {
+  if (held.get(ctx)?.delete(session) === true) kick(ctx, session)
+}
 /** The server's round budget for a drained turn, as the turn route gives its own. */
 const budgets = new WeakMap<Context, number | undefined>()
 
@@ -175,6 +192,7 @@ const budgets = new WeakMap<Context, number | undefined>()
 export function installQueue(ctx: Context, options: { readonly maxRounds?: number } = {}): void {
   budgets.set(ctx, options.maxRounds)
   waiting.set(ctx, new Set())
+  held.set(ctx, new Set())
 }
 
 /**
@@ -183,7 +201,7 @@ export function installQueue(ctx: Context, options: { readonly maxRounds?: numbe
  */
 export function kick(ctx: Context, session: string): void {
   const pending = waiting.get(ctx)
-  if (pending === undefined || pending.has(session)) return
+  if (pending === undefined || pending.has(session) || held.get(ctx)?.has(session) === true) return
   const turns = ctx.get('turns') as TurnRegistry | undefined
   const handle = ctx.session.store.open(session)
   if (handle === null || pendingInbox(ctx.session.store, handle)['next-turn'].length === 0) return
@@ -193,6 +211,7 @@ export function kick(ctx: Context, session: string): void {
     // Past the turn that just settled, so its own listeners (the goal driver's among them) have run.
     setImmediate(() => {
       pending.delete(session)
+      if (held.get(ctx)?.has(session) === true) return
       if (turns?.isRunning(session) === true) {
         kick(ctx, session)
         return

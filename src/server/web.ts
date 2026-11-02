@@ -44,7 +44,7 @@ import { activitySessions, refusalSentence, rowActivity, sessionActivity, stopRo
 import { handleScheduleRoute } from '../schedule/http.ts'
 import type { ScheduleService } from '../schedule/service.ts'
 import { handleJobsRoute } from '../jobs/http.ts'
-import { handleQueueRoute, installQueue, queueRequest } from './queue.ts'
+import { handleQueueRoute, holdQueue, installQueue, queueRequest, releaseQueue } from './queue.ts'
 import type { JobRegistry } from '../jobs/registry.ts'
 import {
   COOKIE_MAX_AGE,
@@ -2553,6 +2553,8 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
      */
     const turns = ctx.get('turns') as TurnRegistry | undefined
     const live = turns?.isRunning(id) === true
+    // A Stop keeps the session's queue and runs none of it on its own (#75, DSH keepInbox), until the person acts again.
+    holdQueue(ctx, id)
     const fromRoute = abortSession(state.controllers, id)
     if (live) turns?.abort(id, 'stopped by the user')
     const stopped = Math.max(fromRoute, live ? 1 : 0)
@@ -3098,6 +3100,7 @@ export function unknownTurnSession(
    * and another device see it, and the host runs it when the running turn ends. A retry with the same `requestId`
    * answers the row it queued. On a free session it runs now, as any turn does.
    */
+  if (body.queue !== true) releaseQueue(ctx, handle.id)
   if (body.queue === true) {
     const requestId = typeof body.requestId === 'string' && body.requestId.length > 0 ? body.requestId : undefined
     const queued = queueRequest(ctx, handle, [{ type: 'text', text: body.prompt }, ...attachments], requestId)
