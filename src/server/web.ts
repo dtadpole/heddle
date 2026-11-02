@@ -1860,6 +1860,13 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     if (stopRows) await stopRowActivity(rows, id, (message) => ctx.logger.warn(message))
     /** Archiving ends the session's terminals and their processes, as DSH's session-owned terminals end with their owner (#85). */
     if (archived === true) await state.terminals.closeSession(id)
+    /**
+     * Every page redraws its tree after a pin, an archive or an unarchive, whoever made it (issue #167): DSH's workspace
+     * feed publishes `archived` and `pinned` whenever either set changes (dsh-api-workspace-controller lib/index.js:115-129).
+     * The frame is the `sessions` kind a rename pushes, after the record write, so a page's tree refresh (and its
+     * standing search) reads the new flags.
+     */
+    push(state, 'sessions', { type: 'session/flags', session: id, pinned: meta.pinned === true, archived: meta.archived === true })
     respond(response, 200, 'application/json', `${JSON.stringify(meta, null, 2)}\n`)
     return
   }
