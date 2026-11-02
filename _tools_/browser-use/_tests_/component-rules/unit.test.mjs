@@ -5,7 +5,7 @@ import { test } from 'node:test'
 
 import { connect, decodeFrame, encodeFrame } from '../../cdp.mjs'
 import { browserPath, chromeArgs, environmentArgs, releaseChromeOutput, stateDir, stopChrome } from '../../chrome.mjs'
-import { keyDescription, keyEvents, macEditingCommand, parseKey, VISIBLE_CLIPBOARD_REASON } from '../../actions.mjs'
+import { CHOOSER_TIMEOUT_MS, keyDescription, keyEvents, macEditingCommand, parseKey, uploadFile, VISIBLE_CLIPBOARD_REASON } from '../../actions.mjs'
 import { parseGeolocation, parseHeaders, parseViewport } from '../../emulate.mjs'
 import {
   formatConsoleList,
@@ -169,6 +169,124 @@ test('a visible browser gets the key events but no clipboard command, and is tol
   assert.deepEqual(keyEvents('Meta+Z', visible).down.commands, ['undo'])
   assert.equal(keyEvents('Meta+V', {}).withheld, process.platform === 'darwin' ? 'paste' : undefined, 'the default is the cautious one')
   assert.match(VISIBLE_CLIPBOARD_REASON, /headless/)
+})
+
+/**
+ * A page that answers upload_file's protocol calls, for the chooser rules without a browser.
+ *
+ * uid `btn` is a button; a press on it opens a chooser for backend node 99 when `chooser` is given, as a
+ * hidden input behind a styled button does. `strayFirst` makes another tab's chooser arrive first.
+ * `refuseOff` is how many switch-offs of interception Chrome refuses before one succeeds.
+ */
+function chooserPage({ chooser, strayFirst = false, refuseOff = 0 } = {}) {
+  const handlers = []
+  const calls = []
+  const control = { refuseOff }
+  const fire = (method, params, sessionId = 'S') => {
+    for (const h of handlers.filter((entry) => entry.method === method)) h.handler(params, { sessionId })
+  }
+  const page = {
+    sessionId: 'S',
+    uidToNode: new Map([['btn', { role: 'button', backendNodeId: 7 }]]),
+    connection: {
+      on(method, handler) {
+        const entry = { method, handler }
+        handlers.push(entry)
+        return () => handlers.splice(handlers.indexOf(entry), 1)
+      },
+    },
+    elementBox: async () => ({ centerX: 10, centerY: 20 }),
+    async send(method, params) {
+      calls.push({ method, params })
+      if (method === 'Page.setInterceptFileChooserDialog' && params.enabled === false && control.refuseOff > 0) {
+        control.refuseOff -= 1
+        throw new Error('Target closed')
+      }
+      if (method === 'DOM.resolveNode') return { result: { object: { objectId: `obj-${params.backendNodeId}` } } }
+      if (method === 'Runtime.callFunctionOn') {
+        if (params.functionDeclaration.includes('tagName')) return { result: { result: { value: { tag: 'BUTTON', type: 'button' } } } }
+        const set = calls.findLast((call) => call.method === 'DOM.setFileInputFiles')
+        return { result: { result: { value: (set?.params.files ?? []).map((path) => path.split('/').pop()) } } }
+      }
+      if (method === 'Input.dispatchMouseEvent' && params.type === 'mouseReleased' && chooser !== undefined) {
+        if (strayFirst) fire('Page.fileChooserOpened', { mode: 'selectMultiple', backendNodeId: 1 }, 'OTHER')
+        fire('Page.fileChooserOpened', { mode: chooser.mode, backendNodeId: 99 })
+      }
+      return { result: {} }
+    },
+  }
+  return { page, calls, handlers }
+}
+
+/** The intercept switches, in order, from a list of protocol calls. */
+const intercepts = (calls) => calls.filter((call) => call.method === 'Page.setInterceptFileChooserDialog').map((call) => call.params.enabled)
+
+/**
+ * A hidden file input has no accessibility node, so its uid never exists; the control that opens it does.
+ * Before this, upload_file refused anything but the input itself (developer-two, 2026-11-02, the web UI's
+ * `<input id="attach-file" hidden>`).
+ */
+test('upload_file on a control clicks it and gives the input its chooser names the files', async () => {
+  const { page, calls, handlers } = chooserPage({ chooser: { mode: 'selectMultiple' }, strayFirst: true })
+  const result = await uploadFile(page, { uid: 'btn', filePaths: ['/fx/a.txt', '/fx/b.txt'] })
+  assert.deepEqual(result, { uploaded: ['a.txt', 'b.txt'], uid: 'btn', via: 'file chooser' })
+  const set = calls.find((call) => call.method === 'DOM.setFileInputFiles')
+  assert.deepEqual(set.params, { files: ['/fx/a.txt', '/fx/b.txt'], backendNodeId: 99 }, 'the chooser\'s input, not the button nor another tab\'s')
+  assert.deepEqual(intercepts(calls), [true, false], 'interception is on for the click only')
+  const pressed = calls.findIndex((call) => call.method === 'Input.dispatchMouseEvent' && call.params.type === 'mousePressed')
+  assert.ok(calls.findIndex((call) => call.method === 'Page.setInterceptFileChooserDialog') < pressed, 'and on before the press')
+  assert.equal(handlers.filter((h) => h.method === 'Page.fileChooserOpened').length, 0, 'the chooser listener is removed')
+})
+
+test('a control that opens no chooser is refused within its bound, and interception is switched off', async () => {
+  const { page, calls } = chooserPage()
+  const started = Date.now()
+  await assert.rejects(uploadFile(page, { uid: 'btn', filePaths: ['/fx/a.txt'], chooserTimeoutMs: 200 }), /is not a file input, and clicking it opened no file chooser within 200 ms/)
+  assert.ok(Date.now() - started < 2_000, 'the bound, not a hang')
+  assert.deepEqual(intercepts(calls), [true, false])
+  assert.equal(calls.some((call) => call.method === 'DOM.setFileInputFiles'), false)
+  assert.equal(CHOOSER_TIMEOUT_MS, 3_000, 'the harness browser\'s own wait')
+})
+
+test('a single-file chooser refuses several files rather than keeping only some', async () => {
+  const { page, calls } = chooserPage({ chooser: { mode: 'selectSingle' } })
+  await assert.rejects(uploadFile(page, { uid: 'btn', filePaths: ['/fx/a.txt', '/fx/b.txt'] }), /takes one file, and 2 were given/)
+  assert.equal(calls.some((call) => call.method === 'DOM.setFileInputFiles'), false)
+  assert.deepEqual(intercepts(calls), [true, false])
+  const one = await uploadFile(chooserPage({ chooser: { mode: 'selectSingle' } }).page, { uid: 'btn', filePaths: ['/fx/a.txt'] })
+  assert.deepEqual(one.uploaded, ['a.txt'])
+})
+
+/**
+ * "Interception is on for the click only" is a claim, so a switch-off Chrome refuses must not read as a
+ * clean upload: the page would silently swallow its own later choosers (developer-two, 2026-11-02, on
+ * reading 65c229132, whose cleanup ignored that failure).
+ */
+test('a refused switch-off makes the upload an error that names the files, and the next upload retries it first', async () => {
+  const { page, calls } = chooserPage({ chooser: { mode: 'selectMultiple' }, refuseOff: 1 })
+  await assert.rejects(
+    uploadFile(page, { uid: 'btn', filePaths: ['/fx/a.txt'] }),
+    /^Error: the files were given \(a\.txt\), but file-chooser interception could not be switched off \(Target closed\).*cli\.mjs stop/,
+  )
+  assert.equal(page.chooserInterceptLeftOn, true, 'the page remembers the setting outlived the call')
+  calls.length = 0
+  const again = await uploadFile(page, { uid: 'btn', filePaths: ['/fx/b.txt'] })
+  assert.deepEqual(again.uploaded, ['b.txt'])
+  assert.deepEqual(intercepts(calls), [false, true, false], 'switched off before anything else, then the usual pair')
+  assert.equal(page.chooserInterceptLeftOn, false)
+})
+
+test('a refused switch-off is added to the upload\'s own failure, and a still-refused retry uploads nothing', async () => {
+  const { page, calls } = chooserPage({ refuseOff: 2 })
+  await assert.rejects(
+    uploadFile(page, { uid: 'btn', filePaths: ['/fx/a.txt'], chooserTimeoutMs: 100 }),
+    /opened no file chooser within 100 ms; .*; and file-chooser interception could not be switched off \(Target closed\)/,
+  )
+  calls.length = 0
+  await assert.rejects(uploadFile(page, { uid: 'btn', filePaths: ['/fx/a.txt'] }), /^Error: nothing was uploaded: file-chooser interception could not be switched off/)
+  assert.deepEqual(intercepts(calls), [false], 'the retry was the only call')
+  assert.equal(calls.some((call) => call.method === 'Input.dispatchMouseEvent' || call.method === 'DOM.setFileInputFiles'), false, 'no click, no files')
+  assert.equal(page.chooserInterceptLeftOn, true)
 })
 
 /** The snapshot's text form: indentation, uid first, role rules, quoted values, collapsed text. */

@@ -62,6 +62,7 @@ const PAGE = `<!doctype html>
   <div id="rich" contenteditable="true">editable text</div>
   <div><button id="greet">Greet</button> <button id="fail">Fail</button> <button id="alert">Alert</button> <button id="confirm">Confirm</button> <button id="prompt">Prompt</button> <button id="open">Open tab</button> <button id="spacebar">Space target</button></div>
   <div><input id="keylog" placeholder="type here"><input id="file" type="file" multiple></div>
+  <div><button id="attach">Attach files</button> <button id="nothing">Opens nothing</button><input id="hiddenfile" type="file" multiple hidden></div>
   <div><button id="copy">Copy</button> <textarea id="pastebox" rows="1" placeholder="paste here"></textarea></div>
   <div id="hoverTarget">hover target</div>
   <div id="stage">
@@ -103,6 +104,10 @@ const PAGE = `<!doctype html>
     })
     document.getElementById('file').addEventListener('change', (event) => {
       output.textContent = 'files:' + Array.from(event.target.files ?? []).map((file) => file.name).join(',')
+    })
+    document.getElementById('attach').addEventListener('click', () => document.getElementById('hiddenfile').click())
+    document.getElementById('hiddenfile').addEventListener('change', (event) => {
+      output.textContent = 'hidden:' + Array.from(event.target.files ?? []).map((file) => file.name).join(',')
     })
     const draggable = document.getElementById('draggable')
     const canvas = document.getElementById('canvas')
@@ -362,6 +367,33 @@ test('upload_file gives a file input its files', async (t) => {
   assert.deepEqual(result.uploaded, ['upload.txt'])
   const output = await tools.evaluate_script({ pageId, function: `() => document.getElementById('output').textContent` })
   assert.equal(output.value, 'files:upload.txt')
+})
+
+/**
+ * The usual page hides its input behind a styled button, and a hidden element has no accessibility node,
+ * so there is no uid for the input at all; the button that opens it is the uid a person would use.
+ */
+test('upload_file on the button that opens a hidden input answers its chooser', async (t) => {
+  if (!skipUnless(t, browserAvailable(), 'no browser binary was found')) return
+  const first = join(work, 'first.txt')
+  const second = join(work, 'second.txt')
+  writeFileSync(first, 'one')
+  writeFileSync(second, 'two')
+  const snapshot = await tools.take_snapshot({ pageId })
+  const attach = findUid(snapshot.tree, 'button', 'Attach files')
+  assert.ok(attach !== undefined, 'the button is in the snapshot')
+  const hidden = await tools.evaluate_script({ pageId, function: `() => document.getElementById('hiddenfile').hidden` })
+  assert.equal(hidden.value, true, 'the input really is hidden')
+  const result = await tools.upload_file({ pageId, uid: attach, filePaths: [first, second] })
+  assert.deepEqual(result.uploaded, ['first.txt', 'second.txt'])
+  assert.equal(result.via, 'file chooser')
+  const output = await tools.evaluate_script({ pageId, function: `() => document.getElementById('output').textContent` })
+  assert.equal(output.value, 'hidden:first.txt,second.txt', 'the page saw the change on its own hidden input')
+
+  const nothing = findUid(snapshot.tree, 'button', 'Opens nothing')
+  await assert.rejects(tools.upload_file({ pageId, uid: nothing, filePaths: [first] }), /opened no file chooser within 3000 ms/)
+  const after = await tools.upload_file({ pageId, uid: attach, filePaths: [second] })
+  assert.deepEqual(after.uploaded, ['second.txt'], 'a refused upload leaves the next one working')
 })
 
 test('a dialog blocks actions until it is answered', async (t) => {
