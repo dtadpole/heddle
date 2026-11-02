@@ -2258,6 +2258,13 @@ fn without_nagle(
     })
 }
 
+/// Whether the session is a subagent's (`origin: "subagent"`, a delegate or a teammate): it runs on its own model.
+fn is_subagent_session(meta: Option<&SessionMeta>) -> bool {
+    meta.and_then(|meta| meta.rest.get("origin"))
+        .and_then(Value::as_str)
+        == Some("subagent")
+}
+
 /// The body of the `409` a turn into a one-shot subagent's session gets, or `None` when the session takes turns —
 /// web.ts `subagentTurnRefusal`.
 ///
@@ -2267,13 +2274,6 @@ fn without_nagle(
 /// has no delivery at all: `delegate` runs it for one task and settles it. Phase A measured both builds answering
 /// `200` and growing the child's log (R-developer-eight-26). A teammate (`teamId`) is a continuable child, as DSH's
 /// teammates are, and this route is the delivery the page uses for it, so it is not refused.
-/// Whether the session is a subagent's (`origin: "subagent"`, a delegate or a teammate): it runs on its own model.
-fn is_subagent_session(meta: Option<&SessionMeta>) -> bool {
-    meta.and_then(|meta| meta.rest.get("origin"))
-        .and_then(Value::as_str)
-        == Some("subagent")
-}
-
 fn subagent_turn_refusal(meta: Option<&SessionMeta>) -> Option<Value> {
     let meta = meta?;
     if meta.rest.get("origin").and_then(Value::as_str) != Some("subagent") {
