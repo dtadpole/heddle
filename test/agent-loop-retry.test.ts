@@ -72,8 +72,16 @@ async function provider(replies: readonly Reply[], onRequest?: (count: number) =
 }
 
 let counter = 0
-async function turn(replies: readonly Reply[], retryPolicy?: unknown, options: { readonly steerAfterRequest?: { readonly count: number; readonly text: string } } = {}) {
+async function turn(
+  replies: readonly Reply[],
+  retryPolicy?: unknown,
+  options: {
+    readonly steerAfterRequest?: { readonly count: number; readonly text: string }
+    readonly preStep?: (step: { messages: readonly unknown[]; tools: readonly unknown[]; round: number }, next: () => { messages: readonly unknown[]; tools: readonly unknown[] }) => unknown
+  } = {},
+) {
   const ctx = new Context()
+  if (options.preStep !== undefined) ctx.on('agent/pre-step', options.preStep as never)
   const sessions = new SessionService(ctx, { root: join(scratch, `sessions-${++counter}`) })
   const session = sessions.start({ cwd: scratch })
   /**
@@ -195,4 +203,27 @@ test('a retry whose wait nothing landed in sends the same request', async () => 
   assert.equal(run.error, undefined, run.error?.message)
   assert.equal(run.bodies.length, 2)
   assert.equal(run.bodies[1], run.bodies[0], 'the retried body is the refused one, byte for byte')
+})
+
+test('the pre-step hook is asked once for a step whose retry gains a steer, and its edit is kept (#250)', async () => {
+  let asked = 0
+  const run = await turn(
+    [{ status: 429, headers: { 'retry-after': '0.2' } }, { text: 'answered once' }],
+    { ...fast, backoff: { ...fast.backoff, maxDelayMs: 1_000 } },
+    {
+      steerAfterRequest: { count: 1, text: 'STEERED-250 again' },
+      preStep: (_step, next) => {
+        asked += 1
+        const answered = next()
+        return { ...answered, messages: [...answered.messages, { role: 'user', content: [{ type: 'text', text: 'HOOK-EDIT-250' }] }] }
+      },
+    },
+  )
+  assert.equal(run.error, undefined, run.error?.message)
+  assert.equal(asked, 1, 'agent/pre-step fires once per step, as DSH fires it; the retry does not ask it again')
+  assert.equal(run.requests, 2)
+  assert.ok(run.bodies[0]?.includes('HOOK-EDIT-250') && !run.bodies[0]?.includes('STEERED-250'), 'the first request carries the hook\'s edit')
+  const retried = run.bodies[1] ?? ''
+  assert.ok(retried.includes('HOOK-EDIT-250'), 'the retried request keeps the hook\'s edit')
+  assert.ok(retried.indexOf('STEERED-250') > retried.indexOf('HOOK-EDIT-250'), 'and gains the steer after it')
 })
