@@ -207,11 +207,24 @@ export function resolveEndpoints(
 export function describeEndpoints(
   endpoints: readonly EndpointConfig[],
   nominated?: string,
-): { readonly endpoints: readonly Record<string, unknown>[]; readonly default: string | null } {
+  selection?: { readonly model?: string; readonly reasoningEffort?: string },
+): {
+  readonly endpoints: readonly Record<string, unknown>[]
+  readonly default: string | null
+  readonly defaultModel?: string
+  readonly defaultEffort?: string
+} {
   const present = nominated !== undefined && endpoints.some((endpoint) => endpoint.name === nominated)
   return {
     endpoints: endpoints.map(describePageEndpoint),
     default: present && nominated !== undefined ? nominated : null,
+    /**
+     * The model and effort a new session starts with on the default endpoint (`ModelService.defaultSelection`,
+     * already checked against that endpoint), so a composer opening a fresh session shows and sends them. Absent
+     * when the configuration names none, or the default endpoint is not in the list.
+     */
+    ...(present && selection?.model !== undefined ? { defaultModel: selection.model } : {}),
+    ...(present && selection?.reasoningEffort !== undefined ? { defaultEffort: selection.reasoningEffort } : {}),
   }
 }
 

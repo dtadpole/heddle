@@ -94,7 +94,7 @@ const MENU = `JSON.stringify({
  * Answer the page's next workspace reads as `mode` says ('503', '404', 'offline' or 'none', an empty list), draw the tree
  * again through View options as a person would, and give fetch back once the note is drawn.
  */
-async function treeNote(browser, mode, after = '') {
+async function treeNote(browser, mode, after = '', ready = '') {
   await browser.evaluate(`(() => {
     window.__sbFetch = window.__sbFetch ?? window.fetch
     const answer = ${JSON.stringify(mode)}
@@ -111,7 +111,8 @@ async function treeNote(browser, mode, after = '') {
     return true
   })()`)
   if (after !== '') {
-    await new Promise((resolve) => setTimeout(resolve, 300))
+    // The step needs the tree drawn from the overridden answer first; `ready` says when it is.
+    assert.ok(await browser.waitFor(ready, 10_000), `the tree was drawn from the ${mode} answer`)
     await browser.evaluate(after)
   }
   const drawn = await browser.waitFor(`document.getElementById('tree-note').textContent !== ''`, 10_000)
@@ -171,7 +172,9 @@ test('the sidebar leftovers read in the page language, and follow a change made 
     assert.equal(await treeNote(browser, '404'), '此服务器早于工作区树，会话以单列列出')
     assert.equal(await treeNote(browser, 'offline'), '无法读取工作区：offline')
     const NEW_SESSION = `(() => { document.getElementById('new-session').click(); return true })()`
-    assert.equal(await treeNote(browser, 'none', NEW_SESSION), '请先注册一个工作区——点“工作区”旁的 +')
+    // With no workspace in the answer, the tree no longer draws the work folder's workspace row.
+    const NO_WORKSPACE_DRAWN = `![...document.querySelectorAll('#tree .row .label')].some((label) => label.textContent === 'work')`
+    assert.equal(await treeNote(browser, 'none', NEW_SESSION, NO_WORKSPACE_DRAWN), '请先注册一个工作区——点“工作区”旁的 +')
 
     await chooseLanguage(browser, 'en', 'en')
     await browser.evaluate(`(() => { document.querySelector('#view-options button').click(); return true })()`)
@@ -185,7 +188,7 @@ test('the sidebar leftovers read in the page language, and follow a change made 
     assert.equal(await treeNote(browser, '503'), 'this profile does not load the workspace plugin')
     assert.equal(await treeNote(browser, '404'), 'this server predates the workspace tree, so sessions are listed in one column')
     assert.equal(await treeNote(browser, 'offline'), 'could not read the workspaces: offline')
-    assert.equal(await treeNote(browser, 'none', NEW_SESSION), 'register a workspace first — the + beside Workspaces')
+    assert.equal(await treeNote(browser, 'none', NEW_SESSION, NO_WORKSPACE_DRAWN), 'register a workspace first — the + beside Workspaces')
   } finally {
     browser?.close()
     server.kill()

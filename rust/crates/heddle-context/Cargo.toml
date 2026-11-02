@@ -22,6 +22,8 @@ serde.workspace = true
 serde_json.workspace = true
 sha1 = "0.10"
 thiserror.workspace = true
+# The turn's stop token, which a turn's automatic compaction honours (#154); heddle-agent's own version.
+tokio-util = "0.7"
 
 [dev-dependencies]
 heddle-config.workspace = true

@@ -71,7 +71,14 @@ function textOf(message: { readonly content?: readonly { readonly type?: string;
  * heddle writes no turn-start event, so a turn is known to have begun at its first `model/request` or streamed
  * `assistant/chunk` after the last turn end — the same markers the goal driver reads a turn in flight from
  * (src/plugins/goal-driver.ts). A prompt with no model call after it is therefore not closed: nothing of it is drawn as
- * running, and the fork already leaves such a prompt out of what it inherits. A call is open from its `tool-call` chunk
+ * running, and the fork already leaves such a prompt out of what it inherits.
+ *
+ * The one exception is a turn's automatic compaction, its pre-step: a `compaction/start` after a prompt that has had no
+ * turn end opens the turn too (#154). A process killed while that summary ran left the prompt unanswered with nothing
+ * saying why; DSH appends `turn/start` before the pre-step, so its `openTurnClosers` closes such a turn as interrupted.
+ * A `/compact` on its own has no prompt after the last turn end and stays as it was. The span itself needs no closer: a
+ * compaction is log-only until its replacement note, so a `compaction/start` with no end leaves the surface unchanged,
+ * and the next turn compacts again. A call is open from its `tool-call` chunk
  * until a tool message names it; a turn end forgets the calls it leaves, as DSH's recovery does at its boundaries, so an
  * old turn is never reopened (the request-time repair answers its calls for the model).
  *
@@ -89,9 +96,12 @@ export function openTurnClosers(events: readonly SessionEvent[], cause: CloserCa
   let requests = 0
   let retries = 0
   let errors = 0
+  /** A prompt was recorded since the last turn end, so a compaction now is that turn's pre-step (#154). */
+  let prompted = false
   for (const event of events) {
     if (TURN_ENDS.has(event.type)) {
       open = false
+      prompted = false
       pending = new Map()
       text = ''
       reasoning = ''
@@ -119,8 +129,12 @@ export function openTurnClosers(events: readonly SessionEvent[], cause: CloserCa
         else if (chunk?.type === 'done' && typeof chunk.finishReason === 'string') finishReason = chunk.finishReason
         break
       }
+      case 'compaction/start':
+        if (prompted) open = true
+        break
       case 'message': {
         const message = event.message as { role?: string; toolCallId?: unknown; content?: readonly { type?: string; text?: string }[] } | undefined
+        if (message?.role === 'user') prompted = true
         if (message?.role !== 'tool') break
         if (typeof message.toolCallId === 'string') pending.delete(message.toolCallId)
         if (/^error \(/.test(textOf(message))) errors += 1

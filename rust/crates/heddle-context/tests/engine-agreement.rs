@@ -206,6 +206,7 @@ fn the_aimed_cut_and_the_refused_summary_agree_with_the_typescript_build() {
             summarizer: &summarizer,
             measure: &measure_fn,
             force: false,
+            cancel: None,
         },
     ))
     .expect("a refusal is a result");
@@ -256,6 +257,7 @@ fn a_landed_compaction_writes_what_the_typescript_build_writes() {
             summarizer: &summarizer,
             measure: &measure_fn,
             force: false,
+            cancel: None,
         },
     ))
     .expect("the compaction lands");
@@ -294,6 +296,7 @@ fn a_second_compaction_over_out_of_order_seqs_agrees() {
             summarizer: &summarizer,
             measure: &measure_fn,
             force: false,
+            cancel: None,
         },
     ))
     .expect("the first compaction lands");
@@ -319,6 +322,7 @@ fn a_second_compaction_over_out_of_order_seqs_agrees() {
             summarizer: &summarizer,
             measure: &measure_fn,
             force: false,
+            cancel: None,
         },
     ))
     .expect("the second compaction lands");
@@ -356,6 +360,7 @@ fn a_pruning_that_clears_the_pressure_agrees_and_asks_for_no_summary() {
             summarizer: &summarizer,
             measure: &measure_fn,
             force: false,
+            cancel: None,
         },
     ))
     .expect("the round succeeds");
