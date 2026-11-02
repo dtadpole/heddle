@@ -141,7 +141,7 @@ function clearSingleton(profile) {
  * before the install finishes leaves it there: checks that SIGKILL their browser had piled up 30,000 of
  * them, 5.3 GiB, by 31 October 2026.
  */
-export function chromeArgs(options) {
+export function chromeArgs(options, env = process.env) {
   const width = options.width ?? 1280
   const height = options.height ?? 900
   return [
@@ -157,9 +157,33 @@ export function chromeArgs(options) {
     `--user-data-dir=${options.profile}`,
     `--window-size=${width},${height}`,
     ...(options.colorScheme === 'light' ? ['--force-light-mode'] : options.colorScheme === 'dark' ? ['--force-dark-mode'] : []),
+    ...environmentArgs(env.HEDDLE_BROWSER_ARGS),
     ...(options.args ?? []),
     'about:blank',
   ]
+}
+
+/**
+ * Extra Chrome flags from `HEDDLE_BROWSER_ARGS`: flags separated by whitespace, or a JSON array of strings
+ * when a flag holds a space. They let a seat diagnose a browser without editing the check that opens it:
+ * developer-eight's Page.navigate hangs of 1 November 2026 needed a `--log-net-log` capture, which only
+ * `options.args` could pass. They follow the tool's own flags and precede `options.args`, so a check's
+ * explicit flag still wins; a malformed value refuses the launch rather than being half-applied.
+ */
+export function environmentArgs(value) {
+  if (value === undefined || value.trim() === '') return []
+  const text = value.trim()
+  if (!text.startsWith('[')) return text.split(/\s+/)
+  let parsed
+  try {
+    parsed = JSON.parse(text)
+  } catch (error) {
+    throw new Error(`HEDDLE_BROWSER_ARGS starts with '[' but is not JSON (${error instanceof Error ? error.message : String(error)})`)
+  }
+  if (!Array.isArray(parsed) || parsed.some((item) => typeof item !== 'string')) {
+    throw new Error('HEDDLE_BROWSER_ARGS must be flags separated by spaces, or a JSON array of strings')
+  }
+  return parsed
 }
 
 /** Start one browser process and read its endpoint, or throw with the stderr that explains it. */
