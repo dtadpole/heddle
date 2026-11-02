@@ -365,66 +365,6 @@ fn edited_files(writes: &[NotedWrite]) -> Vec<EditedFile> {
     files
 }
 
-/// The transcript's attachment addresses for one session (`web.ts`'s `scopeAttachmentUrls`): each card's `url` names
-/// the session it is read for, because the upload route serves a file only to a session whose log references it
-/// (DSH's `session/attachment`).
-pub fn scope_attachment_urls(turns: &mut [ChatTurn], session: &str) {
-    let query = format!("session={}", encode_component(session));
-    for turn in turns.iter_mut() {
-        if let Some(attachments) = turn.attachments.as_mut() {
-            for card in attachments.iter_mut() {
-                let joint = if card.url.contains('?') { '&' } else { '?' };
-                card.url = format!("{}{joint}{query}", card.url);
-            }
-        }
-    }
-}
-
-/// The four usage buckets, in the order the TypeScript `mergeTokenUsage` writes them.
-const USAGE_BUCKETS: [&str; 4] = [
-    "inputTokens",
-    "outputTokens",
-    "cacheReadTokens",
-    "cacheWriteTokens",
-];
-
-/// `mergeTokenUsage`: the first report as it came, then a bucket-by-bucket sum in which a bucket stays absent until a
-/// round reports it.
-fn merge_usage(previous: Option<Value>, next: &Value) -> Option<Value> {
-    let Some(next_buckets) = next.as_object() else {
-        return previous;
-    };
-    let Some(previous) = previous else {
-        return Some(next.clone());
-    };
-    let mut sum = serde_json::Map::new();
-    for key in USAGE_BUCKETS {
-        let (a, b) = (previous.get(key), next_buckets.get(key));
-        if a.is_none() && b.is_none() {
-            continue;
-        }
-        let whole = |value: Option<&Value>| value.map_or(Some(0), Value::as_u64);
-        let total = match (whole(a), whole(b)) {
-            (Some(a), Some(b)) => Value::from(a + b),
-            _ => Value::from(
-                a.and_then(Value::as_f64).unwrap_or(0.0) + b.and_then(Value::as_f64).unwrap_or(0.0),
-            ),
-        };
-        sum.insert(key.to_owned(), total);
-    }
-    Some(Value::Object(sum))
-}
-
-/// The exchange's usage account: its model rounds, the rounds that reported usage, and their sum.
-#[derive(Default)]
-struct UsageAccount {
-    rounds: u32,
-    reports: u32,
-    reported: bool,
-    sum: Option<Value>,
-    start: usize,
-}
-
 /// Fold one `llm/retry` or `llm/retry-started` into its chain's row (#251): a new chain opens a row at its first
 /// attempt, a later retry appends an attempt, and `llm/retry-started` marks that attempt started.
 fn fold_retry(
@@ -514,6 +454,66 @@ fn end_retries(turns: &mut [ChatTurn], retry_at: &mut HashMap<String, usize>) {
         }
     }
     retry_at.clear();
+}
+
+/// The transcript's attachment addresses for one session (`web.ts`'s `scopeAttachmentUrls`): each card's `url` names
+/// the session it is read for, because the upload route serves a file only to a session whose log references it
+/// (DSH's `session/attachment`).
+pub fn scope_attachment_urls(turns: &mut [ChatTurn], session: &str) {
+    let query = format!("session={}", encode_component(session));
+    for turn in turns.iter_mut() {
+        if let Some(attachments) = turn.attachments.as_mut() {
+            for card in attachments.iter_mut() {
+                let joint = if card.url.contains('?') { '&' } else { '?' };
+                card.url = format!("{}{joint}{query}", card.url);
+            }
+        }
+    }
+}
+
+/// The four usage buckets, in the order the TypeScript `mergeTokenUsage` writes them.
+const USAGE_BUCKETS: [&str; 4] = [
+    "inputTokens",
+    "outputTokens",
+    "cacheReadTokens",
+    "cacheWriteTokens",
+];
+
+/// `mergeTokenUsage`: the first report as it came, then a bucket-by-bucket sum in which a bucket stays absent until a
+/// round reports it.
+fn merge_usage(previous: Option<Value>, next: &Value) -> Option<Value> {
+    let Some(next_buckets) = next.as_object() else {
+        return previous;
+    };
+    let Some(previous) = previous else {
+        return Some(next.clone());
+    };
+    let mut sum = serde_json::Map::new();
+    for key in USAGE_BUCKETS {
+        let (a, b) = (previous.get(key), next_buckets.get(key));
+        if a.is_none() && b.is_none() {
+            continue;
+        }
+        let whole = |value: Option<&Value>| value.map_or(Some(0), Value::as_u64);
+        let total = match (whole(a), whole(b)) {
+            (Some(a), Some(b)) => Value::from(a + b),
+            _ => Value::from(
+                a.and_then(Value::as_f64).unwrap_or(0.0) + b.and_then(Value::as_f64).unwrap_or(0.0),
+            ),
+        };
+        sum.insert(key.to_owned(), total);
+    }
+    Some(Value::Object(sum))
+}
+
+/// The exchange's usage account: its model rounds, the rounds that reported usage, and their sum.
+#[derive(Default)]
+struct UsageAccount {
+    rounds: u32,
+    reports: u32,
+    reported: bool,
+    sum: Option<Value>,
+    start: usize,
 }
 
 /// Fold a session's recorded events into the turns the page renders.
