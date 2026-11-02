@@ -5,7 +5,10 @@
 // configuration and refuses only Save (and as #165 settled for an unreadable patch), both builds start on the value
 // beneath Settings' block, print one line naming the row, the problem and the file, and run a turn; Settings still
 // answers with the block's value, and Reset removes it. A refused value outside the block cannot fall back, and is
-// still named, row, problem and file. Runs against whichever harness HEDDLE_BIN names, or the TypeScript build.
+// still named, row, problem and file. A row that fails for a reason with nothing beneath it (a key file that is
+// missing, J225) still stops the server, but its own reason is printed before the line naming the rows that wait on
+// it, as TS prints it; Rust printed only the pending line. Runs against whichever harness HEDDLE_BIN names, or the
+// TypeScript build.
 import assert from 'node:assert/strict'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -148,6 +151,36 @@ test('Settings still answers on a fallen-back row and Reset removes the broken v
       { said: 'heddle: context: contextWindow (-5) must be a positive integer', then: NAMED },
       `the row, the problem and the file are named\n${named.stderr}`,
     )
+  } finally {
+    await server?.stop()
+    removeDir(home)
+  }
+})
+
+test('a row that fails with nothing beneath it is named with its own reason before the pending refusal', async () => {
+  const home = isolatedHome('boot-fallback-keyfile')
+  let server
+  try {
+    const key = join(home, 'missing.key')
+    const config = join(home, 'heddle.json')
+    writeFileSync(config, JSON.stringify({
+      default: 'keyed',
+      exclude: ['scripted'],
+      endpoints: [{ name: 'keyed', kind: 'openai-chat', baseUrl: 'http://127.0.0.1:9/v1', model: 'm', apiKeyFile: key }],
+    }))
+    const env = { HOME: home, HEDDLE_HOME: join(home, '.heddle'), HEDDLE_CONFIG: config }
+    let refused
+    try {
+      server = await startServer(['--sandbox-root', home], env)
+    } catch (error) {
+      refused = String(error.message)
+    }
+    assert.ok(refused !== undefined, 'the server does not start without the key file')
+    const cause = `could not read the key file '${key}'`
+    const at = refused.indexOf(cause)
+    assert.ok(at >= 0, `the failed row's own reason is printed, naming the file\n${refused}`)
+    const pending = refused.search(/entr\(y\/ies\) are still pending/)
+    assert.ok(pending < 0 || at < pending, `before the line naming the rows that wait on it\n${refused}`)
   } finally {
     await server?.stop()
     removeDir(home)
