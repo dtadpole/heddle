@@ -22,7 +22,10 @@ import {
   titleFromAnswer,
   titleFromOutput,
   type TitleAnswer,
+  type TitleLevels,
 } from '../src/session/title.ts'
+import SessionPlugin from '../src/plugins/session.ts'
+import { sessionRequestSelection } from '../src/server/web.ts'
 import { ToolRegistry } from '../src/tools/service.ts'
 
 /**
@@ -37,15 +40,18 @@ after(() => rmSync(scratch, { recursive: true, force: true }))
 const PROMPT = 'Please summarise the quarterly revenue figures for the northern region and compare them with last year, thanks.'
 
 let counter = 0
-/** A service over a fresh store, with a fake model whose answers the test decides. */
-function fixture(answer: (request: GenerateRequest) => Promise<TitleAnswer> | TitleAnswer) {
+/** A service over a fresh store, with a fake model whose answers the test decides, and the routes' levels if given. */
+function fixture(answer: (request: GenerateRequest) => Promise<TitleAnswer> | TitleAnswer, options: { readonly levels?: TitleLevels } = {}) {
   counter += 1
   const sessions = new SessionService(new Context(), { root: join(scratch, `sessions-${counter}`) })
   const requests: GenerateRequest[] = []
-  sessions.store.titles.attach(async (request) => {
-    requests.push(request)
-    return answer(request)
-  })
+  sessions.store.titles.attach(
+    async (request) => {
+      requests.push(request)
+      return answer(request)
+    },
+    options.levels !== undefined ? { levels: options.levels } : {},
+  )
   const titleOf = (id: string) => sessions.list().find((meta) => meta.id === id)?.title
   /** What the loop writes before its model call: the request record whose route the title call takes. */
   const request = (handle: ReturnType<SessionService['start']>, endpoint = 'scripted', model?: string) =>
@@ -95,9 +101,8 @@ test("the request is DSH's first-prompt request: its system prompt, the one mess
       ],
       maxOutputTokens: 4096,
       purpose: SESSION_TITLE_PURPOSE,
-      sessionId: handle.id,
     },
-    'on the route the turn used, with the session’s id so the session’s own selection applies',
+    'on the route the turn used; no levels are known here, so no effort, and no session id for a session policy to rewrite (#215)',
   )
   assert.match(sessionTitleSystemPrompt(), /^Create a concise title for an AI coding-assistant session from the supplied human messages\.\n/)
   assert.match(sessionTitleSystemPrompt(), /Aim for about 5 words in non-CJK languages or 10 CJK characters\./)
@@ -210,4 +215,122 @@ test("a scripted turn's first prompt is titled by the scripted endpoint's sessio
   const meta = JSON.parse(readFileSync(handle.meta, 'utf8')) as { title?: string }
   assert.equal(meta.title, 'Northern revenue comparison', 'and the session is titled by the title step, not by the cut prompt')
   assert.ok(!sessions.events(handle).some((event) => JSON.stringify(event).includes('Northern revenue comparison')), 'the title is meta, not a log event')
+})
+
+/** A route's levels, least first, as the catalogue declares them (Claude Opus 5.5's ladder, default xhigh). */
+const LEVELS = [
+  { id: 'low', name: 'Low', value: 'low' },
+  { id: 'medium', name: 'Medium', value: 'medium' },
+  { id: 'high', name: 'High', value: 'high' },
+  { id: 'xhigh', name: 'XHigh', value: 'xhigh' },
+  { id: 'max', name: 'Max', value: 'max' },
+]
+
+/** The selection a session's record holds: the part a title call must leave as it found it. */
+const selectionOf = (sessions: SessionService, id: string) => {
+  const meta = sessions.list().find((entry) => entry.id === id)
+  return { endpoint: meta?.endpoint, model: meta?.model, reasoningEffort: meta?.reasoningEffort }
+}
+
+test("#215: the title call asks for the route's least supported effort, not the session's, and names no session", async () => {
+  /**
+   * DSH's first-prompt provider titles at `model.reasoning?.efforts[0]?.id` (dsh-session-title-first-prompt-llm
+   * lib/index.js:41-42), laid over the call's controls (dsh-session-title-llm lib/index.js:184-190): a route's first
+   * declared level, and nothing for a route that declares none. Heddle sent no effort and the session's id, so the
+   * server's selection rule and the default fill (#157) ran the title at the session's max or xhigh.
+   */
+  const { sessions, requests } = fixture(() => stop('Quarterly revenue comparison'), {
+    levels: (endpoint, model) => (endpoint === 'gateway' && model === 'opus' ? { default: 'xhigh', levels: LEVELS } : undefined),
+  })
+  const atMax = sessions.start({ cwd: scratch })
+  sessions.setModel(atMax.id, { endpoint: 'gateway', model: 'opus', reasoningEffort: 'max' })
+  const before = selectionOf(sessions, atMax.id)
+  sessions.user(atMax, PROMPT)
+  sessions.store.modelRequest(atMax, { endpoint: 'gateway', model: 'opus', reasoningEffort: 'max', messages: 1, tools: [] })
+  await sessions.store.titles.settle()
+  assert.equal(requests.length, 1, 'the turn’s request started the title call')
+  assert.equal(requests[0]!.reasoningEffort, 'low', 'a session at max: the title asks for the route’s least level')
+  assert.equal(requests[0]!.sessionId, undefined, 'and carries no session id, so no session policy rewrites it')
+  assert.deepEqual(selectionOf(sessions, atMax.id), before, 'the session keeps its endpoint, model and max')
+  assert.equal(before.reasoningEffort, 'max')
+
+  const atDefault = sessions.start({ cwd: scratch })
+  sessions.setModel(atDefault.id, { endpoint: 'gateway', model: 'opus' })
+  sessions.user(atDefault, PROMPT)
+  sessions.store.modelRequest(atDefault, { endpoint: 'gateway', model: 'opus', reasoningEffort: 'xhigh', reasoningEffortDefault: true, messages: 1, tools: [] })
+  await sessions.store.titles.settle()
+  assert.equal(requests[1]!.reasoningEffort, 'low', 'a session at the model’s default xhigh: the least level too')
+  assert.equal(selectionOf(sessions, atDefault.id).reasoningEffort, undefined, 'and the session still names no level')
+
+  const plain = sessions.start({ cwd: scratch })
+  sessions.setModel(plain.id, { endpoint: 'gateway', model: 'plain' })
+  sessions.user(plain, PROMPT)
+  sessions.store.modelRequest(plain, { endpoint: 'gateway', model: 'plain', messages: 1, tools: [] })
+  await sessions.store.titles.settle()
+  assert.equal(requests.length, 3)
+  assert.equal('reasoningEffort' in requests[2]!, false, 'a route that declares no levels: no effort is asked for')
+  assert.equal(requests[2]!.sessionId, undefined)
+})
+
+test('#215: through the model service, the title leaves at the least level while the turn runs at the session’s', async () => {
+  /**
+   * The whole path the server takes: the session plugin's own wiring reads the route's levels from the model service,
+   * a selection policy keyed on the session id stands for the server's running-turn rule (src/server/web.ts, the
+   * model/request listener over sessionRequestSelection), the model service's default fill runs, and each request is
+   * read as the adapter receives it (model/stream).
+   */
+  const script = join(scratch, 'script-effort.json')
+  writeFileSync(script, JSON.stringify({ steps: [{ purpose: SESSION_TITLE_PURPOSE, text: 'Northern revenue comparison' }, { text: 'a scripted answer' }] }))
+  const ctx = new Context()
+  const sessions = new SessionPlugin(ctx, { root: join(scratch, 'sessions-effort') })
+  const sandbox = new SandboxService(ctx, { workspaceRoot: scratch, backend: 'none' })
+  new ToolRegistry(ctx, new ApprovalService(ctx, { mode: 'allow' }), sandbox, sessions)
+  new ContextService(ctx, sessions.store, { instructionsMaxBytes: 100_000, contextWindow: 100_000 })
+  new ModelService(ctx, [
+    {
+      name: 'scripted',
+      kind: 'scripted',
+      baseUrl: script,
+      model: 'opus',
+      models: [{ id: 'opus', reasoning: { default: 'xhigh', levels: LEVELS } }, { id: 'plain' }],
+    } as never,
+  ])
+  ctx.on('model/request', (request, next) => {
+    const resolved = next()
+    if (resolved.sessionId === undefined) return resolved
+    return { ...resolved, ...sessionRequestSelection(sessions.list().find((meta) => meta.id === resolved.sessionId)) }
+  })
+  const sent: GenerateRequest[] = []
+  ctx.on('model/stream', (request, next) => {
+    sent.push(request)
+    return next()
+  })
+  const titleRequest = () => sent.find((request) => request.purpose === SESSION_TITLE_PURPOSE)
+  const turnRequest = () => sent.find((request) => request.purpose !== SESSION_TITLE_PURPOSE)
+
+  const handle = sessions.start({ cwd: scratch })
+  sessions.setModel(handle.id, { endpoint: 'scripted', model: 'opus', reasoningEffort: 'max' })
+  const result = await runTurn(ctx, { session: handle, endpoint: 'scripted', model: 'opus', reasoningEffort: 'max', prompt: PROMPT, maxRounds: 2 })
+  await sessions.store.titles.settle()
+  assert.equal(result.text, 'a scripted answer')
+  assert.equal(turnRequest()?.reasoningEffort, 'max', 'the turn runs at the session’s max')
+  assert.equal(titleRequest()?.reasoningEffort, 'low', `the title asks for the least level\nsent: ${JSON.stringify(titleRequest())}`)
+  assert.equal(titleRequest()?.reasoningEffortDefault, undefined, 'a level the title named, not the model default filled in')
+  assert.equal(titleRequest()?.model, 'opus', 'on the turn’s own route')
+  assert.equal(selectionOf(sessions, handle.id).reasoningEffort, 'max', 'the session still runs at max')
+  assert.equal(sessions.list().find((meta) => meta.id === handle.id)?.title, 'Northern revenue comparison', 'and the title landed')
+
+  sent.length = 0
+  const atDefault = sessions.start({ cwd: scratch })
+  await runTurn(ctx, { session: atDefault, endpoint: 'scripted', model: 'opus', prompt: PROMPT, maxRounds: 2 })
+  await sessions.store.titles.settle()
+  assert.equal(turnRequest()?.reasoningEffort, 'xhigh', 'a session that names no level runs its turn at the model default')
+  assert.equal(titleRequest()?.reasoningEffort, 'low', 'its title, at the least level')
+
+  sent.length = 0
+  const plain = sessions.start({ cwd: scratch })
+  await runTurn(ctx, { session: plain, endpoint: 'scripted', model: 'plain', prompt: PROMPT, maxRounds: 2 })
+  await sessions.store.titles.settle()
+  assert.ok(titleRequest(), 'the plain route was asked for a title')
+  assert.equal(titleRequest()?.reasoningEffort, undefined, 'a route without levels: the title sends no effort')
 })

@@ -57,6 +57,9 @@ anyhow = "1"
 axum = "0.8"
 bytes = "1"
 futures = "0.3"
+# `list_dir` orders a folder's entries as DSH and the TypeScript build do, with ICU collation (`localeCompare`).
+# The 2.x line matches the ICU4X crates idna already brings in; compiled data only (root collation, no datagen).
+icu_collator = { version = "2.4", default-features = false, features = ["compiled_data"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 serde = { version = "1", features = ["derive"] }
 # `float_roundtrip`: serde_json's default float parser is not correctly rounded, so a session-log line read and

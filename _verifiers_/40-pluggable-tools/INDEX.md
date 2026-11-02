@@ -1,6 +1,6 @@
 ---
 title: Verifier 4 — Pluggable Tools
-version: 1.1.0
+version: 1.8.0
 description: tools are configurable and pluggable.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-11, listing the ten verifiers
@@ -24,7 +24,27 @@ a display or a window.
 is refused and the command does not run, a larger one is cut to the tools row's `bashMaxTimeoutMs` (DSH's `maxTimeoutMs`,
 ten minutes by default; live-testing issue #13).
 `check-read-errors.mjs` holds a failed `read_file` to DSH's sentences: a missing file is `FS_NOT_FOUND` and a directory
-`FS_NOT_REGULAR_FILE`, each naming the path (live-testing issue #4).
+`FS_NOT_REGULAR_FILE`, each naming the path (live-testing issue #4), and a file that is not UTF-8 text `FS_NOT_TEXT`,
+`cannot read "<path>": invalid UTF-8 text`, as DSH's fatal decode says it (live-testing issue #234: the TypeScript
+build read it with replacement characters, the Rust build refused it unnamed as `TOOL_FAILED`).
+`check-write-errors.mjs` holds a write aimed at a folder to DSH's sentence (`dsh-fs-local` writeText): `FS_NOT_REGULAR_FILE`,
+`cannot write "<path>": not a regular file`, with the folder and its contents left as they were (live-testing issue
+#237: the TypeScript build returned Node's raw `EISDIR` text and the Rust build `Is a directory (os error 21)` unnamed).
+`check-list-errors.mjs` holds a failed `list_dir` to DSH's sentences (`dsh-fs-local` listDirectory): a missing folder is
+`FS_NOT_FOUND` and a file `FS_NOT_DIRECTORY`, each `cannot list "<path>": …`, and one dangling symbolic link in a folder
+is listed by name instead of failing the whole listing (live-testing issue #223).
+`check-list-links.mjs` holds a symbolic link in a listing to what it points at, as DSH's `stat` probe follows it: a
+link to a folder is `link/` and a link to a file is a file of the target's size (live-testing issue #229: the
+TypeScript build listed a link to a folder as a file of the folder's size).
+`check-bash-streams.mjs` holds a finished bash call's stderr to its own section, as DSH's renderResult marks it: stdout,
+a newline when stdout does not end in one, then `[stderr]` and the stderr text, in success and below a failure's error
+line alike (live-testing issue #246: both builds glued the streams, `printf out; printf err >&2` came back `outerr`).
+`check-list-order.mjs` holds a listing to DSH's order, `name.localeCompare` (ICU collation), which the TypeScript
+build shares: case and accents sort with their letters, punctuation and digits before letters in ICU's order, and
+names that collate equal in byte order (live-testing issue #247: the Rust build sorted by bytes). Its expected orders
+are English collation; under a Node that resolves another locale it reports itself unjudged.
+Those six share `fs-tool-turn.mjs`, which is not a check: it writes a self-contained profile that allows the one tool
+under test and runs one scripted turn that calls it once, returning the tool results and what the disk holds afterwards.
 `check-utf8-chunks.mjs` holds bash output to whole characters when a UTF-8 sequence arrives split across chunks
 (live-testing issue #96: the TypeScript build decoded each chunk alone).
 `check-output-limit.mjs` holds bash output to the tools row's `bashOutputLimit`: a cut keeps the **end** of the output

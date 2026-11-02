@@ -17,8 +17,8 @@ pub use model::{
     Answer, Question, QuestionError, QuestionOption, codes, validate_answers, validate_questions,
 };
 pub use service::{
-    AnswerOutcome, AskOutcome, Mode, QuestionConfig, QuestionService, fold_questions,
-    late_answer_message,
+    AnswerOutcome, AskOutcome, INTERRUPTED_REASON, Mode, QuestionConfig, QuestionService,
+    fold_questions, late_answer_message,
 };
 pub use tool::{ASK_USER_TOOL, AskUserTool, ask_user_parameters};
 
@@ -253,6 +253,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_fork_cut_inside_a_waiting_question_answers_only_itself() {
+        // #245: a fork copies `question/*` events with their request ids; the source's waiter is not the fork's.
+        let fixture = fixture("fork");
+        let questions = service(&fixture, Mode::Legacy, 120);
+        let asking = tokio::spawn({
+            let questions = Arc::clone(&questions);
+            let session = fixture.session.clone();
+            async move { questions.ask(&session, &one(), None, None).await }
+        });
+        let waiting = first_open(&questions, &fixture.session).await;
+        assert_eq!(waiting["state"], "waiting");
+        let id = waiting["id"].as_str().unwrap().to_owned();
+        let handle = fixture.store.open(&fixture.session).unwrap();
+        let last = fixture
+            .store
+            .read(&handle)
+            .unwrap()
+            .iter()
+            .filter_map(|event| event.to_value()["seq"].as_u64())
+            .max()
+            .unwrap();
+        let fork = fixture
+            .store
+            .fork_at(
+                &fixture.session,
+                heddle_session::ForkAttribution::default(),
+                Some(last),
+            )
+            .unwrap()
+            .unwrap()
+            .id;
+        let copy = Value::Object(questions.list(&fork, true).unwrap().remove(0));
+        assert_eq!(
+            copy["id"],
+            json!(id),
+            "the fork copies the request with its id"
+        );
+        assert_eq!(
+            copy["state"], "continued",
+            "but no turn of the fork waits on it"
+        );
+
+        let outcome = questions
+            .answer(&fork, &id, &json!([{ "id": "q", "selected": ["Go"] }]))
+            .unwrap();
+        assert!(outcome.late, "so the fork's answer is late");
+        assert!(
+            outcome
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("answer_to_pending_question")),
+            "a message for the fork's next turn"
+        );
+        let source = questions.get(&fixture.session, &id).unwrap().unwrap();
+        assert_eq!(source["state"], "waiting", "the source's turn still waits");
+        assert_eq!(
+            question_events(&fixture),
+            vec!["question/asked".to_owned()],
+            "and the source's log records no answer"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            !asking.is_finished(),
+            "the fork's answer never reached the source's turn"
+        );
+
+        questions
+            .answer(
+                &fixture.session,
+                &id,
+                &json!([{ "id": "q", "selected": ["Go"] }]),
+            )
+            .unwrap();
+        assert_eq!(
+            asking.await.unwrap().unwrap(),
+            AskOutcome::Answered(vec![Answer {
+                id: "q".to_owned(),
+                selected: vec!["Go".to_owned()],
+                custom: None,
+            }]),
+            "an answer in the source still does"
+        );
+    }
+
+    #[tokio::test]
     async fn a_question_asked_before_a_restart_is_answerable_after_it() {
         let fixture = fixture("restart");
         let before = service(&fixture, Mode::Legacy, 120);
@@ -283,6 +368,119 @@ mod tests {
                 .starts_with(r#"{"kind":"answer_to_pending_question""#)
         );
         asking.abort();
+    }
+
+    #[tokio::test]
+    async fn a_question_only_its_own_turn_can_take_reads_as_cancelled_after_a_restart() {
+        // #228: the plan review is asked `continuable: false`; after a crash it fails closed, as DSH's does.
+        let fixture = fixture("not-continuable");
+        let before = service(&fixture, Mode::Legacy, 120);
+        let asking = tokio::spawn({
+            let before = Arc::clone(&before);
+            let session = fixture.session.clone();
+            async move { before.ask_with(&session, &one(), None, None, false).await }
+        });
+        let waiting = first_open(&before, &fixture.session).await;
+        assert_eq!(
+            waiting["state"], "waiting",
+            "while its turn waits it is answerable"
+        );
+        let id = waiting["id"].as_str().unwrap().to_owned();
+        let ordinary = tokio::spawn({
+            let before = Arc::clone(&before);
+            let session = fixture.session.clone();
+            async move {
+                before
+                    .ask(
+                        &session,
+                        &json!([{ "id": "other", "question": "Ready?" }]),
+                        None,
+                        None,
+                    )
+                    .await
+            }
+        });
+        for _ in 0..100 {
+            if before.list(&fixture.session, true).unwrap().len() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let handle = fixture.store.open(&fixture.session).unwrap();
+        let asked: Vec<Value> = fixture
+            .store
+            .read(&handle)
+            .unwrap()
+            .iter()
+            .map(|event| event.to_value())
+            .filter(|event| event["type"] == "question/asked")
+            .collect();
+        assert_eq!(asked.len(), 2);
+        assert_eq!(asked[0]["continuable"], json!(false));
+        assert!(
+            asked[1].get("continuable").is_none(),
+            "an ordinary request is written as before"
+        );
+
+        let after = service(&fixture, Mode::Legacy, 120);
+        let all = after.list(&fixture.session, false).unwrap();
+        assert_eq!(
+            all[0]["state"], "cancelled",
+            "a new process sees it closed, not continued"
+        );
+        assert_eq!(all[0]["reason"], INTERRUPTED_REASON);
+        assert_eq!(all[0]["deadline"], Value::Null);
+        assert_eq!(
+            all[1]["state"], "continued",
+            "an ordinary request is still continued"
+        );
+        let open = after.list(&fixture.session, true).unwrap();
+        assert_eq!(open.len(), 1, "only the ordinary one is open");
+        assert_eq!(open[0]["id"], all[1]["id"]);
+        let refused = after
+            .answer(
+                &fixture.session,
+                &id,
+                &json!([{ "id": "q", "selected": ["Go"] }]),
+            )
+            .unwrap_err();
+        assert_eq!(refused.code, codes::SETTLED);
+        assert_eq!(
+            refused.message,
+            format!("question request '{id}' is already cancelled")
+        );
+        assert!(
+            fold_questions(
+                &fixture
+                    .store
+                    .read(&handle)
+                    .unwrap()
+                    .iter()
+                    .map(|event| event.to_value())
+                    .collect::<Vec<_>>()
+            )[0]
+            .settled
+            .is_none(),
+            "the refusal wrote nothing"
+        );
+
+        // In the process that asked it, an answer still reaches the waiting turn.
+        before
+            .answer(
+                &fixture.session,
+                &id,
+                &json!([{ "id": "q", "selected": ["Go"] }]),
+            )
+            .unwrap();
+        assert_eq!(
+            asking.await.unwrap().unwrap(),
+            AskOutcome::Answered(vec![Answer {
+                id: "q".to_owned(),
+                selected: vec!["Go".to_owned()],
+                custom: None,
+            }])
+        );
+        ordinary.abort();
     }
 
     #[tokio::test]

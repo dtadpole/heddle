@@ -273,6 +273,13 @@ mod tests {
         CommandResult::error(text)
     }
 
+    /// A `/compact` a restart cut is answered by the session's closers (#206, heddle-session `repair.rs`) in the
+    /// words a Stop answers with here.
+    #[test]
+    fn a_compact_cut_by_a_restart_is_answered_in_the_words_a_stop_answers_with() {
+        assert_eq!(heddle_session::COMPACTION_CANCELLED, COMPACT_CANCELLED);
+    }
+
     /// `/goal`'s card as DSH renders it, for a goal with no rounds under the default cap and no blocker.
     fn goal_card(
         title: &str,

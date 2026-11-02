@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 
-import type { GenerateRequest } from '../llm/types.ts'
+import type { GenerateRequest, ReasoningLevels } from '../llm/types.ts'
 import type { SessionEvent, SessionHandle } from './store.ts'
 
 /**
@@ -23,6 +23,16 @@ import type { SessionEvent, SessionHandle } from './store.ts'
  * - **What it sends**: the first-prompt provider's system prompt and its JSON framing of the one message
  *   (`dsh-session-title-first-prompt-llm` lib/index.js:44-56), at most `maxInputBytes` of input, `maxOutputTokens` of
  *   output, `timeoutMs` end to end, tagged `purpose: 'session-title'` (`dsh-session-title-llm` lib/index.js:160-220).
+ * - **At what effort**: the route's least supported reasoning level, whatever the session runs at (#215). DSH's
+ *   provider passes `selectReasoningEffort = (model) => model.reasoning?.efforts[0]?.id` (first-prompt lib/index.js:41-42)
+ *   and `executeSessionTitleLlm` lays that effort over the call's controls (`dsh-session-title-llm` lib/index.js:184-190),
+ *   so a route that declares no levels gets none and `dsh-llm` `resolveCallWithInfo` adds none (lib/index.js:2190-2191).
+ *   Here {@link titleReasoningEffort} picks the first level the route declares (`reasoningLevelsFor`, the list the model
+ *   switcher shows, least first), and the request names it, so the model service's default fill (#157) leaves it alone.
+ *   The call carries no session id: in heddle that id is read only by session-scoped `model/request` policies — the
+ *   server's running-turn selection rule and the plan-mode section — which made the title call run at the session's
+ *   level as if it were one of its turns. No adapter sends it and no usage is booked by it; the route is already the
+ *   session's, because it is the one the turn's own request recorded.
  * - **How it is cleaned**: the first non-empty line of the answer, without emphasis that wraps the whole line, with
  *   terminal controls and invisible characters removed and whitespace collapsed (`titleFromOutput`, first-prompt :67-73;
  *   `normalizeSessionTitle`, `dsh-session-title` :19-58), then cut to `maxTitleBytes` UTF-8 bytes on a code point.
@@ -172,8 +182,20 @@ export function titleTextOf(message: unknown): string | undefined {
   return normalizeSessionTitle(text, Number.MAX_SAFE_INTEGER).length === 0 ? undefined : text
 }
 
+/**
+ * The reasoning level a title call asks for: the route's least supported one, the first it declares (DSH's
+ * `selectReasoningEffort`, first-prompt lib/index.js:41-42), or `undefined` when it declares none, so nothing is sent.
+ */
+export function titleReasoningEffort(levels: ReasoningLevels | undefined): string | undefined {
+  const least = levels?.levels[0]?.id
+  return least !== undefined && least.length > 0 ? least : undefined
+}
+
 /** One title call: the request the model service is asked, and the signal that abandons it. */
 export type TitleGenerate = (request: GenerateRequest, signal: AbortSignal) => Promise<TitleAnswer>
+
+/** The reasoning levels a route declares — an endpoint and the model its request named — or `undefined` for none. */
+export type TitleLevels = (endpoint: string, model: string | undefined) => ReasoningLevels | undefined
 
 /** What the coordinator needs from the store it belongs to. */
 export interface TitleStore {
@@ -216,6 +238,7 @@ interface WorkState {
 export class SessionTitles {
   readonly #store: TitleStore
   #generate: TitleGenerate | undefined
+  #levels: TitleLevels | undefined
   #log: ((message: string) => void) | undefined
   readonly #work = new Map<string, WorkState>()
   readonly #inFlight = new Set<Promise<void>>()
@@ -225,15 +248,21 @@ export class SessionTitles {
   }
 
   /**
-   * Give the coordinator its model call, and say where a failure is reported. Answers the detacher, which also
-   * abandons whatever was pending or in flight.
+   * Give the coordinator its model call, where it reads a route's reasoning levels (none read means no effort is
+   * asked for), and where a failure is reported. Answers the detacher, which also abandons whatever was pending or in
+   * flight.
    */
-  attach(generate: TitleGenerate, options: { readonly log?: (message: string) => void } = {}): () => void {
+  attach(
+    generate: TitleGenerate,
+    options: { readonly levels?: TitleLevels; readonly log?: (message: string) => void } = {},
+  ): () => void {
     this.#generate = generate
+    this.#levels = options.levels
     this.#log = options.log
     return () => {
       if (this.#generate !== generate) return
       this.#generate = undefined
+      this.#levels = undefined
       this.dispose()
     }
   }
@@ -315,6 +344,8 @@ export class SessionTitles {
     }
     /** What stood when the call began — the fallback the first message wrote; an answer replaces only that. */
     const expected = titleOf(metaOf(handle))
+    /** The route's least level, named so the default fill keeps it; no session id, so no session policy rewrites it. */
+    const reasoningEffort = titleReasoningEffort(this.#levels?.(endpoint, model))
     const controller = new AbortController()
     state.active = controller
     const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(SESSION_TITLE_LIMITS.timeoutMs)])
@@ -326,8 +357,8 @@ export class SessionTitles {
         { role: 'user', content: [{ type: 'text', text: input }] },
       ],
       maxOutputTokens: SESSION_TITLE_LIMITS.maxOutputTokens,
+      ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
       purpose: SESSION_TITLE_PURPOSE,
-      sessionId: handle.id,
     }
     const run = (async () => {
       try {
