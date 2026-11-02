@@ -170,7 +170,8 @@ pub fn routes<H: ModelHost>(host: Arc<H>) -> axum::Router {
                         return error(StatusCode::BAD_REQUEST, "not a session id");
                     }
                     // DSH's model command is unavailable for an addressed subagent session, and its selectModel
-                    // answers `session/agent-busy` for a session subagent routing owns (issue #175).
+                    // answers `session/agent-busy` for a session subagent routing owns (issue #175). Asked before the
+                    // body is parsed as JSON; axum has already taken its bytes.
                     if host.subagent_owned(&id) {
                         return json_compact(
                             StatusCode::CONFLICT,
@@ -320,10 +321,10 @@ mod tests {
         );
     }
 
-    /// #175: a subagent's session is refused before its body is read, valid or not, and nothing is switched; a plain
-    /// session's malformed body is still a 400, and a bad id is a 400 before ownership is asked.
+    /// #175: a subagent's session is refused before its body is parsed as JSON (axum has already taken the bytes),
+    /// valid or not, and nothing is switched; a plain session's malformed body is still a 400, and a bad id is a 400.
     #[tokio::test]
-    async fn a_subagents_session_is_refused_before_its_body_is_read() {
+    async fn a_subagents_session_is_refused_before_its_body_is_parsed() {
         let mut host = Host::with_session(SESSION, Vec::new());
         host.names = vec!["scripted".to_owned()];
         host.subagents = vec![SESSION.to_owned()];
@@ -360,7 +361,7 @@ mod tests {
         assert_eq!(
             response.status(),
             StatusCode::BAD_REQUEST,
-            "a bad id, before ownership"
+            "a bad id is still a 400"
         );
     }
 
