@@ -125,6 +125,7 @@ pub const CORE_ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/todo"),
     ("GET", "/api/team"),
     ("GET", "/api/html"),
+    ("GET", "/api/html/frame"),
     ("GET", "/vendor/purify.js"),
     ("GET", "/vendor/highlight/core.js"),
 ];
@@ -481,6 +482,7 @@ impl ServerBuilder {
             .route("/api/todo", get(get_todo))
             .route("/api/team", get(get_team))
             .route("/api/html", get(html_preview))
+            .route("/api/html/frame", get(html_frame))
             .route("/vendor/purify.js", get(purify))
             .route("/vendor/highlight/core.js", get(highlight_core))
             .route(
@@ -2150,6 +2152,19 @@ async fn post_goal(State(state): State<AppState>, body: JsonBody) -> Response {
             respond::error_with_code(status, error.message, error.code.unwrap_or_default())
         }
     }
+}
+
+/// Fixed shell behind the same door layer; no query extractor, harness or filesystem access.
+async fn html_frame() -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/html; charset=utf-8")
+        .header("x-content-type-options", "nosniff")
+        .header("cache-control", "no-store")
+        .header("referrer-policy", "no-referrer")
+        .header("content-security-policy", preview::frame_policy())
+        .body(Body::from(preview::PREVIEW_SHELL))
+        .expect("a response builder with static preview headers")
 }
 
 async fn html_preview(
@@ -6087,6 +6102,34 @@ mod tests {
         assert!(fenced.starts_with("HTTP/1.1 403"), "{fenced}");
 
         server.close().await;
+    }
+
+    #[tokio::test]
+    async fn the_fixed_html_shell_is_authenticated_empty_and_has_its_own_policy() {
+        let (router, _) = app("html-frame");
+        let (status, _, bytes) = call(&router, Method::GET, "/api/html/frame", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body_text(&bytes), "unauthorized\n");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        for uri in [
+            "/api/html/frame",
+            "/api/html/frame?path=%2Fprivate%2Fsecret.html",
+            "/api/html/frame?path=%00&file=../../private.html",
+            "/api/html/frame?path=%FF",
+        ] {
+            let (status, headers, bytes) = call(&router, Method::GET, uri, Some(&cookie)).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(headers["content-type"], "text/html; charset=utf-8");
+            assert_eq!(headers["x-content-type-options"], "nosniff");
+            assert_eq!(headers["cache-control"], "no-store");
+            assert_eq!(headers["referrer-policy"], "no-referrer");
+            assert_eq!(headers["content-security-policy"], preview::frame_policy());
+            assert_eq!(body_text(&bytes), preview::PREVIEW_SHELL);
+            assert!(!body_text(&bytes).contains("private"));
+        }
+        let (status, _, _) = call(&router, Method::POST, "/api/html/frame", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

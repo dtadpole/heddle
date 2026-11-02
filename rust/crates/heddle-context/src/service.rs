@@ -387,6 +387,8 @@ pub struct PrepareOptions<'a> {
     pub summarizer: Option<&'a dyn Summarizer>,
     /// Overflow recovery: one maximal balanced reduction, ignoring the trigger and the tail.
     pub force: bool,
+    /// The turn's stop token: a Stop or a shutdown cancels the summary call, and nothing lands (#154).
+    pub cancel: Option<&'a tokio_util::sync::CancellationToken>,
 }
 
 /// A model call the provider refused, as the loop offers it on `agent/request-error`.
@@ -402,6 +404,8 @@ pub struct OverflowRequest<'a> {
     pub model: Option<&'a str>,
     /// The tool schemas the request offered.
     pub tools: &'a [ToolSpec],
+    /// The turn's stop token, carried to the forced reduction's summary call (#154).
+    pub cancel: Option<&'a tokio_util::sync::CancellationToken>,
 }
 
 /// What the overflow listener answers.
@@ -835,6 +839,7 @@ impl<S: ContextStore> ContextService<S> {
                     summarizer,
                     measure: &measure,
                     force: options.force,
+                    cancel: options.cancel,
                 },
             )
             .await?;
@@ -883,6 +888,7 @@ impl<S: ContextStore> ContextService<S> {
                 system: None,
                 summarizer: None,
                 force: true,
+                cancel: request.cancel,
             },
         )
         .await?;
@@ -1523,6 +1529,7 @@ mod tests {
                 system: None,
                 summarizer: None,
                 force: false,
+                cancel: None,
             },
         ))
         .expect("the preparation succeeds");
@@ -1563,6 +1570,7 @@ mod tests {
                 system: None,
                 summarizer: None,
                 force: false,
+                cancel: None,
             },
         ))
         .expect("the preparation succeeds");
@@ -1623,6 +1631,7 @@ mod tests {
                 endpoint: "local",
                 model: None,
                 tools: &[],
+                cancel: None,
             },
         ))
         .expect("the recovery runs");
@@ -1647,6 +1656,7 @@ mod tests {
                 endpoint: "local",
                 model: None,
                 tools: &[],
+                cancel: None,
             },
         ))
         .expect("the recovery runs");
@@ -1684,6 +1694,7 @@ mod tests {
                 endpoint: "local",
                 model: None,
                 tools: &[],
+                cancel: None,
             },
         ))
         .expect("the recovery runs");
@@ -1780,6 +1791,7 @@ mod tests {
                 system: None,
                 summarizer: None,
                 force: false,
+                cancel: None,
             },
         ))
         .expect("the preparation succeeds");
@@ -1825,6 +1837,7 @@ mod tests {
                 endpoint: "local",
                 model: None,
                 tools: &[],
+                cancel: None,
             },
         ))
         .expect("the recovery runs");
@@ -2152,6 +2165,7 @@ mod tests {
                 system: None,
                 summarizer: None,
                 force: false,
+                cancel: None,
             },
         ))
         .expect("the round prepares");
@@ -2292,6 +2306,7 @@ mod tests {
             system: None,
             summarizer: None,
             force: false,
+            cancel: None,
         };
         let prepare = service.prepare(&session, &options);
         assert_send(&prepare);
@@ -2301,6 +2316,7 @@ mod tests {
             endpoint: "local",
             model: None,
             tools: &[],
+            cancel: None,
         };
         let recover = service.recover_overflow(&session, &request);
         assert_send(&recover);

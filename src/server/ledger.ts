@@ -702,7 +702,8 @@ export function projectLedger(events: readonly LedgerEvent[]): Ledger {
       continue
     }
 
-    if (event.type === 'session/created') continue
+    // Durable session state is followed by the model seat, not an activity row or a turn boundary.
+    if (event.type === 'session/created' || event.type === 'model/selection') continue
 
     if (event.type === 'model/request') {
       settleAssistant(event.at, true)

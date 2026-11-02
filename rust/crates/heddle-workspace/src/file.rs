@@ -35,6 +35,12 @@ pub struct FileReading {
 /// Why a file was refused. The messages are the TypeScript build's, and a verifier matches `not a file`.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum FileReadError {
+    /// Permission refusal (#45): only the basename, never a host path; the API answers 400 like #106.
+    #[error("cannot read \"{name}\": permission denied")]
+    Unreadable { name: String },
+    /// Unexpected filesystem I/O is not a missing file or unsupported text.
+    #[error("cannot read file: I/O error")]
+    ReadFailed,
     /// `<path> is not a file`
     #[error("{0} is not a file")]
     NotAFile(String),
@@ -52,15 +58,12 @@ pub fn read_file_text(path: &str, limit: Option<usize>) -> Result<FileReading, F
     let canonical = canonical_path(Path::new(path))
         .to_string_lossy()
         .into_owned();
-    let Ok(metadata) = std::fs::metadata(&canonical) else {
-        return Err(FileReadError::NotAFile(canonical));
-    };
+    let metadata =
+        std::fs::metadata(&canonical).map_err(|error| read_failure(error, &canonical))?;
     if !metadata.is_file() {
         return Err(FileReadError::NotAFile(canonical));
     }
-    let Ok(whole) = std::fs::read(&canonical) else {
-        return Err(FileReadError::NotAFile(canonical));
-    };
+    let whole = std::fs::read(&canonical).map_err(|error| read_failure(error, &canonical))?;
     let limit = limit.unwrap_or(FILE_LIMIT_BYTES);
     let slice = &whole[..limit.min(whole.len())];
     if slice.contains(&0) {
@@ -91,6 +94,22 @@ pub fn read_file_text(path: &str, limit: Option<usize>) -> Result<FileReading, F
     })
 }
 
+fn read_failure(error: std::io::Error, path: &str) -> FileReadError {
+    use std::io::ErrorKind;
+    match error.kind() {
+        ErrorKind::PermissionDenied => FileReadError::Unreadable {
+            name: Path::new(path)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        },
+        ErrorKind::NotFound | ErrorKind::NotADirectory | ErrorKind::IsADirectory => {
+            FileReadError::NotAFile(path.to_owned())
+        }
+        _ => FileReadError::ReadFailed,
+    }
+}
+
 /// The slice's text, or `None` when its bytes are not UTF-8 (issue #78).
 ///
 /// Decoded **strictly**, so a literal U+FFFD in the file is a character like any other and only bytes that are not
@@ -118,6 +137,59 @@ mod tests {
         let path = dir.path().join(name);
         std::fs::write(&path, bytes).unwrap();
         path.to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn io_failure_kinds_do_not_depend_on_the_os_error_message() {
+        use std::io::{Error, ErrorKind};
+        assert_eq!(
+            read_failure(
+                Error::new(ErrorKind::PermissionDenied, "private host path"),
+                "/private/host/denied.txt"
+            ),
+            FileReadError::Unreadable {
+                name: "denied.txt".into()
+            }
+        );
+        assert_eq!(
+            read_failure(Error::other("private host path"), "/private"),
+            FileReadError::ReadFailed
+        );
+        assert!(matches!(
+            read_failure(Error::from(ErrorKind::NotFound), "/missing"),
+            FileReadError::NotAFile(_)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permission_denied_is_not_a_missing_file_and_has_no_host_path() {
+        use std::os::unix::fs::PermissionsExt;
+        struct Restore(std::path::PathBuf, std::fs::Permissions);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                std::fs::set_permissions(&self.0, self.1.clone()).unwrap();
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(&dir, "denied.txt", b"private fixture text");
+        let restore = Restore(
+            Path::new(&path).to_owned(),
+            std::fs::metadata(&path).unwrap().permissions(),
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o0)).unwrap();
+        let denial = std::fs::read(&path)
+            .expect_err("unjudged on hosts that can read mode 000: run as an unprivileged user");
+        assert_eq!(denial.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            read_file_text(&path, None).unwrap_err().to_string(),
+            "cannot read \"denied.txt\": permission denied"
+        );
+        drop(restore);
+        assert_eq!(
+            read_file_text(&path, None).unwrap().text,
+            "private fixture text"
+        );
     }
 
     #[test]
