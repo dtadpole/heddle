@@ -409,6 +409,32 @@ test('the plugin waits for a running turn to complete before it starts the remin
   await ctx.fiber.dispose()
 })
 
+/**
+ * Issue #197: `/compact` holds the session through the live-turn registry and writes no turn event. A reminder that
+ * fell due during the hold runs as soon as it settles, as DSH replays a wake latched during maintenance, not at the
+ * 60 s busy recheck.
+ */
+test('the plugin delivers a reminder that fell due during a hold with no turn events as soon as the hold settles', async () => {
+  const file = join(root, `plugin-store-${(counter += 1)}`, 'schedule.json')
+  const { ctx } = await pluginContext(file, false)
+  const handle = ctx.session.store.create({ cwd: root, endpoint: 'fake' })
+  const record = createAfterScheduleRecord('schedule-due', 'after the compaction', 30, Date.now() - 60_000, 'Later')
+  ctx.schedule.store.put(record.id, task(record, handle.id))
+
+  const hold = ctx.turns.begin(handle.id)
+  ctx.schedule.startDelivery()
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  assert.equal(userMessages(ctx.session.store.read(handle)).length, 0, 'nothing is written during the hold')
+
+  // The hold ends the way /compact's does: no turn/completed, only the registry settling.
+  const settledAt = Date.now()
+  hold.settle()
+  await until(() => ctx.schedule.tasks()[0]?.status === 'inactive', 'the delivery after the hold settled')
+  assert.ok(Date.now() - settledAt < 5_000, 'delivered at once, not at the busy recheck')
+  assert.equal(userMessages(ctx.session.store.read(handle))[0]?.content[0]?.text, renderReminderFraming(record))
+  await ctx.fiber.dispose()
+})
+
 test('a corrupt store file fails the plugin row instead of running without reminders', async () => {
   const file = join(root, `plugin-store-${(counter += 1)}`, 'schedule.json')
   const { mkdirSync, writeFileSync } = await import('node:fs')
