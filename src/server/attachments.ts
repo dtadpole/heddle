@@ -38,6 +38,12 @@ const IMAGE_TYPES: Readonly<Record<string, ImageMediaType>> = {
   '.gif': 'image/gif',
 }
 
+/** Ordinary files may be zero bytes; an empty raster cannot be valid image content. */
+export function validateUploadContent(name: string, bytes: number, contentType = ''): void {
+  const isImage = IMAGE_TYPES[extname(name).toLowerCase()] !== undefined || /^image\//i.test(contentType)
+  if (bytes === 0 && isImage) throw new AttachmentInputError('an empty image is not valid')
+}
+
 /** The timestamp the upload store prefixes a stored file with, e.g. `2026-10-18T04-27-03-497Z-`. */
 const UPLOAD_STAMP = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-/
 
@@ -85,6 +91,7 @@ export function readAttachment(value: unknown): ContentPart {
   if (stats.size > MAX_UPLOAD_BYTES) {
     throw new AttachmentInputError(`the attached file is larger than this server accepts (${MAX_UPLOAD_BYTES / (1024 * 1024)} MiB)`)
   }
+  validateUploadContent(canonical, stats.size)
   const bytes = readFileSync(canonical)
   const sha256 = createHash('sha256').update(bytes).digest('hex')
   const name = displayNameForStored(canonical)

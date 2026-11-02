@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import process from 'node:process'
@@ -8,7 +8,7 @@ import { after, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 import { createServer } from 'node:net'
-import { afterProbe, isOurLeftover, lockVerdict, nextAttempt, parseSupervisorArgs, restartDelay } from '../../supervisor.mjs'
+import { afterProbe, CAPTURE_BUDGET_MS, captureSteps, formatPaused, isNodeProgram, isOurLeftover, lockVerdict, nextAttempt, parseSupervisorArgs, restartDelay, serverCommandLine } from '../../supervisor.mjs'
 
 /**
  * supervisor.mjs: the rules it keeps, and the behaviour it promises.
@@ -80,8 +80,10 @@ test('the command line is everything after --, untouched, and the flags before i
     healthGraceMs: 20_000,
     reclaimPort: null,
     lock: null,
+    captureDir: null,
   })
   assert.equal(parseSupervisorArgs(['--lock', '/h/.heddle/web-supervisor.3082.lock', '--', '/b/heddle']).lock, '/h/.heddle/web-supervisor.3082.lock')
+  assert.equal(parseSupervisorArgs(['--capture-dir', '/h/.heddle/hang-captures', '--', '/b/heddle']).captureDir, '/h/.heddle/hang-captures')
   const watched = parseSupervisorArgs(['--health-url', 'http://127.0.0.1:3082/healthz', '--health-every', '2', '--health-misses', '4', '--health-grace', '9', '--reclaim-port', '3082', '--', '/b/heddle'])
   assert.equal(watched.healthUrl, 'http://127.0.0.1:3082/healthz')
   assert.deepEqual([watched.healthEveryMs, watched.healthMisses, watched.healthGraceMs, watched.reclaimPort], [2_000, 4, 9_000, 3082])
@@ -103,9 +105,30 @@ test('the command line is everything after --, untouched, and the flags before i
     [['--health-url', 'localhost:3082', '--', '/b/heddle'], /http\(s\) URL/],
     [['--reclaim-port', 'x', '--', '/b/heddle'], /positive integer/],
     [['--lock', 'relative.lock', '--', '/b/heddle'], /absolute path/],
+    [['--capture-dir', 'captures', '--', '/b/heddle'], /absolute path/],
+    [['--capture-dir', '--', '/b/heddle'], /absolute path/],
   ]) {
     assert.throws(() => parseSupervisorArgs(argv), message, argv.join(' '))
   }
+})
+
+test('a hung node server is sampled and paused for its JavaScript stack; any other program is only sampled (#257)', () => {
+  assert.equal(isNodeProgram('/v/node/24.21.0/bin/node'), true)
+  assert.equal(isNodeProgram('node'), true)
+  assert.equal(isNodeProgram('/b/heddle'), false, 'the Rust binary is not node')
+  assert.equal(isNodeProgram('/b/nodemon'), false, 'a name that starts with node is not node')
+  assert.deepEqual(captureSteps(['/v/bin/node', '/r/dist/cli.js', 'web']), { stack: true, sample: true })
+  assert.deepEqual(captureSteps(['/b/heddle', 'web']), { stack: false, sample: true }, 'SIGUSR1 would terminate a program that is not node')
+  assert.ok(CAPTURE_BUDGET_MS <= 5_000, 'the capture never delays the restart by more than five seconds')
+})
+
+test('a captured node server gets a loopback inspector port as its own argument, never through NODE_OPTIONS (#257)', () => {
+  const node = ['/v/bin/node', '/r/dist/cli.js', 'web', '--port', '3082']
+  assert.equal(serverCommandLine(node, null), node, 'no capture directory: the installer\'s command, untouched')
+  assert.deepEqual(serverCommandLine(node, '/h/.heddle/hang-captures'), ['/v/bin/node', '--inspect-port=127.0.0.1:0', '/r/dist/cli.js', 'web', '--port', '3082'])
+  assert.deepEqual(node, ['/v/bin/node', '/r/dist/cli.js', 'web', '--port', '3082'], 'the parsed command is not changed in place')
+  const rust = ['/b/heddle', 'web', '--port', '3097']
+  assert.equal(serverCommandLine(rust, '/h/.heddle-rust-preview/hang-captures'), rust, 'the Rust binary gets no node flag')
 })
 
 test('a failed start backs off, and a run that lasted resets the count', () => {
@@ -205,7 +228,7 @@ async function freePort() {
 }
 
 /** A stand-in HTTP server on the port given as its argument; with `hangAfterMs` it stops itself (SIGSTOP), a real hang. */
-function httpServer({ name, hangAfterMs = null }) {
+function httpServer({ name, hangAfterMs = null, spinAfterMs = null, blockAfterMs = null }) {
   const path = join(scratch, `${name}.mjs`)
   const pids = join(scratch, `${name}.pids`)
   writeFileSync(
@@ -213,10 +236,16 @@ function httpServer({ name, hangAfterMs = null }) {
     [
       "import { appendFileSync } from 'node:fs'",
       "import { createServer } from 'node:http'",
+      "import { execSync } from 'node:child_process'",
       `appendFileSync(${JSON.stringify(pids)}, process.pid + '\\n')`,
+      `appendFileSync(${JSON.stringify(`${pids}.argv`)}, JSON.stringify({ execArgv: process.execArgv, nodeOptions: process.env.NODE_OPTIONS ?? null }) + '\\n')`,
       "createServer((request, response) => response.end('ok')).listen(Number(process.argv[2]), '127.0.0.1')",
       "process.on('SIGTERM', () => process.exit(0))",
       hangAfterMs === null ? '' : `setTimeout(() => process.kill(process.pid, 'SIGSTOP'), ${hangAfterMs})`,
+      // The #257 shape: JavaScript that never yields, so the port stays bound and the event loop answers nothing.
+      spinAfterMs === null ? '' : `setTimeout(function spinsForever() { for (;;) {} }, ${spinAfterMs})`,
+      // The other #257 shape: the thread blocked inside a native call, where the inspector is never serviced.
+      blockAfterMs === null ? '' : `setTimeout(function blocksInNative() { execSync('sleep 20') }, ${blockAfterMs})`,
       '',
     ].join('\n'),
   )
@@ -258,6 +287,72 @@ test('a server that hangs with its port bound is killed after missed probes and 
     run.child.kill('SIGTERM')
     const ended = await run.exited
     assert.equal(ended.code, 0, 'and a supervisor whose server is hung still stops: the SIGKILL fallback reaches a stopped child')
+  }
+})
+
+test('a hung node server is captured before the kill: its JavaScript stack, and a sample (#257)', async () => {
+  const port = await freePort()
+  const captures = join(scratch, 'captures')
+  const server = httpServer({ name: 'spins', spinAfterMs: 1_500 })
+  const run = superviseWith(
+    ['--health-url', `http://127.0.0.1:${port}/healthz`, '--health-every', '1', '--health-misses', '2', '--health-grace', '1', '--capture-dir', captures],
+    [process.execPath, server.path, String(port)],
+  )
+  try {
+    await until(() => lines(server.pids).length >= 2, 'a second server after the first one hung and was captured', 25_000)
+    const { stderr } = run.output()
+    assert.match(stderr, /the server is hung, restarting it/)
+    assert.match(stderr, /captured the hung server before the kill: /)
+    const started = JSON.parse(lines(`${server.pids}.argv`)[0])
+    assert.deepEqual(started.execArgv, ['--inspect-port=127.0.0.1:0'], 'the server process carries the inspector port as its own argument')
+    assert.equal(started.nodeOptions, process.env.NODE_OPTIONS ?? null, 'and its environment, which its children inherit, is not changed')
+    assert.equal(statSync(captures).mode & 0o777, 0o700, 'the capture directory is private')
+    const files = readdirSync(captures)
+    const stacks = files.filter((name) => name.startsWith('stack-'))
+    assert.equal(stacks.length, 1, `one JavaScript stack (${files.join(', ')})`)
+    const stack = readFileSync(join(captures, stacks[0]), 'utf8').split('\n')
+    assert.equal(stack[0], 'paused: other', 'the file says why the server paused')
+    assert.match(stack[1], /^spinsForever .*:\d+:\d+ \[local(,[a-z]+)*\]$/, 'the top frame is the function the server is stuck in, with its scope types')
+    for (const name of files) assert.equal(statSync(join(captures, name)).mode & 0o777, 0o600, `${name} is private`)
+    const samples = files.filter((name) => name.startsWith('sample-'))
+    // `sample` needs the right to read the process's task port; a host without it still gets the JavaScript stack.
+    for (const name of samples) assert.ok(readFileSync(join(captures, name), 'utf8').length > 0, 'a sample holds native stacks')
+  } finally {
+    run.child.kill('SIGTERM')
+    await run.exited
+  }
+})
+
+test('the stack file carries the pause reason and each frame\'s scope types, never a value (#257)', () => {
+  const lines = formatPaused({
+    reason: 'other',
+    callFrames: [
+      { functionName: 'fold', url: 'file:///r/dist/log.js', location: { lineNumber: 41, columnNumber: 7 }, scopeChain: [{ type: 'local', object: { objectId: '1.2' } }, { type: 'closure', object: { objectId: '1.3' } }, { type: 'module' }] },
+      { functionName: '', url: '', location: { lineNumber: 0, columnNumber: 0 } },
+    ],
+  })
+  assert.deepEqual(lines, ['paused: other', 'fold file:///r/dist/log.js:42:8 [local,closure,module]', '(anonymous) :1:1 []'])
+  assert.ok(!lines.join('\n').includes('1.2'), 'no object of any scope is named')
+})
+
+test('a hung node server blocked inside a native call still leaves a sample and a one-line stack file (#257)', async () => {
+  const port = await freePort()
+  const captures = join(scratch, 'captures-native')
+  const server = httpServer({ name: 'blocks', blockAfterMs: 1_500 })
+  const run = superviseWith(
+    ['--health-url', `http://127.0.0.1:${port}/healthz`, '--health-every', '1', '--health-misses', '2', '--health-grace', '1', '--capture-dir', captures],
+    [process.execPath, server.path, String(port)],
+  )
+  try {
+    await until(() => lines(server.pids).length >= 2, 'a second server after the blocked one was captured', 25_000)
+    const stacks = readdirSync(captures).filter((name) => name.startsWith('stack-'))
+    assert.equal(stacks.length, 1)
+    const stack = readFileSync(join(captures, stacks[0]), 'utf8').trim().split('\n')
+    assert.equal(stack.length, 1, stack.join(' | '))
+    assert.match(stack[0], /^inspector did not pause: /, 'the file says the inspector got nowhere, instead of being missing')
+  } finally {
+    run.child.kill('SIGTERM')
+    await run.exited
   }
 })
 

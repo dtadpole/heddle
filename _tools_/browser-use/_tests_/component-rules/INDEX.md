@@ -1,7 +1,7 @@
 ---
 title: Browser Use Component Rules
-version: 1.2.0
-description: The rules the browser tool's helpers implement, judged without a browser, Chrome's command line and the bounded DevTools handshake among them.
+version: 1.3.0
+description: The rules the browser tool's helpers implement, judged without a browser, Chrome's command line, the bounded DevTools handshake and the macOS editing chords among them.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-17, separating component tests from delivery verifiers
 ---
@@ -9,7 +9,7 @@ grounded_in:
 # `component-rules`
 
 Instance of [`_tests_`](../INDEX.md). Holds [`unit.test.mjs`](unit.test.mjs), the browser tool's
-**component suite**: the frame codec, the key names, the viewport and geolocation syntax, the snapshot's
+**component suite**: the frame codec, the key names and macOS editing chords, the viewport and geolocation syntax, the snapshot's
 text form, pagination, the console and network formatters, the session-directory rule, and the coverage
 claim against the DSH advertised surface.
 
