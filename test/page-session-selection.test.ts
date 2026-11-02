@@ -55,6 +55,7 @@ function harness() {
     slashReady: Promise.resolve(null),
     syncSelectionToSession() {}, paintScheduleHeader() {}, followChatTail() {},
     renderScheduleCards() {}, renderScheduleDrawer() {}, refreshScheduleList() {}, refreshScheduleCatalog() {},
+    closePlanTabsOutside() {}, renderPlanCards() {},
     refreshSessions: async () => {}, refreshGoal: async () => {}, refreshTodo: async () => {}, showLedger: async () => {},
     log: { get childElementCount() { return rows.length }, scrollTop: 0, dataset: {}, replaceChildren: () => rows.splice(0), append: (note: { textContent: string }) => rows.push(note.textContent) },
     requestAnimationFrame: (callback: () => void) => callback(),

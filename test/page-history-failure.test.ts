@@ -60,6 +60,7 @@ function harness(deferredCommands = false) {
     markSelection: noop, paintScheduleHeader: noop, renderModelSeat: noop,
     rememberChatScroll: noop, restoreChatScroll: () => calls.push('scroll'), refreshGoal: async () => {}, refreshTodo: async () => {},
     renderScheduleCards: () => calls.push('cards'), renderScheduleDrawer: noop,
+    closePlanTabsOutside: noop, renderPlanCards: noop,
     refreshScheduleList: async () => {}, refreshScheduleCatalog: async () => {},
     scheduleGoalRefresh: noop, scheduleTodoRefresh: noop, refreshRunningStatus: noop,
     markRunning: noop, noteCompletion: (id: string, was: boolean, running: boolean) => calls.push(`completion:${id}:${was}:${running}`),

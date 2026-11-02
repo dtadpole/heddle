@@ -91,6 +91,7 @@ function harness() {
     paintSessionHeading: noop, renderTree: async () => {}, markSelection: noop, paintScheduleHeader: noop,
     renderModelSeat: noop, adoptViewSelection: noop, drawKeptEvents: noop, restoreChatScroll: noop,
     refreshGoal: async () => {}, refreshTodo: async () => {}, renderScheduleCards: noop,
+    closePlanTabsOutside: noop, renderPlanCards: noop,
     renderScheduleDrawer: noop, refreshScheduleList: async () => {}, refreshScheduleCatalog: async () => {},
   }
   const api = runInNewContext(`
