@@ -15,10 +15,14 @@ function fenced(name: string): string {
   return page.slice(begin, end)
 }
 type Record_ = { turn: number; lane: string; kind: string; start: number; end: number; running: boolean; ttftMs?: number; decodingMs?: number; x0?: number; x1?: number }
-type Bar = Record_ & { kinds: string[]; merged: number }
-const helpers = new Function(`${fenced('timeline-tip')}; ${fenced('overview-bars')}; return { overviewBars, timelineRecordText }`)() as {
+type Bar = Record_ & { kinds: string[]; merged: number; rank0: number; rank1: number }
+type Range = { from: number; to: number; span: number }
+type Viewport = { from: number; to: number } | null
+const helpers = new Function(`${fenced('timeline-tip')}; ${fenced('overview-bars')}; return { overviewBars, timelineRecordText, overviewDrawRange, overviewNeedsRedraw }`)() as {
   overviewBars: (records: Record_[], trackPx: number) => Bar[]
   timelineRecordText: (bar: Bar, totalMs: number, startsAtMs: number) => { label: string; when: string }
+  overviewDrawRange: (viewport: Viewport) => Range
+  overviewNeedsRedraw: (drawn: Range | null, viewport: Viewport) => boolean
 }
 
 const record = (turn: number, lane: string, kind: string, start: number, end: number, extra: Partial<Record_> = {}): Record_ => ({ turn, lane, kind, start, end, running: false, ...extra })
@@ -31,20 +35,24 @@ test('a few records wide enough to see are one bar each, keeping their TTFT spli
   )
 })
 
-test('a turn with many records in one lane, or one narrower than a pixel, is one merged bar', () => {
-  const many = Array.from({ length: 13 }, (_, index) => record(2, 'tools', 'tool', 0.1 + index * 0.02, 0.11 + index * 0.02, { running: index === 12 }))
-  const [merged] = helpers.overviewBars(many, 1000)
-  assert.deepEqual([merged?.merged, merged?.start, merged?.end, merged?.running, merged?.kinds], [13, 0.1, 0.11 + 12 * 0.02, true, ['tool']])
+test('a turn whose records in one lane are too dense to tell apart, or one narrower than a pixel, is one merged bar', () => {
+  /** Zoom N6: the density at the drawn width decides, not a count. 13 records a pixel apart merge; 20 px apart, they do not. */
+  const dense = Array.from({ length: 13 }, (_, index) => record(2, 'tools', 'tool', 0.1 + index * 0.001, 0.1012 + index * 0.001, { running: index === 12 }))
+  const [merged] = helpers.overviewBars(dense, 1000)
+  assert.deepEqual([merged?.merged, merged?.start, merged?.end, merged?.running, merged?.kinds], [13, 0.1, 0.1012 + 12 * 0.001, true, ['tool']])
+  assert.deepEqual([merged?.rank0, merged?.rank1], [0, 12], 'the merged bar holds all of its group')
+  const many = Array.from({ length: 13 }, (_, index) => record(2, 'tools', 'tool', 0.1 + index * 0.02, 0.11 + index * 0.02))
+  assert.equal(helpers.overviewBars(many, 1000).length, 13, 'thirteen records 20 px apart are thirteen bars: the count cap is gone')
   const thin = helpers.overviewBars([record(3, 'model', 'reasoning', 0.5, 0.5003), record(3, 'model', 'assistant', 0.5003, 0.7)], 1000)
   assert.deepEqual(thin.map((bar) => [bar.merged, bar.kinds]), [[2, ['reasoning', 'assistant']]], 'a 0.3-pixel bar merges its group')
 })
 
 test('a bar names its TTFT split after its clock, and a merged bar how many records it holds', () => {
   const startsAt = Date.parse('2026-10-31T09:00:00.000Z')
-  const split = helpers.timelineRecordText({ ...record(1, 'model', 'assistant', 0.25, 0.5, { ttftMs: 300, decodingMs: 900 }), kinds: ['assistant'], merged: 1 }, 4000, startsAt)
+  const split = helpers.timelineRecordText({ ...record(1, 'model', 'assistant', 0.25, 0.5, { ttftMs: 300, decodingMs: 900 }), kinds: ['assistant'], merged: 1, rank0: 0, rank1: 0 }, 4000, startsAt)
   assert.match(split.when, / · TTFT 300 ms · decoding 900 ms$/)
   assert.equal(split.label, 'turn 1 · assistant')
-  const merged = helpers.timelineRecordText({ ...record(2, 'tools', 'tool', 0.1, 0.4), kinds: ['tool'], merged: 13 }, 4000, startsAt)
+  const merged = helpers.timelineRecordText({ ...record(2, 'tools', 'tool', 0.1, 0.4), kinds: ['tool'], merged: 13, rank0: 0, rank1: 12 }, 4000, startsAt)
   assert.equal(merged.label, 'turn 2 · tool · 13 records')
   assert.doesNotMatch(merged.when, /TTFT/)
 })
@@ -81,4 +89,29 @@ test('every figure in a tip uses one formatter, minutes included (N3)', () => {
   assert.match(words.when, /1m 20s · TTFT 1m 15s · decoding 5\.00 s$/)
   const noSplit = helpers.timelineRecordText({ ...bar, ttftMs: Number.NaN }, 80_000, Number.NaN)
   assert.doesNotMatch(noSplit.when, /TTFT/, 'a figure that is not a number draws no split')
+})
+
+test('a zoom draws a merged turn as its records: the same group splits at ten times the width (zoom N6)', () => {
+  const dense = Array.from({ length: 13 }, (_, index) => record(2, 'tools', 'tool', 0.1 + index * 0.001, 0.1012 + index * 0.001))
+  assert.equal(helpers.overviewBars(dense, 1000).length, 1, 'merged across the whole strip')
+  const split = helpers.overviewBars(dense, 10_000)
+  assert.equal(split.length, 13, 'one bar per record at a tenth of the domain')
+  assert.deepEqual(split.map((bar) => [bar.rank0, bar.rank1, bar.merged]), Array.from({ length: 13 }, (_, index) => [index, index, 1]), 'each named by its rank in the group')
+  /** Equal slots average their width over the strip: a group of 600 slots merges at 1440 px (2.4 px each), not at twice that. */
+  const slots = Array.from({ length: 600 }, (_, index) => record(1, 'tools', 'tool', index / 600, (index + 0.5) / 600, { x0: index / 600, x1: (index + 0.9) / 600 }))
+  assert.deepEqual([helpers.overviewBars(slots, 1440).length, helpers.overviewBars(slots, 2880).length], [1, 600])
+})
+
+test('the strip draws its bars over the viewport and half a viewport either side, and draws them again only when it must (zoom N6)', () => {
+  assert.deepEqual(helpers.overviewDrawRange(null), { from: 0, to: 1, span: 1 }, 'the whole domain, unzoomed')
+  const drawn = helpers.overviewDrawRange({ from: 0.4, to: 0.6 })
+  assert.ok(Math.abs(drawn.from - 0.3) < 1e-9 && Math.abs(drawn.to - 0.7) < 1e-9 && Math.abs(drawn.span - 0.2) < 1e-9, JSON.stringify(drawn))
+  assert.deepEqual(helpers.overviewDrawRange({ from: 0, to: 0.3 }), { from: 0, to: 0.44999999999999996, span: 0.3 }, 'kept inside the domain')
+  assert.equal(helpers.overviewNeedsRedraw(null, null), true, 'nothing drawn yet')
+  assert.equal(helpers.overviewNeedsRedraw(drawn, { from: 0.45, to: 0.65 }), false, 'a pan inside the margin keeps the bars')
+  assert.equal(helpers.overviewNeedsRedraw(drawn, { from: 0.42, to: 0.6 }), false, 'so does a zoom of under a quarter')
+  assert.equal(helpers.overviewNeedsRedraw(drawn, { from: 0.55, to: 0.75 }), true, 'a pan out of the margin draws again')
+  assert.equal(helpers.overviewNeedsRedraw(drawn, { from: 0.45, to: 0.6 }), true, 'and so does a zoom of a quarter or more')
+  assert.equal(helpers.overviewNeedsRedraw(drawn, null), true, 'as does the whole domain again')
+  assert.equal(helpers.overviewNeedsRedraw(helpers.overviewDrawRange(null), { from: 0.1, to: 0.95 }), false, 'a slight zoom from the whole keeps the bars it drew')
 })

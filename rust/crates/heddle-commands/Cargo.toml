@@ -29,6 +29,8 @@ heddle-web-files.workspace = true
 serde.workspace = true
 # `preserve_order`: an answer and an event keep the TypeScript build's key order, as `JSON.stringify` writes them.
 serde_json = { workspace = true, features = ["preserve_order"] }
+# The stop token of a manual compaction's hold on its session (#140); heddle-agent's own version.
+tokio-util = "0.7"
 
 [dev-dependencies]
 # A real session store in the tests needs its environment type.

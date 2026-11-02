@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { existsSync, mkdirSync } from 'node:fs'
 import { request as httpRequest } from 'node:http'
 import { join } from 'node:path'
@@ -19,7 +19,9 @@ import { fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, scriptedC
  * - the shell is confined as bash is: under workspace-write it writes inside the session folder and is refused
  *   outside it;
  * - it is bounded (`maxTerminals`, then `409`), and closing, archiving and server shutdown each end the whole
- *   process tree.
+ *   process tree;
+ * - a server that dies without a shutdown (SIGKILL) leaves no wrapper, `script`, shell, program or job under init
+ *   (#204).
  */
 
 const darwin = process.platform === 'darwin'
@@ -394,6 +396,78 @@ test('closing a terminal also ends a job that left its process tree for init (re
     await settle()
     assert.equal(alive(job), false, 'and ends with the terminal')
   } finally {
+    f.done()
+  }
+})
+
+/** Every live process as `{ pid, ppid, tty }`, from one `ps -A`. */
+function processTable() {
+  return execFileSync('ps', ['-A', '-o', 'pid=,ppid=,tty='], { encoding: 'utf8' })
+    .split('\n')
+    .map((line) => line.trim().split(/\s+/))
+    .filter((fields) => fields.length >= 2 && fields.slice(0, 2).every((field) => /^\d+$/.test(field)))
+    .map(([pid, ppid, tty]) => ({ pid: Number(pid), ppid: Number(ppid), tty: tty ?? '' }))
+}
+
+/** Every descendant of `root` in `table`. */
+function descendantsOf(root, table) {
+  const found = []
+  let frontier = [root]
+  while (frontier.length > 0) {
+    const next = table.filter((row) => frontier.includes(row.ppid) && !found.includes(row.pid)).map((row) => row.pid)
+    found.push(...next)
+    frontier = next
+  }
+  return found
+}
+
+test('a server that dies without closing its terminals leaves no shell, script, program or job behind (#204)', async (context) => {
+  if (!skipUnless(context, darwin, 'the PTY runs through BSD script(1); the util-linux form is not measured on this host')) return
+  const f = await fixture('death')
+  let held = []
+  try {
+    // One terminal waits at its prompt, where readline keeps the tty raw; the other runs `cat` in the foreground.
+    // Each has a background job. Before #204 the first left its shell and `script` under init.
+    const ttys = []
+    const named = []
+    for (const foreground of [false, true]) {
+      const created = await f.api.post(`/api/sessions/${f.a}/terminals`, {})
+      assert.equal(created.status, 201, `a terminal is created (${JSON.stringify(created.body)})`)
+      const base = `/api/sessions/${f.a}/terminals/${created.body.terminal.id}`
+      const pattern = /BG=(\d+) TTY=\/dev\/(\S+) SH=(\d+)\r?\n/
+      const [, job, tty, shell] = pattern.exec(await run(f.api, base, 'sleep 300 & echo "BG=$! TTY=$(tty) SH=$$"', pattern))
+      named.push(Number(job), Number(shell))
+      ttys.push(tty)
+      if (foreground) assert.equal((await f.api.post(`${base}/input`, { data: 'cat\n' })).status, 200)
+    }
+    const onTty = (table, tty) => table.filter((row) => row.tty === tty).map((row) => row.pid)
+    let table = processTable()
+    for (let tries = 0; onTty(table, ttys[1]).length < 3 && tries < 30; tries += 1) {
+      await settle(100)
+      table = processTable()
+    }
+    assert.ok(onTty(table, ttys[1]).length >= 3, `the foreground cat runs beside the shell and its job on ${ttys[1]}`)
+    const tree = descendantsOf(f.server.child.pid, table)
+    for (const pid of named) assert.ok(tree.includes(pid), `${pid} runs under the server (${tree.join(' ')})`)
+    // Watched by pid, found both in the server's tree and on the two ttys. A tty name is not read again after the kill:
+    // once the PTY is gone, another terminal on this host may take the same name at once.
+    held = [...new Set([...tree, ...onTty(table, ttys[0]), ...onTty(table, ttys[1])])]
+    // SIGKILL, as a crash or the out-of-memory killer ends a server: no close runs, only its pipe ends close.
+    const exited = new Promise((resolve) => f.server.child.once('exit', resolve))
+    f.server.child.kill('SIGKILL')
+    await Promise.race([exited, settle(5_000)])
+    const deadline = Date.now() + 5_000
+    while (held.some(alive) && Date.now() < deadline) await settle(100)
+    assert.deepEqual(held.filter(alive), [], 'the wrappers, script, the shells, cat and both jobs ended with the server')
+  } finally {
+    // A survivor is this check's own leak: end it, so a failing run leaves nothing either.
+    for (const pid of held.filter(alive)) {
+      try {
+        process.kill(pid, 'SIGKILL')
+      } catch {
+        // Already gone.
+      }
+    }
     f.done()
   }
 })

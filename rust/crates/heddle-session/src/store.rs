@@ -322,6 +322,9 @@ pub struct ModelRequestRecord {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Whether that level is the model's declared default rather than a choice (#157).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_default: Option<bool>,
     /// How many messages the request carries.
     pub messages: u64,
     /// The tool names offered.

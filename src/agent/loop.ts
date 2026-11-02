@@ -508,7 +508,23 @@ async function runTurnBody(
       ...(options.model !== undefined ? { model: options.model } : {}),
       tools,
       ...(system !== undefined ? { system } : {}),
+      /**
+       * The turn's signal reaches the automatic compaction's summary call (#154): a Stop or a shutdown during it cancels
+       * the call and lands no replacement, as DSH's pre-step compaction runs with the turn's signal.
+       */
+      ...(signal !== undefined ? { signal } : {}),
     })
+    /**
+     * A turn stopped while it compacted ends here, before its model request (#154). Live, the summary landed after the
+     * Stop and the turn then called the model and answered in full; DSH's loop stops at its own check after the pre-step.
+     * No model call was made, so this is not a round: the closers count the same way (requests less retries).
+     */
+    if (stoppedByCaller()) {
+      rounds -= 1
+      progress.rounds = rounds
+      ended.push('stopped by the caller')
+      break
+    }
 
     /**
      * What this round's context was.
@@ -589,6 +605,7 @@ async function runTurnBody(
         endpoint: request.endpoint,
         ...(request.model !== undefined ? { model: request.model } : {}),
         ...(request.reasoningEffort !== undefined ? { reasoningEffort: request.reasoningEffort } : {}),
+        ...(request.reasoningEffortDefault === true ? { reasoningEffortDefault: true as const } : {}),
         messages: request.messages.length,
         tools: (request.tools ?? []).map((tool) => tool.name),
         estimatedTokens: report.estimatedTokens,
@@ -657,6 +674,7 @@ async function runTurnBody(
             ...(options.model !== undefined ? { model: options.model } : {}),
             cwd: instructionCwd,
             tools,
+            ...(signal !== undefined ? { signal } : {}),
           },
           () => undefined,
         )
@@ -854,6 +872,8 @@ export interface RequestErrorPayload {
   readonly model?: string
   readonly cwd: string
   readonly tools: readonly ToolSpec[]
+  /** The turn's signal, so the forced reduction's summary call stops with the turn (#154). */
+  readonly signal?: AbortSignal
 }
 
 declare module '@deepseek-ai/cordis' {

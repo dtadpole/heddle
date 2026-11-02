@@ -49,7 +49,7 @@ export const ALLOWED_ATTRS: readonly string[] = [
 export const ALLOWED_URI = /^(?:https?:|\/|\.{1,2}\/|[^a-z]|[a-z+.-]+(?:[^a-z+.:-]|$))/i
 
 /**
- * The policy a previewed document runs under, as a `meta` element inside it.
+ * The resource policy a previewed document runs under in the fixed shell's response header.
  *
  * The sanitiser should have removed every script; this says so in a language the **browser** enforces, so a bug in
  * the sanitiser is not the only thing standing between a document and the session. `default-src 'none'` with
@@ -58,6 +58,10 @@ export const ALLOWED_URI = /^(?:https?:|\/|\.{1,2}\/|[^a-z]|[a-z+.-]+(?:[^a-z+.:
  */
 export const PREVIEW_CSP =
   "default-src 'none'; img-src 'self' https: data:; style-src 'self' 'unsafe-inline' https:; font-src 'self' https: data:; media-src 'self' https:; frame-src 'none'; script-src 'none'; form-action 'none'; base-uri 'none'"
+
+/** A fixed, empty authenticated document; no request path or workspace bytes enter this answer. */
+export const PREVIEW_SHELL = '<!doctype html><html><head></head><body></body></html>\n'
+export const PREVIEW_FRAME_CSP = `${PREVIEW_CSP}; frame-ancestors 'self'; sandbox allow-same-origin`
 
 /**
  * Rewrite a document's relative resources to the route that serves them.
