@@ -1,13 +1,14 @@
 ---
 title: Web daemon — what launchd does on this Mac, and the rules it forced
 created: 2026-10-23T04:42:38Z
-modified: 2026-10-23T04:42:38Z
+modified: 2026-11-02T02:12:00Z
 level: L3
-version: 1.0.0
+version: 1.1.0
 description: The launchd behaviours measured on the owner's Mac (macOS 27.0, 26A428) and the rule each one put into install.sh, supervisor.mjs, guard.sh and 95-web-daemon.
 status: unverified
 grounded_in:
   - source: measurements on the owner's Mac, 2026-10-22 and 2026-10-23, with a plain sleep job and on scratch agents
+  - source: measurement 2026-11-01, node 24.21 - a spinning process writes no --report-on-signal report, while SIGUSR1 plus Debugger.pause returns its stack in about 60 ms (#257)
   - source: the live deployment's outages of 2026-10-23, recorded in _context_/rust-port/
 ---
 
@@ -26,6 +27,7 @@ host, not to this service.
 | `kickstart -k` on a job younger than `ThrottleInterval` (10 s) waits out the throttle: about 10 s of silence | a restorer must not kick a job that is already restarting |
 | a SIGKILL or SIGTERM of the job's process takes its process group down and the job stays `not running` | `AbandonProcessGroup`: the server outlives a killed supervisor; the next supervisor reclaims it |
 | a hung server keeps its port and the job reads `running` | the supervisor probes `/healthz` and replaces a server that misses three probes |
+| a hang-kill leaves nothing to say where the server was stuck (#257); node's `--report-on-signal` writes nothing while JavaScript spins, because it is handled on the event loop (node 24.21, 2026-11-01) | before the kill, the supervisor takes a native `sample` and, for node, opens the inspector with SIGUSR1 and pauses it for the JavaScript stack, at most 5 s, into `<heddle home>/hang-captures` (0700, files 0600) |
 
 **The supervisor** restarts at once after a run that lasted, with backoff for failed starts, and retries every 60 s
 after ten failures, because here an exit is permanent. Before each start it reclaims a listener on its port running

@@ -163,7 +163,8 @@ test('a detached turn answers 202 while it runs, and its verdict follows its eve
   mkdirSync(home, { recursive: true })
   mkdirSync(work, { recursive: true })
   const config = join(home, 'heddle.json')
-  writeFileSync(config, JSON.stringify({ default: 'double', endpoints: [{ name: 'double', kind: 'openai-chat', baseUrl: double.url, model: 'm', capabilities: ['chat', 'stream'] }] }))
+  // The FAIL turn's 500 is the subject here, not the retry: DSH's default policy would retry it five times (about 15 s).
+  writeFileSync(config, JSON.stringify({ default: 'double', endpoints: [{ name: 'double', kind: 'openai-chat', baseUrl: double.url, model: 'm', capabilities: ['chat', 'stream'], retryPolicy: { maxRetries: 0 } }] }))
   const { url, child } = await startServer({ ...process.env, HOME: home, HEDDLE_HOME: home, HEDDLE_CONFIG: config, NO_COLOR: '1' }, work)
   try {
     const handshake = await fetch(url, { redirect: 'manual' })

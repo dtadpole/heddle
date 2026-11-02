@@ -3640,7 +3640,7 @@
       through this server; every capability that could act is left out, so no script runs and no form submits. The
       frame's own sanitising happens before anything is put inside it.
     -->
-    <div id="file-html" hidden><iframe id="html-view" title="the document" sandbox="allow-same-origin"></iframe></div>
+    <div id="file-html" hidden><iframe id="html-view" title="the document" sandbox="allow-same-origin" referrerpolicy="no-referrer"></iframe></div>
   </div>
   <!--
     The queue dock: messages that have been submitted and are waiting for their own turn.
@@ -6843,6 +6843,10 @@ function paintEmptyState() {
 paintEmptyState()
 
 async function showView(next) {
+  if (next !== 'file') {
+    ++fileFetches
+    if (cancelHtmlFrame !== null) cancelHtmlFrame()
+  }
   view = next
   for (const button of document.querySelectorAll('#views button')) {
     button.setAttribute('aria-selected', String(button.dataset.view === view))
@@ -14651,7 +14655,9 @@ function humanBytes(bytes) {
  * what is read is what was clicked.
  */
 let fileFetches = 0
+let cancelHtmlFrame = null
 async function showFile(node) {
+  if (cancelHtmlFrame !== null) cancelHtmlFrame()
   closeSchedulesPage()
   /** A file is something to read; the invitation belongs to the panel with nothing in it. */
   document.getElementById('empty-state')?.setAttribute('hidden', '')
@@ -14753,7 +14759,7 @@ async function showFile(node) {
  * page and nothing it says can reach this one.
  */
 const fileHtml = document.getElementById('file-html')
-const htmlView = document.getElementById('html-view')
+let htmlView = document.getElementById('html-view')
 
 /** What a preview is allowed to contain, and it is **narrower** than DOMPurify's default rather than wider. */
 const PREVIEW_TAGS = [
@@ -14828,29 +14834,52 @@ async function showHtml(path, body, ticket) {
     WHOLE_DOCUMENT: true,
     RETURN_DOM: false,
   })
-  /**
-   * The policy goes first in the document, with no injected base, as in DSH's basic static HTML preview (#40).
-   * Quoted resource attributes already point at the authenticated raw route. A filesystem-folder base neither
-   * serves relative CSS dependencies through that route nor complies with base-uri 'none'; CSS url()/@import
-   * dependency rewriting remains a separate limitation rather than a reason to widen this policy.
-   */
-  const framed = clean.replace(
-    /<head([^>]*)>/i,
-    `<head$1><meta http-equiv="Content-Security-Policy" content="${body.csp ?? ''}">`,
-  )
-  htmlView.setAttribute('sandbox', 'allow-same-origin')
-  /**
-   * The sanitiser is asked for a whole document, so there is no branch that rebuilds one around a fragment.
-   *
-   * Measured, and it is why this is a sentence rather than code: the first version had such a fallback, and writing the
-   * closing document tag inside its template literal **closed this page** — the browser ended the harness document at
-   * that line, the body came out empty, and the server was answering correctly the whole time. The same trap caught the
-   * comment that explained it, which is why this paragraph names no tag. A fallback that cannot be reached is not worth
-   * a second way to write the document.
-   */
-  htmlView.srcdoc = framed
-  fileBody.hidden = true
-  fileHtml.hidden = false
+  // Only DOMPurify's clean whole-document output is parsed. The response header, not source markup, owns CSP.
+  const parsed = new DOMParser().parseFromString(clean, 'text/html')
+  if (ticket !== fileFetches) return
+  // A fresh frame per selection prevents a queued load from an older navigation publishing into this one.
+  if (cancelHtmlFrame !== null) cancelHtmlFrame()
+  const frame = htmlView.cloneNode(false)
+  frame.removeAttribute('src')
+  frame.setAttribute('sandbox', 'allow-same-origin')
+  frame.setAttribute('referrerpolicy', 'no-referrer')
+  await new Promise((resolve, reject) => {
+    let timer
+    let settled = false
+    const finish = (error) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      frame.onload = null
+      frame.onerror = null
+      if (cancelHtmlFrame === cancel) cancelHtmlFrame = null
+      if (error) reject(error)
+      else resolve()
+    }
+    const cancel = () => finish()
+    cancelHtmlFrame = cancel
+    frame.onload = () => {
+      if (settled) return
+      if (ticket !== fileFetches || htmlView !== frame) { finish(); return }
+      try {
+        const inner = frame.contentDocument
+        // Ignore the initial empty document; inject only after the exact same-origin shell has loaded.
+        if (inner === null || inner.URL !== new URL('/api/html/frame', location.href).href || inner.contentType !== 'text/html') {
+          throw new Error('the preview shell did not load at its fixed same-origin address')
+        }
+        if (ticket !== fileFetches || htmlView !== frame) { finish(); return }
+        inner.documentElement.replaceWith(inner.importNode(parsed.documentElement, true))
+        fileBody.hidden = true
+        fileHtml.hidden = false
+        finish()
+      } catch (error) { finish(error) }
+    }
+    frame.onerror = () => finish(new Error('the preview shell did not load'))
+    timer = setTimeout(() => finish(new Error('the preview shell did not load')), 15000)
+    frame.src = '/api/html/frame'
+    htmlView.replaceWith(frame)
+    htmlView = frame
+  })
 }
 
 /**

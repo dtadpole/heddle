@@ -1380,6 +1380,7 @@ impl heddle_context::ModelAccess for ContextModels {
             let messages = bridge(&request.messages).map_err(|error| {
                 heddle_context::SummarizeError(format!("the summary request: {error}"))
             })?;
+            let endpoint = request.endpoint.clone();
             let generated = self
                 .service
                 .generate(heddle_llm::GenerateRequest {
@@ -1392,6 +1393,12 @@ impl heddle_context::ModelAccess for ContextModels {
                 })
                 .await
                 .map_err(|error| heddle_context::SummarizeError(error.to_string()))?;
+            // A summary cut at its output limit, or ended early any other way, is no checkpoint (#207).
+            if let Some(incomplete) =
+                heddle_llm::types::summary_finish_failure(&endpoint, &generated.finish_reason)
+            {
+                return Err(heddle_context::SummarizeError(incomplete.to_string()));
+            }
             Ok(generated.text)
         })
     }
@@ -1701,6 +1708,14 @@ impl Component for GoalDriverComponent {
             .ok_or_else(|| "goal-driver: the goal service is not provided".to_owned())?;
         let sessions = session_service(services, "goal-driver")?;
         let runtime = crate::runtime::shared_runtime(services)?;
+        // A person's pause aborts the session's running turn, keeping queued input, as DSH's round driver does on a
+        // host-initiated pause (issue #190); the model's own pause and the driver's use `pause_in_turn`.
+        let weak = Arc::downgrade(&runtime);
+        goals.set_pause_interrupter(Arc::new(move |session: &str| {
+            if let Some(turns) = weak.upgrade().and_then(|runtime| runtime.turns.clone()) {
+                turns.abort(session, Some("goal paused by the user"));
+            }
+        }));
         let driver = heddle_goal::GoalDriver::new(
             goals,
             Arc::new(GoalRounds {
@@ -1767,6 +1782,26 @@ impl Component for TeamComponent {
             emit_changed: None,
             warn: None,
         })?;
+        let plugin = Arc::new(plugin);
+        // A compaction that shadowed a member's team policy note is followed by the note again (issue #185).
+        if let Some(bus) = services.get::<heddle_events::EventBus>("events") {
+            let scope = bus.scope("team");
+            let forward = Arc::clone(&plugin);
+            let listener = scope.on_emit::<heddle_events::bridge::SessionEvent>(
+                move |payload: &Value| {
+                    let session = payload.get("session").and_then(Value::as_str);
+                    let kind = payload
+                        .get("event")
+                        .and_then(|event| event.get("type"))
+                        .and_then(Value::as_str);
+                    if let (Some(session), Some(kind)) = (session, kind) {
+                        forward.on_session_event(session, kind);
+                    }
+                },
+                heddle_events::ListenOptions::default(),
+            );
+            services.provide("team-listener", Arc::new((scope, listener)));
+        }
         services.provide("team", Arc::clone(&plugin.service));
         Ok(())
     }

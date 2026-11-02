@@ -1,6 +1,6 @@
 ---
 title: Verifier — Browser Surface
-version: 1.1.0
+version: 1.2.0
 description: every page tool acts on the element a snapshot named, and a dialog or a navigation does not silently change what that means.
 grounded_in:
   - source: the tool surface recorded in _context_/dsh-browser-mcp
@@ -43,6 +43,7 @@ visible window (`headless: false`), not a headless one pretending to be a browse
 | 10 | navigation reaches URL, back, forward and reload, and the old uids die with the document | clicking a lookalike element from the previous page is the silent failure |
 | 11 | emulation changes what the page believes, and a second call replaces rather than adds | `matchMedia` and `innerWidth` are the page's own reading |
 | 12 | the last page cannot be closed | the tool keeps the one page it needs |
+| 13 | on macOS, `Meta+V` pastes what the page copied when headless, and is withheld when headed | the Mac menu makes these chords commands, and a protocol key event never reaches it |
 
 ## What it deliberately does not judge
 
