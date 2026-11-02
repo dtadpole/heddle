@@ -112,6 +112,7 @@ fn endpoint(name: &str, kind: EndpointKind, base_url: &str, model: &str) -> Endp
         input_modalities: None,
         proxy: None,
         timeout_ms: None,
+        retry_policy: None,
         prompt_cache: None,
     }
 }

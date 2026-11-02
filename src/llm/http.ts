@@ -2,6 +2,7 @@ import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import type { IncomingMessage } from 'node:http'
 
+import { parseRetryAfter } from '../config/retry.ts'
 import { CONTEXT_WINDOW_EXCEEDED, ModelError, QUOTA_EXCEEDED } from './types.ts'
 
 /**
@@ -288,7 +289,15 @@ export async function wire(request: WireRequest): Promise<WireResponse> {
   const status = response.statusCode ?? 0
   if (status < 200 || status >= 300) {
     const text = await readAll(response)
-    throw new ModelError(failureMessage(request.endpoint, status, text), { endpoint: request.endpoint, code: failureCode(status, text), status })
+    // The provider's own wait, when it names one, is what a retry policy honours (DSH's providerRetryAfterMs).
+    const retryAfter = response.headers['retry-after']
+    const retryAfterMs = typeof retryAfter === 'string' ? parseRetryAfter(retryAfter) : undefined
+    throw new ModelError(failureMessage(request.endpoint, status, text), {
+      endpoint: request.endpoint,
+      code: failureCode(status, text),
+      status,
+      ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+    })
   }
 
   /**

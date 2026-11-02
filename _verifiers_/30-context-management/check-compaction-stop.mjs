@@ -21,6 +21,8 @@ import { fixtureDir, heddleCommand, isTitleRequest, readTranscript, refuseTitleR
  *
  * The fixture makes the second turn's request cross the compaction trigger with the first turn's long prompt to fold,
  * against a double that holds the summary call open until its caller lets go.
+ *
+ * #200 adds the Stop that lands once the summary has begun to stream: the cut text is not the summary, on either path.
  */
 
 const CAPABILITY = 'a Web UI whose turn route runs model turns'
@@ -42,9 +44,14 @@ const WINDOW = 40_000
 const FIRST = `Keep this in mind: ${'the quick brown fox jumps over the lazy dog, '.repeat(1950)}`
 const SECOND = `And now the question: ${'a lazy dog sleeps under the quick brown fox, '.repeat(500)}`
 
-/** A chat double that answers turns at once and, while `hold` is set, holds a summary call open until it is dropped. */
+/**
+ * A chat double that answers turns at once and, while `hold` is set, holds a summary call open until it is dropped.
+ *
+ * With `partial` set to a string, the held call streams one chunk first: that text as the summary's opening (`''` sends
+ * the role alone). Then a Stop cuts a stream that has begun, not one still waiting for its first byte (#200).
+ */
 async function holdingDouble() {
-  const state = { hold: false, turnCalls: [], summaries: 0, summaryDropped: null, summaryAt: null, held: [] }
+  const state = { hold: false, partial: null, turnCalls: [], summaries: 0, summaryDropped: null, summaryAt: null, held: [] }
   const answer = (response, text) => {
     response.writeHead(200, { 'content-type': 'text/event-stream' })
     response.write(`data: ${JSON.stringify({ choices: [{ delta: { role: 'assistant', content: text }, finish_reason: null }] })}\n\n`)
@@ -67,8 +74,21 @@ async function holdingDouble() {
       if (isSummaryRequest(body)) {
         state.summaries += 1
         if (!state.hold) return answer(response, 'a compact briefing of the conversation so far')
+        if (state.partial !== null) {
+          /**
+           * The streamed form is close-delimited, as a gateway that ends the body by closing the connection sends it
+           * (developer-four's J143 fake, and the live route where #200 was seen). A client that drops such a body sees
+           * it end, not fail, so a cut summary reaches the caller as text. A chunked body would fail with "aborted"
+           * and hide #200.
+           */
+          response.useChunkedEncodingByDefault = false
+          response.shouldKeepAlive = false
+          response.writeHead(200, { 'content-type': 'text/event-stream', connection: 'close' })
+          response.write(`data: ${JSON.stringify({ choices: [{ delta: { role: 'assistant', content: state.partial }, finish_reason: null }] })}\n\n`)
+        } else {
+          response.writeHead(200, { 'content-type': 'text/event-stream' })
+        }
         state.summaryAt = Date.now()
-        response.writeHead(200, { 'content-type': 'text/event-stream' })
         state.held.push(response)
         response.on('close', () => {
           if (state.summaryDropped === null && !response.writableEnded) state.summaryDropped = Date.now()
@@ -404,6 +424,89 @@ test('a Stop while /compact runs with a turn waiting behind it cancels both: the
       assert.ok(!after.some((event) => event.type === 'model/request'), `with no model request after it\n${types.join(' ')}`)
       const completed = after.find((event) => event.type === 'assistant/completed')
       assert.match(String(completed?.ended?.join(' ')), /stopped by the caller/, `and it is ended as stopped\n${types.join(' ')}`)
+    })
+  } finally {
+    await double.close()
+  }
+})
+
+/**
+ * #200, developer-four's J143 on a slow-streaming fake: a Stop before the summary's first byte was honoured on TS, but a
+ * Stop once it had begun to stream was not. The cut stream came back as text, so TS committed it as the checkpoint, or
+ * refused an empty cut as "the summariser returned nothing" with no stopped flag. Rust recorded both as stopped.
+ */
+for (const [form, partial] of [
+  ['part of the summary', 'a compact brief'],
+  ['its first chunk, with no text yet', ''],
+]) {
+  test(`a Stop once the turn’s automatic summary has streamed ${form} lands nothing, and the turn ends stopped (#200)`, async (context) => {
+    if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+    const double = await holdingDouble()
+    try {
+      await withHome('compaction-stop-streamed', double, async (start, log) => {
+        const server = await start()
+        const session = await firstTurn(server)
+
+        double.state.hold = true
+        double.state.partial = partial
+        const callsBefore = double.state.turnCalls.length
+        const second = await postTurn(server, { session, prompt: SECOND })
+        assert.ok(await until(() => double.state.summaryAt !== null, 20_000), `the second turn compacted first, and its summary began to stream\n${secondTurn(log(session)).types.join(' ')}`)
+        // The chunk is on the wire; give the reader time to take it, so the Stop cuts a stream that has begun.
+        await new Promise((resolve) => setTimeout(resolve, 500))
+
+        const stop = await request(server, `/api/sessions/${encodeURIComponent(session)}/stop`, { method: 'POST', body: '{}' })
+        assert.equal(stop.status, 200, 'the stop was accepted')
+        const text = await Promise.race([second.done, new Promise((resolve) => setTimeout(() => resolve(null), 10_000))])
+        assert.notEqual(text, null, 'the turn ended within moments')
+        await new Promise((resolve) => setTimeout(resolve, 500))
+
+        const { after, types } = secondTurn(log(session))
+        assert.ok(types.includes('compaction/start'), `the compaction had started\n${types.join(' ')}`)
+        assert.ok(!types.includes('compaction/summary') && !types.includes('compaction/end'), `the cut summary landed nothing\n${types.join(' ')}`)
+        assert.ok(!after.some((event) => event.type === 'context/note' && event.origin === 'compaction'), 'no replacement note was written')
+        const failed = after.find((event) => event.type === 'compaction/failed')
+        assert.ok(failed, `the span is closed as failed\n${types.join(' ')}`)
+        assert.equal(failed.stopped, true, `as stopped (${JSON.stringify(failed)})`)
+        assert.notEqual(failed.refused, true, 'not as refused')
+        assert.equal(failed.reason, 'stopped by the caller', 'and not as "the summariser returned nothing"')
+        assert.equal(double.state.turnCalls.length, callsBefore, 'no model call followed the stop')
+        const completed = after.filter((event) => event.type === 'assistant/completed')
+        assert.equal(completed.length, 1, `the turn is ended once\n${types.join(' ')}`)
+        assert.match(String(completed[0].ended?.join(' ')), /stopped by the caller/, 'as stopped by the caller')
+      })
+    } finally {
+      await double.close()
+    }
+  })
+}
+
+test('a Stop once /compact’s summary has begun to stream answers "Compaction cancelled." and lands nothing (#200)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  const double = await holdingDouble()
+  try {
+    await withHome('compaction-compact-streamed', double, async (start, log) => {
+      const server = await start()
+      const session = await firstTurn(server)
+
+      double.state.hold = true
+      double.state.partial = 'a compact brief'
+      const compact = request(server, `/api/sessions/${encodeURIComponent(session)}/commands`, { method: 'POST', body: JSON.stringify({ line: '/compact' }) })
+      assert.ok(await until(() => double.state.summaryAt !== null, 20_000), `/compact's summary began to stream\n${secondTurn(log(session)).types.join(' ')}`)
+      await new Promise((resolve) => setTimeout(resolve, 500))
+
+      const stop = await request(server, `/api/sessions/${encodeURIComponent(session)}/stop`, { method: 'POST', body: '{}' })
+      assert.equal(stop.status, 200, 'the stop was accepted')
+      const answered = await compact
+      const body = await answered.json()
+      assert.equal(body.kind, 'error', `the cut /compact is an error, not "Compacted …" (${JSON.stringify(body)})`)
+      assert.equal(body.text, 'Compaction cancelled.', "in DSH's words")
+
+      const events = log(session)
+      const types = events.map((event) => event.type)
+      assert.ok(!types.includes('compaction/summary') && !types.includes('compaction/end'), `no replacement landed\n${types.join(' ')}`)
+      const failed = events.findLast((event) => event.type === 'compaction/failed')
+      assert.equal(failed?.stopped, true, `the span is closed as stopped (${JSON.stringify(failed)})`)
     })
   } finally {
     await double.close()

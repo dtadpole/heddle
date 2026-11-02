@@ -142,16 +142,52 @@ function shQuote(word: string): string {
  *   gone the shell ends too. An end of input alone would not: BSD `script` passes it on as VEOF only while the tty
  *   is in canonical mode, and a shell waiting at its prompt keeps the tty raw, so `script` and the shell stayed
  *   under init. The signal is SIGTERM, not SIGHUP: a server started under `nohup` hands SIGHUP down ignored.
+ * - `script` starts through `signalResetArgv`, so the shell and its programs begin with every signal at its
+ *   default (#210).
  *
  * Both `kill ... 0` calls signal the wrapper's process group, so the wrapper must be spawned as a group leader
  * (`detached`).
  */
-export function terminalArgv(platform: string, confined: readonly string[]): readonly string[] {
+export function terminalArgv(platform: string, confined: readonly string[], perl: string | null = signalResetProgram()): readonly string[] {
   const pty =
     platform === 'darwin'
       ? ['/usr/bin/script', '-q', '/dev/null', ...confined]
       : ['script', '-qfec', confined.map(shQuote).join(' '), '/dev/null']
-  return ['/bin/sh', '-c', `{ cat; kill -TERM 0; } | { "$@"; echo "${EXIT_MARK}$?" >&2; kill -TERM 0; }`, 'heddle-terminal', ...pty]
+  return ['/bin/sh', '-c', `{ cat; kill -TERM 0; } | { "$@"; echo "${EXIT_MARK}$?" >&2; kill -TERM 0; }`, 'heddle-terminal', ...signalResetArgv(perl), ...pty]
+}
+
+/** Where the signal reset's interpreter is looked for: macOS ships it, and most Linux hosts carry it. */
+export const SIGNAL_RESET_PERL = '/usr/bin/perl'
+
+/**
+ * The reset itself: every signal back to its default, then exec the rest of the argv as given (the block form of
+ * `exec` never goes through a shell, whatever the words hold).
+ */
+export const SIGNAL_RESET = `$SIG{$_} = 'DEFAULT' for keys %SIG; exec { $ARGV[0] } @ARGV or die "heddle-terminal: exec $ARGV[0]: $!\\n"`
+
+/**
+ * The step that starts the PTY with every signal at its default (#210), or nothing when `perl` is null.
+ *
+ * A process started with a signal ignored (`nohup` ignores SIGHUP; a shell's `&` ignores SIGINT and SIGQUIT;
+ * `trap '' QUIT`) hands that disposition to what it execs, and bash keeps it for every program it runs ("signals
+ * ignored upon entry to the shell cannot be trapped or reset"), so Ctrl-\ in a terminal quit nothing. libuv already
+ * sets every signal to its default in a child this server spawns, so here the step changes nothing unless something
+ * sits between the server and the terminal; it is kept so the argv is the Rust build's, where `Command` resets
+ * SIGPIPE only and the gap was measured. POSIX `sh` cannot reset a signal that was ignored on entry, so the reset is
+ * one `perl` exec, outside the sandbox, before `script`. The wrapper and its `cat` keep what the server gave them.
+ */
+export function signalResetArgv(perl: string | null): readonly string[] {
+  return perl === null ? [] : [perl, '-e', SIGNAL_RESET, '--']
+}
+
+/** `SIGNAL_RESET_PERL` when it is there: without it the PTY starts with what the server inherited, as before. */
+function signalResetProgram(): string | null {
+  try {
+    accessSync(SIGNAL_RESET_PERL, constants.X_OK)
+    return SIGNAL_RESET_PERL
+  } catch {
+    return null
+  }
 }
 
 /** The shell's own argv before confinement: set the size, then become the interactive shell. */

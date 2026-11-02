@@ -54,7 +54,9 @@ derivation from DSH's code is in the file's header and in [`../../SESSION_ACTION
 
 Everything built on top of it — the meter, the pruner, the compaction, `heddle context` — reads
 `deriveMessages()` rather than filtering the log, and [`../context/INDEX.md`](../context/INDEX.md) is
-where that happens.
+where that happens. The derivation leaves out a run with no `done` whose turn closed with
+`finishReason: 'error'`, a broken stream's fragment, so neither the next request nor a fork nor a summary reads
+it as the model's answer; a stopped run keeps what streamed, and the page still draws both (#173).
 
 Two things about how it is stored are worth knowing before reading the code.
 
@@ -97,7 +99,20 @@ attach for writing, the first process to take the session's writer lock appends 
 else: an `error (INTERRUPTED)` result for each open call, then `assistant/completed` and `turn/completed`
 with `reason: { kind: 'interrupted' }`. A session no live writer holds reads with the same closers added and
 nothing written (`SessionService.events`, DSH's cold read), so the view is right from the first read after a
-restart. A turn running in this process holds the lock already and is never closed.
+restart. A turn running in this process holds the lock already and is never closed. A command left running
+is closed the same way (#206): a `command/done` of kind `error`, and for a `/compact` cut mid-summary a stopped
+`compaction/failed` first and the words "Compaction cancelled.", so its row no longer reads Running… for good.
+
+**A lock whose holder is gone never blocks the session** ([`writer-lock.ts`](writer-lock.ts), issue #202). The
+writer lock (`<id>.lock`) used to name only its holder's pid, and a later writer took it only when that pid was gone.
+After a crash the system may give the pid to another live process, or the lock may name pid 1 (`EPERM`), and every
+turn was refused for as long as that process lived. DSH's lock is a kernel `flock(2)`, which dies with its holder
+(dsh-session-persistence-jsonl lib/index.js:692-716); Node has none, so the lock records who its holder is, one line
+both builds write byte for byte: `<pid> boot=<boot id> start=<start>`. It is stale when its pid is gone, when it was
+written in another boot, when its pid now names a process that started at another time, when a pid-only lock (every
+build before #202) names a process that started after the lock was written, or when its pid's process is another
+user's than the file's. A live holder is refused in words that name the process and the lock file and say how to clear
+it; the Rust build (`writer_lock.rs`) says the same.
 
 This is a source folder rather than a type folder: it carries code, not instances of a
 registered content type. Its entry point exists so that a reader who opens it learns

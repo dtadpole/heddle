@@ -301,6 +301,7 @@ mod tests {
             input_modalities: None,
             proxy: None,
             timeout_ms: None,
+            retry_policy: None,
             prompt_cache: None,
         }
     }

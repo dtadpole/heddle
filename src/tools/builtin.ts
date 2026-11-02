@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { closeSync, mkdirSync, openSync, rmSync, writeFileSync, writeSync } from 'node:fs'
+import { closeSync, mkdirSync, openSync, rmSync, writeFileSync, writeSync, type Dirent } from 'node:fs'
 import { readFile as readFileText, readdir, stat } from 'node:fs/promises'
 import { StringDecoder } from 'node:string_decoder'
 import { tmpdir } from 'node:os'
@@ -152,6 +152,17 @@ function spillOutput(full: string, spillMaxBytes: number, io: SpillIo): string |
 export function displayPath(cwd: string, path: string): string {
   const raw = isAbsolute(path) ? path : `${cwd}${sep}${path}`
   return /(?:^|[\\/])\.\.(?:[\\/]|$)/u.test(raw) ? raw : resolve(cwd, path)
+}
+
+/**
+ * A listing the platform failed, in DSH's words (`dsh-fs-local` `listingIoError`): a target that is gone or reached
+ * through a file is `FS_NOT_FOUND`, one the OS refuses to open `FS_PERMISSION_DENIED`, and anything else `FS_IO_ERROR`
+ * with the platform's own words; each names the directory as it was asked for (live-testing issue #223).
+ */
+export function listingError(shown: string, error: NodeJS.ErrnoException): { readonly code: string; readonly message: string } {
+  if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return { code: 'FS_NOT_FOUND', message: `cannot list "${shown}": not found` }
+  if (error.code === 'EACCES' || error.code === 'EPERM') return { code: 'FS_PERMISSION_DENIED', message: `cannot list "${shown}": permission denied` }
+  return { code: 'FS_IO_ERROR', message: `cannot list "${shown}": ${error instanceof Error ? error.message : String(error)}` }
 }
 
 /** The default for `bashOutputLimit`: characters of a command's combined output kept for the model. */
@@ -455,12 +466,29 @@ export function builtinTools(
       },
     },
     run: async (args, context): Promise<ToolResult> => {
-      const target = sandbox.assertReadable(String(args.path ?? '.'), context.mode, context.cwd)
-      // Listed without blocking the event loop, as read_file reads, so a parallel group's calls run together.
-      const dirents = (await readdir(target, { withFileTypes: true })).sort((left, right) => left.name.localeCompare(right.name))
+      const path = String(args.path ?? '.')
+      const target = sandbox.assertReadable(path, context.mode, context.cwd)
+      /**
+       * A target that is gone, a file or refused by the OS is classified and named, as DSH's directory list does
+       * (`dsh-fs-local` `listDirectory`): not Node's raw `ENOENT: … scandir` text (live-testing issue #223).
+       */
+      const shown = displayPath(context.cwd, path)
+      let dirents: Dirent[]
+      try {
+        const info = await stat(target)
+        if (!info.isDirectory()) return { output: '', error: { code: 'FS_NOT_DIRECTORY', message: `cannot list "${shown}": not a directory` } }
+        // Listed without blocking the event loop, as read_file reads, so a parallel group's calls run together.
+        dirents = await readdir(target, { withFileTypes: true })
+      } catch (error) {
+        return { output: '', error: listingError(shown, error as NodeJS.ErrnoException) }
+      }
+      dirents.sort((left, right) => left.name.localeCompare(right.name))
       const entries = await Promise.all(
         dirents.map(async (entry) => {
-          const stats = await stat(join(target, entry.name))
+          // A dangling link (or an entry gone since the listing) falls back to its own type, as the Rust build's
+          // does, rather than failing the whole listing with a raw `ENOENT: … stat` (issue #223).
+          const stats = await stat(join(target, entry.name)).catch(() => undefined)
+          if (stats === undefined) return entry.isDirectory() ? `${entry.name}/` : entry.isSymbolicLink() ? entry.name : `${entry.name} (0B)`
           return `${entry.isDirectory() ? `${entry.name}/` : entry.name}${entry.isDirectory() ? '' : ` (${stats.size}B)`}`
         }),
       )
