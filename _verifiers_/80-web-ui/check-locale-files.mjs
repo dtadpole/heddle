@@ -151,8 +151,7 @@ test('the workspace tree\'s folder levels and the file tab read in the page lang
     await openFolder('locked')
     assert.equal(await browser.evaluate(lineUnder(folderRow('locked'))), '读取失败：cannot list "locked": permission denied')
     await openFolder('stubbed')
-    assert.ok(await browser.waitFor(`${NOTE} !== ''`, 5_000), 'a read that fails without a code leaves a note')
-    assert.equal(await browser.evaluate(NOTE), '无法读取“stubbed”：文件树返回了 500')
+    assert.ok(await browser.waitFor(`${NOTE} === '无法读取“stubbed”：文件树返回了 500'`, 5_000), `a read that fails without a code leaves its note (${await browser.evaluate(NOTE)})`)
 
     // The workspace whose folder is gone, opened.
     assert.ok(await browser.waitFor(`${workspaceRow(lostPath)} !== undefined`, 10_000), 'the workspace whose folder is gone is still listed')

@@ -179,9 +179,11 @@ test('the right sidebar and its Browser tab read in the page language, and follo
   const { config } = scriptedConfig({ home, steps: [{ text: 'hello' }] })
   const env = { HOME: home, HEDDLE_HOME: join(home, '.heddle'), HEDDLE_CONFIG: config, HEDDLE_WEB_BROWSER: '1' }
   const server = await startServer(['--profile', profileIn(home), '--endpoint', 'scripted', '--session-root', join(home, 'sessions'), '--sandbox-root', home], env)
-  const pages = await startPages()
+  let pages = null
   let browser = null
   try {
+    // Inside the try, so a fixture that fails to start still lets the server go.
+    pages = await startPages()
     browser = await openBrowser({ width: 1280, height: 900 })
     await browser.send('Network.enable', {})
     await browser.send('Network.setExtraHTTPHeaders', { headers: { 'Accept-Language': 'zh-CN,zh;q=0.9' } })
@@ -202,8 +204,9 @@ test('the right sidebar and its Browser tab read in the page language, and follo
     await submit(browser, 'javascript:alert(1)')
     assert.ok(await browser.waitFor(`document.querySelector('#rs-body .browser-tab:not([hidden]) [data-browser="notice"]').hidden === false`, 5_000), 'a script address is refused')
     assert.equal((await read(browser)).notice, '只支持 HTTP 和 HTTPS 地址；本地文件请从工作区文件树打开。')
-    await submit(browser, 'https://user:secret@example.com/')
-    assert.ok(await browser.waitFor(`document.querySelector('#rs-body .browser-tab:not([hidden]) [data-browser="notice"]').textContent === '地址不能包含用户名或密码。'`, 5_000), `an address with credentials is refused in Chinese (${(await read(browser)).notice})`)
+    // A loopback address, so a page that ever stopped refusing credentials frames the fixture, not a public host.
+    await submit(browser, `${pages.base.replace('://', '://user:secret@')}/`)
+    assert.ok(await browser.waitFor(`document.querySelector('#rs-body .browser-tab:not([hidden]) [data-browser="notice"]').textContent === '地址不能包含用户名或密码。'`, 5_000), 'an address with credentials is refused in Chinese')
 
     // A page that moves itself: the tab says it cannot read the new address.
     await submit(browser, `${pages.base}/moves`)
@@ -231,7 +234,7 @@ test('the right sidebar and its Browser tab read in the page language, and follo
     assert.equal(second.notice, '')
   } finally {
     await browser?.close()
-    await pages.close()
+    await pages?.close()
     server.kill()
     removeDir(home)
   }
