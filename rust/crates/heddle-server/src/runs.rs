@@ -94,6 +94,7 @@ impl RunRegistry {
             session: session.to_owned(),
             id,
             cancel,
+            completes: true,
         }
     }
 
@@ -191,9 +192,17 @@ pub struct TurnGuard {
     session: String,
     id: u64,
     cancel: CancellationToken,
+    /// Whether the end counts as a completion (`completedAt`); a turn that ran nothing does not (#162).
+    completes: bool,
 }
 
 impl TurnGuard {
+    /// End a turn that ran nothing - a queued turn whose row was gone by the time it held the session (#162): the
+    /// session is idle again, and `completedAt` does not move, so no completion mark lights for it.
+    pub fn end_unrun(mut self) {
+        self.completes = false;
+    }
+
     pub fn session(&self) -> &str {
         &self.session
     }
@@ -228,7 +237,9 @@ impl Drop for TurnGuard {
         if remaining == 0 {
             runs.running.remove(&self.session);
             runs.since.remove(&self.session);
-            runs.completed.insert(self.session.clone(), now);
+            if self.completes {
+                runs.completed.insert(self.session.clone(), now);
+            }
         }
     }
 }

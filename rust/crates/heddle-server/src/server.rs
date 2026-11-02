@@ -3385,6 +3385,12 @@ fn kick_queue(state: &AppState, session: &str) {
 
 /// One claimed row as the session's next turn, on its recorded selection, with its verdict on the stream as a detached
 /// turn's.
+/// heddle-agent's `NOTHING_CLAIMED`, the reason a claimed turn that found its row gone ends with. heddle-server does not
+/// depend on heddle-agent, so the words are repeated here; keep them identical to `heddle_agent::NOTHING_CLAIMED`.
+fn heddle_agent_nothing_claimed() -> &'static str {
+    "nothing to answer: the queued message was no longer waiting"
+}
+
 /// The selection a drained turn runs on: the one a turn route would give the session (#162).
 fn queue_selection(state: &AppState, session: &str) -> Option<TurnSelection> {
     let meta = state.harness().sessions.meta(session);
@@ -3416,6 +3422,19 @@ async fn run_queued(state: &AppState, session: &str, selection: TurnSelection) {
         claim_queued: true,
     };
     let outcome = state.harness().turns.clone().run_turn(request).await;
+    // A turn whose row was gone by the time it held the session ran nothing: no completion, no verdict (developer-ten's
+    // nit), as web.ts's track hook ends it.
+    let ran_nothing = outcome.as_ref().is_ok_and(|outcome| {
+        outcome.ended.as_ref().is_some_and(|ended| {
+            ended
+                .iter()
+                .any(|reason| reason == heddle_agent_nothing_claimed())
+        })
+    });
+    if ran_nothing {
+        guard.end_unrun();
+        return;
+    }
     drop(guard);
     // A failed queued turn holds the rest, as DSH's driver goes idle after an error without waking for pending input;
     // a stopped one holds it too (the stop route already has).
