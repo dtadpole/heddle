@@ -126,6 +126,21 @@ pub fn set_plan_mode(
     session: &SessionHandle,
     active: bool,
 ) -> Result<PlanChange, String> {
+    set_plan_mode_with(log, session, active, true)
+}
+
+/// [`set_plan_mode`], saying whether the change is narrated (`setPlanMode`'s `narrate` in the TypeScript build).
+///
+/// `narrate: false` writes the mode event alone. `exit_plan_mode`'s approval uses it: the person approved a plan, they
+/// did not switch the mode, and the tool's result already tells the model plan mode is over. DSH's controller narrates
+/// user selections and not the exit tool's transition (dsh-plan-mode: `narrate` is "false for the exit tool, whose
+/// result already narrates the transition") (#228).
+pub fn set_plan_mode_with(
+    log: &dyn PlanLog,
+    session: &SessionHandle,
+    active: bool,
+    narrate: bool,
+) -> Result<PlanChange, String> {
     let events = log.read(session)?;
     if plan_active(events.as_slice()) == active {
         return Ok(PlanChange::Noop);
@@ -135,7 +150,7 @@ pub fn set_plan_mode(
         NewEvent::new(PLAN_EVENT).field("active", active),
         AppendOptions::default(),
     )?;
-    if events.iter().any(|event| event.kind == MODEL_REQUEST_EVENT) {
+    if narrate && events.iter().any(|event| event.kind == MODEL_REQUEST_EVENT) {
         log.append(
             session,
             NewEvent::new(NOTICE_EVENT)
@@ -195,6 +210,38 @@ mod tests {
                 .unwrap();
             assert!(!plan_active(fixture.events().as_slice()), "{active}");
         }
+    }
+
+    #[test]
+    fn the_exit_tools_leave_writes_the_mode_alone_without_the_user_switch_notice() {
+        // #228: the person approved a plan; they did not switch the mode, and the tool's result already says so.
+        let fixture = Fixture::new("silent-leave");
+        let (log, handle) = (fixture.log(), &fixture.handle);
+        set_plan_mode(log, handle, true).unwrap();
+        fixture
+            .store
+            .append(
+                handle,
+                NewEvent::new(MODEL_REQUEST_EVENT).field("messages", 1),
+                AppendOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            set_plan_mode_with(log, handle, false, false),
+            Ok(PlanChange::Committed)
+        );
+        assert!(!plan_active(fixture.events().as_slice()));
+        assert!(
+            !fixture
+                .events()
+                .iter()
+                .any(|event| event.kind == NOTICE_EVENT),
+            "no \"switched back to the default mode\" notice"
+        );
+        assert_eq!(
+            set_plan_mode_with(log, handle, false, false),
+            Ok(PlanChange::Noop)
+        );
     }
 
     #[test]

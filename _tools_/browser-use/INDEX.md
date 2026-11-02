@@ -1,6 +1,6 @@
 ---
 title: Browser Use
-version: 1.1.0
+version: 1.2.0
 description: A browser this repository drives over the Chrome DevTools protocol, with the harness browser's tool surface, one command per tool and one long-lived session behind them.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-17, asking for a browser tool under _tools_ that replicates the DSH browser MCP
@@ -138,6 +138,9 @@ other's pages.
 - **An action is a person's action.** A click is a real mouse event at the element's centre after
   scrolling it into view; a fill goes through the input prototype's setter and fires `input`/`change`,
   because `element.value = …` leaves a framework's state stale.
+- **Command+V pastes on a Mac, headless.** The Mac menu makes `Meta+A/C/X/V/Z` editing commands and a
+  protocol key event never reaches it, so `press_key` sends the command. A visible browser shares the
+  owner's clipboard, so copy, cut and paste are `withheld` there; use `start --headless`.
 - **The no-sandbox retry.** A machine whose outer confinement forbids Chrome's own sandbox gets a
   second start with `--no-sandbox`, and `status` says which start it was. Silently weakening a browser
   would be wrong; failing on every confined machine would be useless.

@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { seatbeltProfileArgs } from '../src/sandbox/seatbelt.ts'
-import { processTable, shellArgv, terminalArgv, TerminalRegistry, type TerminalEvent, type TerminalLimits } from '../src/server/terminals.ts'
+import { processTable, shellArgv, SIGNAL_RESET, SIGNAL_RESET_PERL, signalResetArgv, terminalArgv, TerminalRegistry, type TerminalEvent, type TerminalLimits } from '../src/server/terminals.ts'
 
 /**
  * The page's interactive terminals, the server half (live-testing issue #85): one shell per terminal in a PTY,
@@ -180,6 +180,47 @@ test('the wrapper leads its own process group, so its `kill 0` never reaches the
     assert.match(execFileSync('ps', ['-o', 'command=', '-p', String(group)], { encoding: 'utf8' }), /heddle-terminal/, 'its group is led by the wrapper')
   } finally {
     await terminals.closeAll()
+    s.done()
+  }
+})
+
+test('the PTY starts through a signal reset when perl is there, and as before when it is not (#210)', () => {
+  const shell = shellArgv('/bin/sh', 80, 24)
+  assert.deepEqual(signalResetArgv(SIGNAL_RESET_PERL), [SIGNAL_RESET_PERL, '-e', SIGNAL_RESET, '--'])
+  assert.ok(SIGNAL_RESET.startsWith("$SIG{$_} = 'DEFAULT' for keys %SIG; exec { $ARGV[0] } @ARGV"))
+  assert.deepEqual(signalResetArgv(null), [], 'without perl there is no step')
+  const argv = terminalArgv('darwin', shell, SIGNAL_RESET_PERL)
+  assert.deepEqual(argv.slice(4, 8), signalResetArgv(SIGNAL_RESET_PERL), 'between the relay and the PTY')
+  assert.equal(argv[8], '/usr/bin/script')
+  assert.equal(terminalArgv('darwin', shell, null)[4], '/usr/bin/script')
+})
+
+test('the shell’s programs start with every signal at its default, even behind a launcher that ignores some (#210)', { skip: skip || (existsSync(SIGNAL_RESET_PERL) ? false : 'no perl on this host') }, async () => {
+  // A process started with signals ignored hands them to what it execs, and `/bin/sh` here is bash, which keeps a
+  // signal ignored on entry for every program it runs. libuv resets every signal in a child this server spawns, so
+  // the launcher stands in for a server that does not (the Rust build's `Command` resets SIGPIPE only).
+  const s = scratch()
+  const launcher = ['/usr/bin/perl', '-e', `$SIG{QUIT} = $SIG{HUP} = 'IGNORE'; exec { $ARGV[0] } @ARGV or die`, '--']
+  const argv = [...launcher, ...terminalArgv('darwin', shellArgv('/bin/sh', 80, 24))]
+  const child = spawn(argv[0] as string, argv.slice(1), { cwd: s.workspace, env: { ...process.env, TERM: 'xterm-256color', SHELL: '/bin/sh' }, detached: true, stdio: ['pipe', 'pipe', 'ignore'] })
+  let text = ''
+  child.stdout.on('data', (chunk: Buffer) => (text += chunk.toString()))
+  const signals = ['QUIT', 'HUP', 'INT', 'TERM']
+  try {
+    // Each program signals itself and says so if it lives; the quotes keep the echoed command line from matching.
+    for (const name of signals) child.stdin.write(`sh -c 'kill -${name} $$; echo SURVIVED-${name.slice(0, 1)}""${name.slice(1)}'\n`)
+    child.stdin.write('echo PROBE-$((1+1))\n')
+    const deadline = Date.now() + 8000
+    while (!text.includes('PROBE-2') && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25))
+    assert.ok(text.includes('PROBE-2'), `the shell answered; saw ${JSON.stringify(text.slice(-400))}`)
+    assert.deepEqual(signals.filter((name) => text.includes(`SURVIVED-${name}`)), [], 'no program in the terminal kept a signal ignored')
+  } finally {
+    child.stdin.end()
+    try {
+      if (child.pid !== undefined) process.kill(-child.pid, 'SIGKILL')
+    } catch {
+      // Already gone.
+    }
     s.done()
   }
 })

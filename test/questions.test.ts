@@ -148,6 +148,33 @@ test('a question asked before a restart is still answerable after it, and the an
   assert.equal(foldQuestions(store.read(handle)).get(open!.id)?.settled?.kind, 'answered')
 })
 
+test('a question only its own turn can take reads as cancelled after a restart, and an answer is refused (#228)', async () => {
+  const { store, handle, questions } = setup()
+  const asked = questions.ask(handle, [{ id: 'q', question: 'Approve?', options: [{ label: 'Yes' }] }], { continuable: false })
+  asked.catch(() => {})
+  void questions.ask(handle, [{ id: 'other', question: 'Ready?' }]).catch(() => {})
+  const [only, ordinary] = questions.list(handle)
+  assert.equal(only?.state, 'waiting', 'while its turn waits it is answerable as usual')
+  assert.equal(store.read(handle).find((event) => event.requestId === only?.id && event.type === 'question/asked')?.continuable, false)
+  assert.equal('continuable' in (store.read(handle).find((event) => event.requestId === ordinary?.id && event.type === 'question/asked') ?? {}), false, 'an ordinary request is written as before')
+
+  const reopened = new QuestionService(new Context(), store)
+  const [closed, still] = reopened.list(handle)
+  assert.equal(closed?.state, 'cancelled', 'a new process sees the request closed, not continued')
+  assert.equal(closed?.reason, 'interrupted')
+  assert.equal(still?.state, 'continued', 'an ordinary request is still continued')
+  assert.deepEqual(reopened.list(handle, { open: true }).map((view) => view.id), [still?.id], 'only the ordinary one is open')
+  assert.throws(
+    () => reopened.answer(handle, closed!.id, [{ id: 'q', selected: ['Yes'] }]),
+    (error: unknown) => error instanceof QuestionError && error.code === 'SETTLED' && /already cancelled/.test(error.message),
+  )
+  assert.equal(foldQuestions(store.read(handle)).get(closed!.id)?.settled, undefined, 'the refusal wrote nothing')
+
+  /** In the process that asked it, an answer still reaches the waiting turn. */
+  questions.answer(handle, only!.id, [{ id: 'q', selected: ['Yes'] }])
+  assert.deepEqual(await asked, { kind: 'answered', answers: [{ id: 'q', selected: ['Yes'] }] })
+})
+
 test('the tool answers compact JSON, shows timeout only in timed mode, and refuses a delegated agent', async () => {
   const legacy = setup()
   const tool = askUserTool(legacy.questions)

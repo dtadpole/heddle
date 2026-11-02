@@ -33,6 +33,8 @@ a display or a window.
 - `check-auth-quota.mjs` — a 401 fails the turn with DSH's "API key is invalid" and none of the provider's words
   (they can echo the key), and a quota-worded 429 with the provider's sentence and DSH's "Request quota exhausted.",
   sent once (S31).
+- `check-transport-cause.mjs` — a request to a refused port says why on each build (Node's `ECONNREFUSED`, the OS's
+  "Connection refused") and never says the baseUrl's query, fragment, user or password (#217).
 
 ## Running it
 

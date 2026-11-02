@@ -215,6 +215,9 @@ const EXIT_MARK: &str = "heddle-terminal-exit:";
 ///   group, so `cat` does not outlive it. The wrapper itself then dies of that signal, so the status is read
 ///   from the mark, not from the wrapper's own exit.
 ///
+/// - The PTY starts through [`signal_reset_argv`], so the shell and its programs begin with every signal at its
+///   default, whatever the server inherited (#210).
+///
 /// Both `kill ... 0` calls signal the wrapper's process group, so the wrapper must lead its own group
 /// (`process_group(0)`).
 pub fn terminal_argv(bsd: bool, confined: &[OsString]) -> Vec<OsString> {
@@ -227,8 +230,50 @@ pub fn terminal_argv(bsd: bool, confined: &[OsString]) -> Vec<OsString> {
         relay.into(),
         "heddle-terminal".into(),
     ];
+    argv.extend(signal_reset_argv(signal_reset_program()));
     argv.extend(pty_argv(bsd, confined));
     argv
+}
+
+/// Where the signal reset's interpreter is looked for: macOS ships it, and most Linux hosts carry it.
+const SIGNAL_RESET_PERL: &str = "/usr/bin/perl";
+
+/// The reset itself: every signal back to its default, then exec the rest of the argv as given (the block form of
+/// `exec` never goes through a shell, whatever the words hold).
+const SIGNAL_RESET: &str = "$SIG{$_} = 'DEFAULT' for keys %SIG; exec { $ARGV[0] } @ARGV or die \"heddle-terminal: exec $ARGV[0]: $!\\n\"";
+
+/// The step that starts the PTY with every signal at its default (#210), or nothing when `perl` is `None`.
+///
+/// A server started with a signal ignored (`nohup` ignores SIGHUP; a shell's `&` ignores SIGINT and SIGQUIT;
+/// `trap '' QUIT`) hands that disposition to everything it spawns: an ignored signal survives `exec`, and Rust's
+/// `Command` resets SIGPIPE only. bash then keeps it for every program it runs ("signals ignored upon entry to
+/// the shell cannot be trapped or reset"), so Ctrl-\ in a terminal quit nothing. The TypeScript build never had
+/// this: libuv sets every signal to its default in a child. Resetting a disposition takes `sigaction`, which needs
+/// `unsafe` in a `pre_exec` (forbidden in this workspace), and POSIX `sh` cannot reset a signal that was ignored on
+/// entry, so the reset is one `perl` exec, outside the sandbox, before `script`. The wrapper and its `cat` keep what
+/// the server gave them.
+pub fn signal_reset_argv(perl: Option<&Path>) -> Vec<OsString> {
+    match perl {
+        Some(perl) => vec![
+            perl.as_os_str().to_owned(),
+            "-e".into(),
+            SIGNAL_RESET.into(),
+            "--".into(),
+        ],
+        None => Vec::new(),
+    }
+}
+
+/// [`SIGNAL_RESET_PERL`] when it is there: without it the PTY starts with what the server inherited, as before.
+fn signal_reset_program() -> Option<&'static Path> {
+    runnable_reset_program(Path::new(SIGNAL_RESET_PERL))
+}
+
+/// `perl` when it can run: a regular file with an execute bit, as the TypeScript build asks `accessSync(X_OK)`. A
+/// `perl` that is there but not executable would end every terminal at once (exit 126), where the reset should
+/// fall back to starting the PTY as before (developer-ten's review of #210).
+fn runnable_reset_program(perl: &Path) -> Option<&Path> {
+    Some(perl).filter(|path| is_executable(path))
 }
 
 /// The PTY argv around the confined shell: BSD `script -q /dev/null <cmd>`, util-linux `script -qfec <cmd> /dev/null`.
@@ -701,9 +746,9 @@ impl Terminal {
     /// End the PTY's processes, softly and then for good.
     ///
     /// The descendants are collected first, while the tree is whole. The shell leads its own session inside the
-    /// PTY, so the `script` process group alone would miss it and its jobs. Each one gets SIGHUP, as closing a
-    /// terminal window sends, and SIGTERM. Whatever is still alive after DSH's `disposeGraceMs` gets SIGKILL,
-    /// along with the `script` group and the shell's group.
+    /// PTY, so the wrapper's process group (which holds `script`, #204) alone would miss it and its jobs. Each one
+    /// gets SIGHUP, as closing a terminal window sends, and SIGTERM. Whatever is still alive after DSH's
+    /// `disposeGraceMs` gets SIGKILL, along with the wrapper's group and the shell's group.
     async fn terminate(&self) {
         let grace = Duration::from_millis(self.limits.dispose_grace_ms);
         let Some(leader) = self.pid else {
@@ -1264,6 +1309,51 @@ mod tests {
     }
 
     #[test]
+    fn the_pty_starts_through_a_signal_reset_when_perl_is_there() {
+        let perl = Path::new(SIGNAL_RESET_PERL);
+        let reset = signal_reset_argv(Some(perl));
+        assert_eq!(
+            reset,
+            [SIGNAL_RESET_PERL, "-e", SIGNAL_RESET, "--"].map(OsString::from)
+        );
+        assert!(
+            SIGNAL_RESET.starts_with("$SIG{$_} = 'DEFAULT' for keys %SIG; exec { $ARGV[0] } @ARGV")
+        );
+        assert!(
+            signal_reset_argv(None).is_empty(),
+            "without perl the PTY starts as before"
+        );
+        if perl.is_file() {
+            let argv = terminal_argv(true, &shell_argv("/bin/sh", 80, 24));
+            assert_eq!(&argv[4..8], &reset[..], "between the relay and the PTY");
+            assert_eq!(argv[8], OsString::from("/usr/bin/script"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_perl_that_is_there_but_not_executable_is_not_used_for_the_reset() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("heddle-reset-perl-{}", new_terminal_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let perl = root.join("perl");
+        assert_eq!(runnable_reset_program(&perl), None, "missing");
+        std::fs::write(&perl, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&perl, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let unexecutable = runnable_reset_program(&perl).map(Path::to_path_buf);
+        std::fs::set_permissions(&perl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let executable = runnable_reset_program(&perl).map(Path::to_path_buf);
+        let folder = runnable_reset_program(&root).map(Path::to_path_buf);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(
+            unexecutable, None,
+            "there, mode 0644: TypeScript's X_OK refuses it"
+        );
+        assert_eq!(executable, Some(perl), "there, mode 0755");
+        assert_eq!(folder, None, "a folder is not a program");
+    }
+
+    #[test]
     fn the_pty_reads_through_a_relay_that_ends_its_group_when_the_server_end_closes() {
         let shell = shell_argv("/bin/sh", 80, 24);
         let argv = terminal_argv(true, &shell);
@@ -1279,7 +1369,9 @@ mod tests {
         );
         assert!(relay.contains(&format!("echo \"{EXIT_MARK}$?\" >&2; kill -TERM 0;")));
         assert_eq!(argv[3], OsString::from("heddle-terminal"));
-        assert_eq!(&argv[4..], pty_argv(true, &shell).as_slice());
+        let mut rest = signal_reset_argv(signal_reset_program());
+        rest.extend(pty_argv(true, &shell));
+        assert_eq!(&argv[4..], rest.as_slice());
     }
 
     #[test]
@@ -1784,6 +1876,72 @@ mod tests {
             );
             drop(child);
             let _ = std::fs::remove_dir_all(cwd);
+        }
+
+        /// A server started with signals ignored hands them to everything it spawns, and `/bin/sh` here is bash, which
+        /// keeps a signal ignored on entry for every program it runs. The PTY's reset gives those programs every
+        /// signal at its default all the same, so Ctrl-\ quits a program as it does in any terminal (#210).
+        #[tokio::test]
+        async fn the_shells_programs_start_with_every_signal_at_its_default() {
+            let _turn = SERIAL.lock().await;
+            let cwd = scratch("signals");
+            let mut command = Command::new("/usr/bin/perl");
+            command
+                .args([
+                    "-e",
+                    "$SIG{QUIT} = $SIG{HUP} = 'IGNORE'; exec { $ARGV[0] } @ARGV or die",
+                    "--",
+                ])
+                .args(terminal_argv(true, &shell_argv("/bin/sh", 80, 24)))
+                .current_dir(&cwd)
+                .env("TERM", "xterm-256color")
+                .env("SHELL", "/bin/sh")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .process_group(0)
+                .kill_on_drop(true);
+            let mut child = command.spawn().expect("the wrapper starts");
+            let mut stdin = child.stdin.take().expect("its stdin");
+            let mut stdout = child.stdout.take().expect("its stdout");
+            // Each program signals itself and says so if it lives. The quotes keep the echoed command line from
+            // matching; one line per program, so the shell reads each on its own.
+            let mut probe = String::new();
+            for signal in ["QUIT", "HUP", "INT", "TERM"] {
+                let (head, tail) = signal.split_at(1);
+                probe.push_str(&format!(
+                    "sh -c 'kill -{signal} $$; echo SURVIVED-{head}\"\"{tail}'\n"
+                ));
+            }
+            probe.push_str("echo PROBE-$((1+1))\n");
+            stdin
+                .write_all(probe.as_bytes())
+                .await
+                .expect("the probe is written");
+            let mut seen = String::new();
+            let mut buffer = [0u8; 4096];
+            let deadline = Instant::now() + Duration::from_secs(8);
+            while !seen.contains("PROBE-2") {
+                let left = deadline.saturating_duration_since(Instant::now());
+                match tokio::time::timeout(left, stdout.read(&mut buffer)).await {
+                    Ok(Ok(read)) if read > 0 => {
+                        seen.push_str(&String::from_utf8_lossy(&buffer[..read]));
+                    }
+                    _ => break,
+                }
+            }
+            drop(stdin);
+            drop(child);
+            let _ = std::fs::remove_dir_all(cwd);
+            assert!(seen.contains("PROBE-2"), "the shell answered: {seen:?}");
+            let survived: Vec<&str> = ["QUIT", "HUP", "INT", "TERM"]
+                .into_iter()
+                .filter(|signal| seen.contains(&format!("SURVIVED-{signal}")))
+                .collect();
+            assert!(
+                survived.is_empty(),
+                "a program in the terminal kept these signals ignored: {survived:?}"
+            );
         }
 
         /// The wrapper's `kill 0` reaches only its own group: it leads one, apart from the server's (#204).
