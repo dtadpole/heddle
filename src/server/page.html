@@ -3860,7 +3860,7 @@
     once, before the one transition that removes the file boundary.
   -->
   <div id="access-menu" role="menu" aria-label="the access mode this session runs under" data-i18n-aria-label="access.menu" hidden></div>
-  <div id="access-dialog" role="dialog" aria-modal="true" aria-label="Enable Full access?" data-i18n-aria-label="access.confirmTitle" hidden>
+  <div id="access-dialog" role="dialog" aria-modal="true" aria-label="Enable Full access?" data-i18n-aria-label="access.confirmTitle" tabindex="-1" hidden>
     <div class="card">
       <div class="head">
         <h2 id="access-dialog-title" data-i18n="access.confirmTitle">Enable Full access?</h2>
@@ -6815,6 +6815,48 @@ function markStopped() {
 }
 
 /**
+ * Draw a turn's recorded end where a reload draws it. The record is the `ended` on the turn's `assistant/completed`. The
+ * notice goes on the turn's answer when the last row is one, before its usage row, and otherwise as a row of its own.
+ *
+ * Every page attached to the session gets that record on the event stream. So a page that did not send the turn marks
+ * it too: a reloaded page, a second tab, or a turn the CLI or a goal round ran. DSH likewise draws a turn's end from the
+ * session's events, whoever sent it. #34's fix read the stop only from the sending page's own stream, so a reloaded page
+ * drew no "Stopped by the caller" until another reload (#201).
+ *
+ * The sending page gets the reason on both streams, so a turn already marked takes the recorded words in place of the
+ * notice it drew, rather than a second one.
+ */
+function markTurnEnded(ended) {
+  const notice = turnNotice(ended)
+  const last = lastTurnRow()
+  if (last !== null && last.dataset.kind === 'assistant') {
+    const drawn = last.querySelector(':scope > .turn-notice')
+    if (drawn !== null) drawn.replaceWith(notice)
+    else last.insertBefore(notice, last.querySelector(':scope > .turn-usage'))
+    return
+  }
+  if (last !== null && last.classList.contains('turn-notice')) last.replaceWith(notice)
+  else {
+    log.append(notice)
+    keepRunningLast()
+  }
+}
+
+/* recorded-end:begin */
+/**
+ * The reasons a recorded `assistant/completed` gives for ending early, or null when it gives none or the turn failed.
+ * A failed turn is drawn by its failure row, from `turn/failed` or the turn's own `error`. Its "failed: …" reason is not
+ * drawn a second time.
+ */
+function recordedEnd(event) {
+  if (event === null || typeof event !== 'object' || event.type !== 'assistant/completed') return null
+  if (event.error !== undefined || !Array.isArray(event.ended)) return null
+  const ended = event.ended.filter((reason) => typeof reason === 'string' && reason.length > 0)
+  return ended.length > 0 ? ended : null
+}
+/* recorded-end:end */
+
+/**
  * A completed turn's token usage, DSH's per-Turn usage row: closed it reads the total, open it lists the buckets the
  * provider reported, and a bucket nobody reported is left out rather than shown as zero.
  */
@@ -7663,6 +7705,14 @@ function settleLiveToolCall(chunk) {
   }
   paintTodoCard(card)
   return true
+}
+
+/**
+ * Whether a logged event replaced a span of the model's surface (`surfaceOp: { op: 'replace', … }`) instead of appending
+ * to it. The server's transcript and ledger folds read the marker the same way.
+ */
+function isReplacementCopy(event) {
+  return typeof event.surfaceOp === 'object' && event.surfaceOp !== null && event.surfaceOp.op === 'replace'
 }
 
 /**
@@ -11696,6 +11746,13 @@ function drawSessionEvent(payload) {
     }
     return
   }
+  /**
+   * A replacement copy is not drawn. It is a message that stands in for part of the model's surface: today, a tool result
+   * cut down under context pressure. It is what the model is sent from now on, not something a person reads; the original
+   * stays in the log and on its card. DSH's chat keeps such a copy model-only (`isAppendSurfaceEvent`). Drawn, it was
+   * appended to its call's full output, which then showed twice until a reload (#186).
+   */
+  if (event.type === 'message' && isReplacementCopy(event)) return
   if (event.type === 'assistant/chunk' && event.chunk.type === 'text-delta') {
     settleReasoning()
     add('assistant', event.chunk.text)
@@ -11740,6 +11797,12 @@ function drawSessionEvent(payload) {
       add(failed ? 'denied' : 'tool', text, false, undefined, { state: failed ? 'error' : 'ok', result: text })
     }
   }
+  /**
+   * Why a turn ended early is drawn from its record on every page attached to the session, so a page that did not send
+   * the turn says it too. Before, a reloaded page showed nothing after its Stop until the next reload (#201).
+   */
+  const recorded = recordedEnd(event)
+  if (recorded !== null) markTurnEnded(recorded)
   /**
    * The ledger is a projection and is refetched rather than appended to, so following it means asking for it
    * again — and only when the reader has not scrolled away.
@@ -13100,11 +13163,7 @@ async function runTurn(text, key, attachments = [], onAccepted) {
        * A turn that stopped early says why. The live path reads the reason from the `done` payload; the same
        * reason travels on the completed event, so a reload shows it again from the transcript.
        */
-      if (Array.isArray(payload.ended) && payload.ended.length > 0) {
-        const last = lastTurnRow()
-        if (last !== null && last.dataset.kind === 'assistant') last.append(turnNotice(payload.ended))
-        else log.append(turnNotice(payload.ended))
-      }
+      if (Array.isArray(payload.ended) && payload.ended.length > 0) markTurnEnded(payload.ended)
       /** The turn is over, so nothing in the transcript is still arriving — DSH's rows become settled. */
       settleReasoning()
       settleChat()
@@ -14148,7 +14207,8 @@ function messageAttachments(attachments) {
  * path travels with the message.
  */
 async function addPickedFiles(files) {
-  const added = []
+  // Each upload owns its result: a later refusal must not discard an already admitted file (#42).
+  const refused = []
   for (const file of files) {
     try {
       const response = await fetch(`/api/uploads?name=${encodeURIComponent(file.name)}`, { method: 'POST', body: file })
@@ -14159,23 +14219,24 @@ async function addPickedFiles(files) {
       const saved = await response.json()
       // The page's own preview of an image, for the queue's thumbnail before the message reaches the log.
       const preview = /^image\//.test(String(file.type ?? '')) ? URL.createObjectURL(file) : undefined
-      added.push({ path: saved.path, name: file.name, bytes: saved.bytes, ...(preview !== undefined ? { preview } : {}) })
+      pendingAttachments = [...pendingAttachments, { path: saved.path, name: file.name, bytes: saved.bytes, ...(preview !== undefined ? { preview } : {}) }]
+      renderPendingAttachments()
     } catch (error) {
-      showAttachFailure(files, error)
-      return
+      refused.push({ name: file.name, reason: (error && error.message) || String(error) })
+      showAttachFailure(refused)
     }
   }
-  pendingAttachments = [...pendingAttachments, ...added]
-  renderPendingAttachments()
 }
 
-/** Say why a chosen file could not be added, in the menu the person opened. */
-function showAttachFailure(files, error) {
+/** Say why each refused file could not be added, one line per file. */
+function showAttachFailure(refused) {
   attachMenu.replaceChildren()
-  const note = document.createElement('div')
-  note.className = 'meta'
-  note.textContent = `could not add ${files.map((file) => file.name).join(', ')}: ${(error && error.message) || error}`
-  attachMenu.append(note)
+  for (const { name, reason } of refused) {
+    const note = document.createElement('div')
+    note.className = 'meta'
+    note.textContent = `could not add ${name}: ${reason}`
+    attachMenu.append(note)
+  }
   attachMenu.hidden = false
   attachButton.setAttribute('aria-expanded', 'true')
 }
@@ -14354,6 +14415,25 @@ function closeAccessGate() {
   if (accessDialog.hidden) return
   accessDialog.hidden = true
   accessButton.focus()
+}
+
+/**
+ * The custom risk card needs the containment native dialogs already provide elsewhere on this page.
+ * After DSH's RiskConfirmation -> Modal focus hook: use the current enabled, visible controls on every Tab.
+ * This is only the risk gate's plain Tab cycle; Escape cancellation and native control activation stay unchanged.
+ */
+function handleAccessGateTab(keyEvent) {
+  if (accessDialog.hidden || keyEvent.key !== 'Tab' || keyEvent.defaultPrevented ||
+      keyEvent.ctrlKey || keyEvent.altKey || keyEvent.metaKey || keyEvent.isComposing || keyEvent.keyCode === 229) return
+  const focusables = [...accessDialog.querySelectorAll('button, input, select, textarea, a[href], [tabindex]')].filter((element) =>
+    element.tabIndex >= 0 && !element.matches(':disabled') && !element.closest('[hidden], [inert]') &&
+    element.getClientRects().length > 0 && !['hidden', 'collapse'].includes(getComputedStyle(element).visibility))
+  keyEvent.preventDefault()
+  const at = focusables.indexOf(document.activeElement)
+  const next = at < 0
+    ? (keyEvent.shiftKey ? focusables.length - 1 : 0)
+    : (at + (keyEvent.shiftKey ? -1 : 1) + focusables.length) % focusables.length
+  ;(focusables[next] ?? accessDialog).focus()
 }
 
 /**
@@ -14872,6 +14952,7 @@ document.addEventListener('click', (clickEvent) => {
   if (!accessMenu.contains(clickEvent.target) && clickEvent.target !== accessButton) closeAccessMenu()
 })
 document.addEventListener('keydown', (keyEvent) => {
+  handleAccessGateTab(keyEvent)
   if (keyEvent.key !== 'Escape') return
   if (!accessDialog.hidden) {
     closeAccessGate()

@@ -107,8 +107,9 @@ test('a failure the loop already recorded is said once, in the loop\'s own words
   const sandbox = new SandboxService(ctx, { workspaceRoot: scratch, backend: 'none' })
   new ToolRegistry(ctx, new ApprovalService(ctx, { mode: 'allow' }), sandbox, sessions)
   new ContextService(ctx, sessions.store, { instructionsMaxBytes: 100_000, contextWindow: 100_000 })
-  // Port 9 (discard) refuses connections on loopback.
-  new ModelService(ctx, [{ name: 'double', kind: 'openai-chat', baseUrl: 'http://127.0.0.1:9/v1', model: 'm' } as never])
+  // Port 9 (discard) refuses connections on loopback. The failure is the subject here, not the retry: DSH's default
+  // policy would retry it five times (about 15 s).
+  new ModelService(ctx, [{ name: 'double', kind: 'openai-chat', baseUrl: 'http://127.0.0.1:9/v1', model: 'm', retryPolicy: { maxRetries: 0 } } as never])
 
   const failOnce = async (): Promise<string> => {
     const error = await runTurn(ctx, { session, endpoint: 'double', prompt: 'go', maxRounds: 1 }).then(

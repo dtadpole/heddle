@@ -79,6 +79,16 @@ test('the mode event is log-only, and a notice is added only once the model has 
   )
 })
 
+test("the exit tool's leave writes the mode alone: the person approved a plan, they did not switch the mode (#228)", () => {
+  const { store, handle, log } = session()
+  setPlanMode(log, handle, true)
+  store.append(handle, { type: 'model/request', messages: 1 })
+  assert.equal(setPlanMode(log, handle, false, { narrate: false }), 'committed')
+  assert.equal(planActive(store.read(handle)), false)
+  assert.equal(store.read(handle).some((event) => event.type === 'context/note'), false, 'no "switched back to the default mode" notice')
+  assert.equal(setPlanMode(log, handle, false, { narrate: false }), 'noop')
+})
+
 test("the policy section is DSH's, and it goes in after the system messages a request opens with", () => {
   assert.match(PLAN_POLICY_SECTION, /^You are in plan mode\. Stay in plan mode until the user approves your plan through exit_plan_mode/)
   assert.match(PLAN_POLICY_SECTION, /Do not edit or write files, change configuration/)
@@ -245,7 +255,7 @@ test("the review over the question service asks DSH's plan-review question and r
   const asked: unknown[] = []
   const asker = (answer: Awaited<ReturnType<QuestionAsker['ask']>>): QuestionAsker => ({
     ask: async (_session, questions, options) => {
-      asked.push({ questions, timeout: options.timeout })
+      asked.push({ questions, timeout: options.timeout, continuable: options.continuable })
       return answer
     },
   })
@@ -265,7 +275,8 @@ test("the review over the question service asks DSH's plan-review question and r
       },
     ],
     timeout: -1,
-  })
+    continuable: false,
+  }, 'only the turn that asked the review can take its answer (#228)')
   assert.deepEqual(await review({ kind: 'answered', answers: [{ id: 'plan-review', selected: ['Keep planning'] }] }), { kind: 'keep-planning', feedback: '' })
   assert.deepEqual(await review({ kind: 'answered', answers: [{ id: 'plan-review', selected: [], custom: ' split it ' }] }), { kind: 'keep-planning', feedback: 'split it' })
   assert.deepEqual(await review({ kind: 'answered', answers: [{ id: 'plan-review', selected: ['Approve'], custom: 'but rename it' }] }), { kind: 'keep-planning', feedback: 'but rename it' }, 'typed words are feedback, never approval')
