@@ -30,7 +30,7 @@
 //! | `GET /api/file?path=` | `503 {error}` workspace plugin not loaded · `400 {error}` no path · `400 {error: "<canonical> is not under any workspace root"}` · `200` pretty [`FileReading`] fields then [`Rendered`] fields · `404 {error}` not a file · `415 {error}` not text · `400 {error, code: "workspace-file/unreadable"}` text-read permission denied (basename only, like #106) · `500 {error, code: "workspace-file/read-failed"}` unexpected text-read I/O |
 //! | `GET /api/raw?path=` | `400 text "a path is required\n"` · `404 text "no such asset\n"` outside every root, plugin absent, or not a file · `200` the bytes, `content-type` from the inline table (else `application/octet-stream`), `content-length`, `content-disposition: inline` for an inline type, else `attachment; filename="<leaf>"`, or for a leaf beyond visible ASCII (or with `"` or `\`) `attachment; filename="<ASCII fallback>"; filename*=UTF-8''<percent-encoded leaf>` (`attachment_disposition`) · **every** answer, success or failure, also carries `content-security-policy: sandbox; default-src 'none'` and `x-content-type-options: nosniff` (`FILE_ANSWER_POLICY`, as DSH's file route) |
 //! | `GET /api/uploads/{leaf}?session=` | `404 text "no such asset\n"` for an empty leaf, `.`, `..`, a separator, or a path that leaves the canonical upload directory · `404 text "this upload is not referenced by this session\n"` when no session is named, it is unknown, or its log carries no message part with this leaf (DSH's `session/attachment`) · `200` the bytes, headers as `/api/raw` with the leaf as filename · every answer hardened as `/api/raw`'s |
-//! | `POST /api/uploads?name=` | body = the file's bytes · `413 text "the file is larger than this server accepts (50 MiB)\n"` · `400 text "an empty file has nothing to add\n"` · `200` compact [`SavedUpload`] |
+//! | `POST /api/uploads?name=` | body = the file's bytes · `413 text "the file is larger than this server accepts (50 MiB)\n"` · `400 text "an empty image is not valid\n"` for empty images · ordinary zero-byte files accepted · `200` compact [`SavedUpload`] |
 //! | `POST /api/markdown` | body `{"text": string}` · `413 text "request too large\n"` over 10 MiB · `400 text "the body must be JSON\n"` · `400 {error: "text is required"}` · `200` compact `{"html": render_markdown(text)}` (no base) |
 //! | `POST /api/workspaces/pick` | `501 {error: reason}` when unavailable · `200` pretty [`PickerOutcome`] (`picked` or `cancelled`) |
 //! | `GET /api/directories?path=` | `200` pretty [`DirectoryListing`] · `400 {error, code}` (see [`crate::directories`]) |
@@ -367,6 +367,12 @@ async fn store(
     request: Request,
 ) -> Response {
     let limit = MAX_UPLOAD_BYTES as usize;
+    let content_type = request
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string();
     let body = match axum::body::to_bytes(request.into_body(), limit + 1).await {
         Ok(body) => body,
         Err(_) => return too_large_upload(),
@@ -374,13 +380,12 @@ async fn store(
     if body.len() > limit {
         return too_large_upload();
     }
-    if body.is_empty() {
-        return text(
-            StatusCode::BAD_REQUEST,
-            "an empty file has nothing to add\n",
-        );
-    }
     let name = params.name.as_deref().unwrap_or("file");
+    if let Err(error) =
+        crate::attachments::validate_upload_content(name, body.len() as u64, &content_type)
+    {
+        return text(StatusCode::BAD_REQUEST, &format!("{error}\n"));
+    }
     match save_upload(&files.host.heddle_home(), name, &body, SystemTime::now()) {
         Ok(saved) => json(
             StatusCode::OK,
@@ -1473,8 +1478,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_empty_upload_is_refused() {
+    async fn ordinary_empty_uploads_are_stored_and_admitted() {
         let (base, host) = scratch("uploads-empty");
+        let directory = upload_directory(&host.heddle_home());
         let (status, _, bytes) = call(
             routes_of(host),
             "POST",
@@ -1482,8 +1488,48 @@ mod tests {
             Some(Vec::new()),
         )
         .await;
-        assert_eq!(status, Status::BAD_REQUEST);
-        assert_eq!(body_text(&bytes), "an empty file has nothing to add\n");
+        assert_eq!(status, Status::OK);
+        let saved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(saved["bytes"], 0);
+        let path = saved["path"].as_str().unwrap();
+        assert!(std::fs::read(path).unwrap().is_empty());
+        assert!(matches!(
+            crate::attachments::read_attachment(&directory, &serde_json::json!(path)).unwrap(),
+            crate::attachments::AttachmentPart::File { bytes: 0, .. }
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn an_empty_raster_upload_is_refused_without_storing() {
+        let (base, host) = scratch("uploads-empty-image");
+        let directory = upload_directory(&host.heddle_home());
+        let routes = routes_of(host);
+        for extension in ["png", "PNG", "jpg", "jpeg", "webp", "gif"] {
+            let (status, _, bytes) = call(
+                routes.clone(),
+                "POST",
+                &format!("/api/uploads?name=empty.{extension}"),
+                Some(Vec::new()),
+            )
+            .await;
+            assert_eq!(status, Status::BAD_REQUEST);
+            assert_eq!(body_text(&bytes), "an empty image is not valid\n");
+        }
+        let request = HttpRequest::builder()
+            .method("POST")
+            .uri("/api/uploads?name=empty.txt")
+            .header(header::CONTENT_TYPE, "image/png")
+            .body(Body::empty())
+            .unwrap();
+        let response = routes.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), Status::BAD_REQUEST);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body_text(&bytes), "an empty image is not valid\n");
+        assert!(
+            !directory.exists(),
+            "refused images leave no orphan uploads"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
