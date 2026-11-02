@@ -80,7 +80,7 @@ function harness(admission: Admission = 'streamed', outcome = 'done'): Harness {
   const paints: Snapshot[] = []
   const names = ['runTurn', 'sendTurn', 'adoptSession', 'selectionForSeat', 'selectionForTurn', 'drawSessionEvent', 'drawKeptEvents', 'keptToDraw', 'refreshSessionStats', 'updateStatusBar',
     'addUsage', 'formatTokenCount', 'formatRate', 'formatCacheHit', 'formatDurationMs',
-    'formatExactCount', 'formatWindow', 'statPanelRows']
+    'formatExactCount', 'formatWindow', 'statPanelRows', 'isReplacementCopy']
   const h = runInNewContext(`
     let current = 'S', composerKey = 'S';
     const view = 'chat';
