@@ -8721,6 +8721,12 @@ function paintComposerAccess() {
   gateModelSeat()
 }
 
+/** The seat's title: what it is set to, or, while a subagent's session gates it, why it cannot be changed. */
+const SUBAGENT_SEAT_TITLE = 'Model selection is unavailable for a subagent session'
+function seatTitle(title) {
+  return document.getElementById('model-trigger')?.dataset.subagent === 'true' ? SUBAGENT_SEAT_TITLE : title
+}
+
 /** A subagent's session offers no model choice (`SessionRules.modelSelectable`, issue #175); its seat still names it. */
 function gateModelSeat() {
   const modelTrigger = document.getElementById('model-trigger')
@@ -8729,7 +8735,7 @@ function gateModelSeat() {
   if (gated) {
     modelTrigger.disabled = true
     modelTrigger.dataset.subagent = 'true'
-    modelTrigger.title = 'Model selection is unavailable for a subagent session'
+    modelTrigger.title = SUBAGENT_SEAT_TITLE
   } else if (modelTrigger.dataset.subagent === 'true') {
     delete modelTrigger.dataset.subagent
     renderModelSeat()
@@ -12963,7 +12969,7 @@ function renderModelSeat() {
     modelEffort.hidden = true
     modelEffort.textContent = ''
     modelTrigger.setAttribute('aria-label', `Select model, current ${missing}`)
-    modelTrigger.title = missing
+    modelTrigger.title = seatTitle(missing)
     return
   }
   const modelId = selectedModelId(option)
@@ -12972,7 +12978,7 @@ function renderModelSeat() {
     modelEffort.hidden = true
     modelEffort.textContent = ''
     modelTrigger.setAttribute('aria-label', 'Select model')
-    modelTrigger.title = 'Select model'
+    modelTrigger.title = seatTitle('Select model')
     return
   }
   const label = modelId === null ? wanted : modelTitle(option, modelId)
@@ -12989,7 +12995,7 @@ function renderModelSeat() {
     'aria-label',
     effort.name === undefined ? `Select model, current ${label}` : `Select model, current ${label}, reasoning effort ${effort.name}`,
   )
-  modelTrigger.title = effort.name === undefined ? label : `${label} · ${effort.name}`
+  modelTrigger.title = seatTitle(effort.name === undefined ? label : `${label} · ${effort.name}`)
 }
 
 /** The selection a turn names: the seat's endpoint, model (when chosen) and enforceable effort. */
