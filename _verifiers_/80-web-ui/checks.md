@@ -1,7 +1,7 @@
 ---
 title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
-modified: 2026-11-02T00:05:00Z
+modified: 2026-11-02T03:35:00Z
 level: L3
 version: 1.8.0
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
@@ -15,6 +15,21 @@ grounded_in:
 ## What decides it
 
 - [`check.mjs`](check.mjs) — the port, the page, the API and the live stream.
+- [`check-offline-turn-count.mjs`](check-offline-turn-count.mjs) — issue #116, authored contract rather than runtime
+  evidence: the actual built CLI selected by `HEDDLE_BIN` (TypeScript build otherwise), with its own home,
+  workspace, port-zero server and OpenAI-chat provider double declaring a 1,000,000-token window. A named session
+  starts with one accepted user turn and one counter. A real headless browser's DevTools `Network` offline setting,
+  followed by the real Send button, leaves **every observed counter paint** at `1 turns`, no matching user row,
+  no raw provider request carrying the draft, no new persisted user fact or model request, and real server stats
+  still one. After reconnect the recovered draft remains unsent and the count stays one. The #128 stream-open gate
+  may reject before POST; the check does not demand a POST or modify EventSource. A different, actually accepted
+  second prompt reaches the check's provider, which answers HTTP 400: the persisted user fact and `turn/failed`
+  record make this a legitimate counted turn, and both UI and server stats must read two. This is not a backend
+  counter waiver, a redefinition of turns, or a comparison with DSH's separate step count. No optional mocked
+  failed-stats GET is included; all asserted stats come from the actual private server. Startup, browser and body
+  together are bounded at 75 seconds inside a 90-second test, with separate bounded cleanup. The shared
+  `HEDDLE_VERIFY_UI=0` labelled browser skip applies without an environment assertion. **Not run by the author**;
+  the parent must build both artifacts and run the same verifier against each before claiming runtime proof.
 - [`check-session-id.mjs`](check-session-id.mjs) — Copy Session ID at DSH parity (row C20): the session row's menu
   ends with it, pressing it closes the menu and gives the clipboard the complete id with the Toast "Session ID
   copied", and a refused clipboard shows "Copy failed. Try again." instead.
@@ -30,6 +45,18 @@ grounded_in:
   every stream, numbered, and a page redraws a rename and a new workspace made elsewhere without a reload; an
   approval answered on one page closes on every page; a failed turn reaches every client and the log, and the
   transcript carries it as the stop reason (DSH parity phase B, developer-ten; R-developer-six-2).
+- [`check-history-read-failure.mjs`](check-history-read-failure.mjs) — headless scratch-browser coverage for a rejected
+  history GET and a rejected successful response's JSON read. Two distinct named sessions are created on an owned
+  port-zero server with private home, config, session store and workspace. A opens through the current
+  `showSession(id)` boolean seam; its real SSE tail is buffered during the held read, then discarded on failure.
+  The failure alert has no invented `(0)` status, the header and disabled composer say *Session unavailable*,
+  and live rows from both A and B cannot replace it. Draft, Enter, submit and Send write nothing. Opening B returns
+  `true`, clears the failure and restores its own history and writable composer without A's rows. Authoring/syntax
+  checks are not browser evidence. Build first and run from the checkout pinned by the shared `repoRoot` helper:
+  `HEDDLE_VERIFY_UI=1 node _tools_/verify-runner/run.mjs _verifiers_/80-web-ui/check-history-read-failure.mjs --json`.
+  Unset `HEDDLE_BIN` to judge the TypeScript build; set it to the parent's already-built candidate binary to judge Rust.
+  Each scenario has a 60-second test deadline, bounded startup/fetch/browser calls and bounded cleanup, with a
+  65-second process backstop. Missing build/browser reports unjudged, including the standard browser-disabled target.
 - [`check-chat-view.mjs`](check-chat-view.mjs) — the chat's shape: a tool call and its result folded into
   one turn, and one element drawn for it, with the person and the model keeping their own. Its minimap
   freshness check compares the served page marker with the SHA256 prefix of the fixture's built HTML,
@@ -85,6 +112,25 @@ grounded_in:
 - [`check-access.mjs`](check-access.mjs) — the access-mode chip as a control: its reference anatomy (shield,
   label, chevron), the menu with a checked current entry, the pending state of a change, the full-access risk
   gate, a reload coming back to the session's mode, and the server refusing an unconfirmed escalation.
+- [`check-access-focus.mjs`](check-access-focus.mjs) — headless functional keyboard containment for the shared
+  source page's custom full-access risk card (#103), served on a private port 0 with API/authentication fixtures
+  that refuse writes. Three candidates before acknowledgement and four after cycle with native Tab and Shift+Tab;
+  the checkbox keeps native Space, buttons keep native Enter, Escape/Cancel/Close return to the access chip, and
+  only explicit Enable activation attempts a confirmed permission request. This does not claim full accessibility
+  or independently verify both built servers. The exact installed DSH reference is the permission-presets client's
+  `RiskConfirmation`, supplied by primitives and shipped in `dsh-web-frontend/dist/assets/index-CN7NIWNw.js`:
+  named export `RiskConfirmation` maps to `uA`, which calls `Modal` (`S_`), which calls focus hook `x_`.
+  Heddle retains its existing custom card and initial/return focus, rather than redesigning it as a native dialog.
+- [`check-access-focus-delivered.mjs`](check-access-focus-delivered.mjs) — headless delivered-surface focus proof for
+  #103 through the actual built CLI, or the binary named by `HEDDLE_BIN`, on private port 0 with isolated HOME,
+  HEDDLE_HOME and workspace, a scripted offline session explicitly opened by id, and workspace-write configured
+  before startup. Real pointer/menu input opens the unchanged delivered risk card; native Tab and Shift+Tab cycle
+  three controls before Space acknowledgement and four after. Escape, native Enter on Cancel, and native Enter on
+  Close return focus to the access chip. Enable is never activated and no permission write is sent; a pass-through
+  browser fetch recorder asserts zero permission or Settings POSTs, and the actual status/session APIs still report
+  workspace-write after every dismissal. Startup, fetch including body, cleanup and test are bounded; the standard
+  `HEDDLE_VERIFY_UI=0` skip applies. This supplements the source fixture, does not mock page functions or responses,
+  and only proves the delivered build actually selected for that run, not an unrun second build or full accessibility.
 - [`check-workspaces.mjs`](check-workspaces.mjs) — the left column's workspace controls, add, rename and delete, at
   DSH parity: registering a folder over the API the dialog posts to, the refusals that keep the controls honest
   (a rename to another workspace's name is `409 workspace/name-conflict`), delete removing the registration while its
