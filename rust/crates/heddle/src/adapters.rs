@@ -1685,6 +1685,14 @@ impl heddle_goal::RoundRunner for GoalRounds {
                 .map_err(|error| error.to_string())
         })
     }
+
+    /// A person's prompt queued in the session's next-turn inbox goes before the next round (#162, #177).
+    fn competing(&self, session: &str) -> bool {
+        self.sessions.open(session).is_some_and(|handle| {
+            heddle_session::inbox::pending_inbox(self.sessions.store(), &handle)
+                .is_ok_and(|inbox| !inbox.next_turn.is_empty())
+        })
+    }
 }
 
 impl Component for GoalDriverComponent {
