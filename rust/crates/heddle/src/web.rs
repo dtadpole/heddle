@@ -292,6 +292,7 @@ impl TurnRunner for Turns {
             let handle = sessions
                 .open(&request.session)
                 .ok_or_else(|| ServiceError::new(format!("no session '{}'", request.session)))?;
+            let claimed = handle.clone();
             let mut options =
                 heddle_agent::RunTurnOptions::new(handle, request.endpoint, request.prompt);
             options.attachments = request
@@ -301,8 +302,17 @@ impl TurnRunner for Turns {
                 .collect();
             options.model = request.model;
             options.reasoning_effort = request.reasoning_effort;
-            // A queued row's claim wrote its user message with the claim (#162); the turn answers it.
             options.answer_pending = request.answer_pending;
+            // A drained turn claims the session's first queued row once it holds the session (#162): the claim splice
+            // and its user message, one write, where the prompt would be written.
+            if request.claim_queued {
+                let store = Arc::clone(sessions.store());
+                options.claim = Some(heddle_agent::TurnClaim::new(move || {
+                    heddle_session::inbox::claim_next_turn(&store, &claimed)
+                        .map(|row| row.map(|row| row.content))
+                        .map_err(|error| heddle_agent::PortError(error.to_string()))
+                }));
+            }
             // The page's rule is DSH's: no round cap unless the server was started with one.
             options.max_rounds = match request.max_rounds {
                 Some(rounds) => heddle_agent::RoundLimit::Rounds(rounds),
