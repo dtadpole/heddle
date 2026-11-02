@@ -15453,9 +15453,13 @@ async function showFile(node) {
   }
 }
 
-/** A language change draws the file the panel shows again, so its head and any note read in the new words (#80). */
+/**
+ * A language change draws the file the panel shows again, so its head and any note read in the new words (#80). Not
+ * while Automation tasks covers the panel: opening that page leaves `view` as it was, and showFile would close it
+ * under the person (developer-ten). The file is drawn in the new words the next time it is shown.
+ */
 window.addEventListener('heddle:locale', () => {
-  if (view === 'file' && shownFile !== null) void showFile(shownFile)
+  if (view === 'file' && shownFile !== null && !schedState.pageOpen) void showFile(shownFile)
 })
 
 /**
