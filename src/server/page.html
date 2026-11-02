@@ -5306,6 +5306,48 @@ function markStopped() {
 }
 
 /**
+ * Draw a turn's recorded end where a reload draws it. The record is the `ended` on the turn's `assistant/completed`. The
+ * notice goes on the turn's answer when the last row is one, before its usage row, and otherwise as a row of its own.
+ *
+ * Every page attached to the session gets that record on the event stream. So a page that did not send the turn marks
+ * it too: a reloaded page, a second tab, or a turn the CLI or a goal round ran. DSH likewise draws a turn's end from the
+ * session's events, whoever sent it. #34's fix read the stop only from the sending page's own stream, so a reloaded page
+ * drew no "Stopped by the caller" until another reload (#201).
+ *
+ * The sending page gets the reason on both streams, so a turn already marked takes the recorded words in place of the
+ * notice it drew, rather than a second one.
+ */
+function markTurnEnded(ended) {
+  const notice = turnNotice(ended)
+  const last = lastTurnRow()
+  if (last !== null && last.dataset.kind === 'assistant') {
+    const drawn = last.querySelector(':scope > .turn-notice')
+    if (drawn !== null) drawn.replaceWith(notice)
+    else last.insertBefore(notice, last.querySelector(':scope > .turn-usage'))
+    return
+  }
+  if (last !== null && last.classList.contains('turn-notice')) last.replaceWith(notice)
+  else {
+    log.append(notice)
+    keepRunningLast()
+  }
+}
+
+/* recorded-end:begin */
+/**
+ * The reasons a recorded `assistant/completed` gives for ending early, or null when it gives none or the turn failed.
+ * A failed turn is drawn by its failure row, from `turn/failed` or the turn's own `error`. Its "failed: …" reason is not
+ * drawn a second time.
+ */
+function recordedEnd(event) {
+  if (event === null || typeof event !== 'object' || event.type !== 'assistant/completed') return null
+  if (event.error !== undefined || !Array.isArray(event.ended)) return null
+  const ended = event.ended.filter((reason) => typeof reason === 'string' && reason.length > 0)
+  return ended.length > 0 ? ended : null
+}
+/* recorded-end:end */
+
+/**
  * A completed turn's token usage, DSH's per-Turn usage row: closed it reads the total, open it lists the buckets the
  * provider reported, and a bucket nobody reported is left out rather than shown as zero.
  */
@@ -10148,6 +10190,12 @@ function drawSessionEvent(payload) {
     }
   }
   /**
+   * Why a turn ended early is drawn from its record on every page attached to the session, so a page that did not send
+   * the turn says it too. Before, a reloaded page showed nothing after its Stop until the next reload (#201).
+   */
+  const recorded = recordedEnd(event)
+  if (recorded !== null) markTurnEnded(recorded)
+  /**
    * The ledger is a projection and is refetched rather than appended to, so following it means asking for it
    * again — and only when the reader has not scrolled away.
    */
@@ -11507,11 +11555,7 @@ async function runTurn(text, key, attachments = [], onAccepted) {
        * A turn that stopped early says why. The live path reads the reason from the `done` payload; the same
        * reason travels on the completed event, so a reload shows it again from the transcript.
        */
-      if (Array.isArray(payload.ended) && payload.ended.length > 0) {
-        const last = lastTurnRow()
-        if (last !== null && last.dataset.kind === 'assistant') last.append(turnNotice(payload.ended))
-        else log.append(turnNotice(payload.ended))
-      }
+      if (Array.isArray(payload.ended) && payload.ended.length > 0) markTurnEnded(payload.ended)
       /** The turn is over, so nothing in the transcript is still arriving — DSH's rows become settled. */
       settleReasoning()
       settleChat()
