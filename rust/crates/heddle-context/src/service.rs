@@ -307,7 +307,14 @@ pub struct SummaryRequest {
     pub max_output_tokens: Option<u64>,
     /// `compaction`, so a scripted endpoint can hand the call its summary step.
     pub purpose: Option<String>,
+    /// The tools the conversation's requests offer (#209). DSH's summary call sends the header's tool schemas, so it
+    /// is a genuine prefix of the last routed request and the provider's cache is reused; they also bring the system
+    /// prompt's tool sections, which the `model/request` hook composes for a request that offers them.
+    pub tools: Vec<ToolSpec>,
 }
+
+/// DSH's refusal of a summary with no text in it (`dsh-compaction-basic` `summarizeWithLlm`), e.g. a tool call only.
+pub const NO_SUMMARY_TEXT: &str = "summarization produced no text summary content";
 
 /// How the service reaches the model layer, injected so the service holds no model of its own.
 pub trait ModelAccess: Send + Sync {
@@ -337,10 +344,14 @@ impl ModelAccess for heddle_llm::ModelService {
                     messages: request.messages,
                     max_output_tokens: request.max_output_tokens,
                     purpose: request.purpose,
+                    tools: request.tools,
                     ..heddle_llm::GenerateRequest::default()
                 })
                 .await
                 .map_err(|error| SummarizeError(error.to_string()))?;
+            if generated.text.trim().is_empty() {
+                return Err(SummarizeError(NO_SUMMARY_TEXT.to_string()));
+            }
             Ok(generated.text)
         })
     }
@@ -822,6 +833,7 @@ impl<S: ContextStore> ContextService<S> {
                 .clone()
                 .or_else(|| options.model.map(str::to_string)),
             max_output_tokens: self.config.summarize_max_tokens,
+            tools: options.tools.to_vec(),
         };
         let summarizer: &dyn Summarizer = match options.summarizer {
             Some(summarizer) => summarizer,
@@ -946,6 +958,8 @@ struct ModelSummarizer {
     endpoint: String,
     model_name: Option<String>,
     max_output_tokens: Option<u64>,
+    /// The turn's tools, sent with the summary so it is a prefix of the turn's request (#209).
+    tools: Vec<ToolSpec>,
 }
 
 impl Summarizer for ModelSummarizer {
@@ -957,6 +971,7 @@ impl Summarizer for ModelSummarizer {
             messages,
             max_output_tokens: self.max_output_tokens,
             purpose: Some("compaction".to_string()),
+            tools: self.tools.clone(),
         };
         Box::pin(async move {
             let Some(model) = model else {
@@ -1560,13 +1575,19 @@ mod tests {
         store.message(&session, text_message(Role::Assistant, "a".repeat(1500)));
         store.message(&session, text_message(Role::User, "q".repeat(1500)));
 
+        // The turn's tools go with the summary (#209), so it is a prefix of the turn's own request.
+        let tools = [crate::types::ToolSpec {
+            name: "read_file".to_string(),
+            description: "Reads a file".to_string(),
+            parameters: serde_json::json!({ "type": "object" }),
+        }];
         let report = block_on(service.prepare(
             &session,
             &PrepareOptions {
                 cwd: scratch.path(),
                 endpoint: "local",
                 model: None,
-                tools: &[],
+                tools: &tools,
                 system: None,
                 summarizer: None,
                 force: false,
@@ -1588,6 +1609,10 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].endpoint, "local");
         assert_eq!(calls[0].purpose.as_deref(), Some("compaction"));
+        assert_eq!(
+            calls[0].tools, tools,
+            "the summary offers the turn's tools (#209)"
+        );
         assert_eq!(
             calls[0].max_output_tokens, None,
             "the summary names no cap of its own, so the endpoint's applies (#15)"
@@ -2023,6 +2048,7 @@ mod tests {
             messages: vec![text_message(Role::User, "summarise")],
             max_output_tokens: Some(1024),
             purpose: Some("compaction".to_string()),
+            tools: Vec::new(),
         }))
         .expect("the compaction step answers");
         assert_eq!(

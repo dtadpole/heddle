@@ -1388,6 +1388,9 @@ impl heddle_context::ModelAccess for ContextModels {
                     messages,
                     max_output_tokens: request.max_output_tokens,
                     purpose: request.purpose,
+                    // The turn's tools (#209): the summary is a prefix of the turn's request, and the jobs
+                    // section the `model/request` hook adds for them lands in its system prompt as in the turn's.
+                    tools: request.tools,
                     ..heddle_llm::GenerateRequest::default()
                 })
                 .await
@@ -1397,6 +1400,12 @@ impl heddle_context::ModelAccess for ContextModels {
                 heddle_llm::types::summary_finish_failure(&endpoint, &generated.finish_reason)
             {
                 return Err(heddle_context::SummarizeError(incomplete.to_string()));
+            }
+            // A reply with no text (a tool call, now that the tools are offered) is no summary: DSH's words.
+            if generated.text.trim().is_empty() {
+                return Err(heddle_context::SummarizeError(
+                    heddle_context::NO_SUMMARY_TEXT.to_string(),
+                ));
             }
             Ok(generated.text)
         })

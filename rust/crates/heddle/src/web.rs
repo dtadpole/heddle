@@ -521,6 +521,12 @@ fn commands_host(boot: &Boot, host: &PageHost) -> Arc<heddle_commands::Commands>
         .get::<Arc<heddle_plan::PlanService>>(heddle_plan::NAME)
         .map(|plan| plan.command());
     let commands = heddle_commands::Commands::new(heddle_commands::CommandServices {
+        // `/compact`'s summary carries the tools the session's last request offered (#209); the registry's
+        // schemas give them. heddle-tools' `ToolSpec` is heddle-llm's, which heddle-context re-exports, so the
+        // registry's own specs pass through unconverted and none can be dropped.
+        tool_specs: services
+            .get::<Arc<heddle_tools::ToolRegistry>>("tools")
+            .map(|registry| Arc::new(move || registry.describe()) as heddle_commands::ToolSpecs),
         sessions: Arc::clone(&host.sessions),
         goals: services.get::<Arc<heddle_goal::GoalService>>("goal"),
         context: services

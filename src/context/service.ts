@@ -152,6 +152,12 @@ export interface ContextDependencies {
     readonly model?: string
     readonly messages: readonly Message[]
     readonly maxOutputTokens?: number
+    /**
+     * The tools the conversation's requests offer (#209). DSH's summary call sends the header's tool schemas, so it is
+     * a genuine prefix of the last routed request and the provider's cache is reused. They also bring the system
+     * prompt's tool sections, which the `model/request` waterfall composes for a request that offers them.
+     */
+    readonly tools?: readonly ToolSpec[]
     /** Tags the call for a consumer that treats a summary differently from a turn. */
     readonly purpose?: string
     /** The turn's signal, so a Stop cancels the summary call (#154). */
@@ -471,7 +477,12 @@ export class ContextService extends Service {
   }
 
   /** The default summariser: one call, the replayed prefix, and the configured cap. */
-  private defaultSummarizer(options: { readonly endpoint: string; readonly model?: string; readonly signal?: AbortSignal }): (messages: readonly Message[]) => Promise<string> {
+  private defaultSummarizer(options: {
+    readonly endpoint: string
+    readonly model?: string
+    readonly signal?: AbortSignal
+    readonly tools?: readonly ToolSpec[]
+  }): (messages: readonly Message[]) => Promise<string> {
     const complete = this.dependencies.complete
     const endpoint = this.config.endpoint ?? options.endpoint
     const model = this.config.model ?? options.model
@@ -481,6 +492,7 @@ export class ContextService extends Service {
         endpoint,
         ...(model !== undefined ? { model } : {}),
         messages,
+        ...(options.tools !== undefined ? { tools: options.tools } : {}),
         ...(this.config.summarizeMaxTokens !== undefined ? { maxOutputTokens: this.config.summarizeMaxTokens } : {}),
         purpose: 'compaction',
         ...(options.signal !== undefined ? { signal: options.signal } : {}),
@@ -543,6 +555,7 @@ export default class ContextPlugin extends ContextService {
             endpoint: request.endpoint,
             ...(request.model !== undefined ? { model: request.model } : {}),
             messages: request.messages,
+            ...(request.tools !== undefined ? { tools: request.tools } : {}),
             maxOutputTokens: request.maxOutputTokens,
             ...(request.purpose !== undefined ? { purpose: request.purpose } : {}),
           },
@@ -551,6 +564,8 @@ export default class ContextPlugin extends ContextService {
         // A summary cut at its output limit, or ended early any other way, is no checkpoint (#207): DSH's `finishError`.
         const incomplete = summaryFinishFailure(request.endpoint, result.finishReason)
         if (incomplete !== undefined) throw incomplete
+        /** A reply with no text (a tool call, say, now that the tools are offered) is no summary: DSH's own words. */
+        if (result.text.trim().length === 0) throw new Error('summarization produced no text summary content')
         return result.text
       },
     })
