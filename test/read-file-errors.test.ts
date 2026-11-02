@@ -16,7 +16,9 @@ import { ToolRegistry } from '../src/tools/service.ts'
  * A failed read is classified and names the file, as DSH's read tool does (`dsh-tool-fs` resolveRegularReadTarget):
  * `FS_NOT_FOUND` / `FS_NOT_REGULAR_FILE`, `cannot read "<path>": …`, with DSH's display spelling of the path
  * (`dsh-fs-local` localDisplayPath). Live-testing issue #4: this build returned Node's raw `ENOENT` text and the Rust
- * build the raw OS error with no path, both as `TOOL_FAILED`.
+ * build the raw OS error with no path, both as `TOOL_FAILED`. A file that is not UTF-8 text is `FS_NOT_TEXT`, `cannot
+ * read "<path>": invalid UTF-8 text`, as DSH's fatal decode says it (`dsh-fs-local` decodeUtf8); issue #234: this build
+ * read it with replacement characters and reported success.
  */
 
 test("displayPath is DSH's spelling: absolute and normalised, unless it walks '..'", () => {
@@ -65,4 +67,19 @@ test('a readable file still reads as before', async () => {
   })
   assert.equal(result.error, undefined)
   assert.equal(result.output, 'hello')
+})
+
+test('a file that is not UTF-8 text is FS_NOT_TEXT and names it, not read with replacement characters', async () => {
+  const { result, workspace } = await read('notes/binary.dat', (root) => {
+    mkdirSync(join(root, 'notes'))
+    writeFileSync(join(root, 'notes', 'binary.dat'), Buffer.from([0xc3, 0x28]))
+  })
+  assert.deepEqual(result.error, { code: 'FS_NOT_TEXT', message: `cannot read "${workspace}/notes/binary.dat": invalid UTF-8 text` })
+  assert.equal(result.output, '')
+})
+
+test('a UTF-8 file of several-byte characters still reads exactly', async () => {
+  const { result } = await read('wide.txt', (root) => writeFileSync(join(root, 'wide.txt'), 'caf\u00e9 \u4e2d\u6587 \u{1f600}'))
+  assert.equal(result.error, undefined)
+  assert.equal(result.output, 'caf\u00e9 \u4e2d\u6587 \u{1f600}')
 })
