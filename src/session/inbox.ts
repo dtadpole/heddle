@@ -54,6 +54,14 @@ export interface Inbox {
 export interface InboxStore {
   read(handle: SessionHandle): readonly SessionEvent[]
   append(handle: SessionHandle, event: { readonly type: string; readonly [key: string]: unknown }): SessionEvent
+  /** Several events in one write, whole or not at all (the store's `appendAll`). */
+  appendAll?(handle: SessionHandle, events: readonly { readonly type: string; readonly [key: string]: unknown }[]): readonly SessionEvent[]
+}
+
+/** Write events as one write where the store can, else one by one (a test store without `appendAll`). */
+function writeTogether(store: InboxStore, handle: SessionHandle, events: readonly { readonly type: string; readonly [key: string]: unknown }[]): void {
+  if (store.appendAll !== undefined) store.appendAll(handle, events)
+  else for (const event of events) store.append(handle, event)
 }
 
 const EMPTY: Inbox = { 'next-turn': [], 'next-step': [] }
@@ -179,8 +187,11 @@ export function steerQueued(store: InboxStore, handle: SessionHandle, id: string
   const start = inbox['next-turn'].findIndex((message) => message.id === id)
   if (start === -1) return false
   const message = inbox['next-turn'][start]!
-  store.append(handle, { type: INBOX_SPLICED, target: 'next-turn', start, removedCount: 1, inserted: [] })
-  store.append(handle, { type: INBOX_SPLICED, target: 'next-step', start: inbox['next-step'].length, inserted: [message] })
+  // One write: a crash between the two splices would drop the row from both lists (developer-eight's review).
+  writeTogether(store, handle, [
+    { type: INBOX_SPLICED, target: 'next-turn', start, removedCount: 1, inserted: [] },
+    { type: INBOX_SPLICED, target: 'next-step', start: inbox['next-step'].length, inserted: [message] },
+  ])
   return true
 }
 
@@ -212,13 +223,18 @@ export function replaceQueued(store: InboxStore, handle: SessionHandle, id: stri
 
 /**
  * Claim the first queued prompt for the turn that is about to answer it (DSH's next-turn claim at a turn's first step):
- * one splice with no `outcome`, because the prompt is delivered, not dropped. The caller writes it as the turn's user
- * message right after (#162). Answers the claimed message, or `undefined` when nothing waits.
+ * one splice with no `outcome`, because the prompt is delivered, not dropped, and the user message it becomes — written
+ * together, as one write, so a crash or a failed write can never leave a claimed row with no message (#162,
+ * developer-eight's review). The turn then answers the message already in the log. Answers the claimed message, or
+ * `undefined` when nothing waits.
  */
 export function claimNextTurn(store: InboxStore, handle: SessionHandle): InboxMessage | undefined {
   const queued = pendingInbox(store, handle)['next-turn'][0]
   if (queued === undefined) return undefined
-  store.append(handle, { type: INBOX_SPLICED, target: 'next-turn', start: 0, removedCount: 1, inserted: [] })
+  writeTogether(store, handle, [
+    { type: INBOX_SPLICED, target: 'next-turn', start: 0, removedCount: 1, inserted: [] },
+    { type: 'message', message: { role: 'user', content: [...queued.content], ...(queued.source !== undefined ? { source: queued.source } : {}) } },
+  ])
   return queued
 }
 
