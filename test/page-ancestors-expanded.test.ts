@@ -118,10 +118,10 @@ function load(storage: Record<string, string>, current: string | null, grouping 
     const rowEntries = new WeakMap()
     const levelsLoading = new WeakSet()
     const watermarks = new Map()
-    let treeGeneration = 0
-    let treeRead = 0
-    let treeLanded = 0
-    let treeWaiters = []
+    let treeDrawing = false
+    let treeFollowUp = null
+    let searchEpoch = 0
+    const listReads = new Map()
     /**
      * As much of an element as the tree's drawing touches here: a row, the list of a level, and the tree itself. Since
      * #143 a redraw draws its rows off the page and puts them in at once, so the stand-in has children and a parent.
@@ -206,7 +206,7 @@ function load(storage: Record<string, string>, current: string | null, grouping 
     ${source('toggle')}
     ${optional('paintDisclosure')}
     ${source('renderTree')}
-    ${['treeLandedAt', 'treeDrawn', 'treeOpening', 'sameMembers', 'watermarkState', 'openOffPage', 'openRowOffPage', 'repaintSessionRowsOffPage', 'rowsIn', 'indexDrawnRows'].map(optional).join('\n')}
+    ${['drawTree', 'readList', 'treeOpening', 'sameMembers', 'watermarkState', 'openOffPage', 'openRowOffPage', 'repaintSessionRowsOffPage', 'rowsIn', 'indexDrawnRows'].map(optional).join('\n')}
     ${optional('openCurrentGroup')}
     ${optional('reopenChildGroups')}
     const list = (key) => (key in stored ? JSON.parse(stored[key]).sort() : null)

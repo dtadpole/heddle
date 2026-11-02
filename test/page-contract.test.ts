@@ -453,7 +453,7 @@ test('a session is labelled and headed by DSH\'s words and its title, never its 
   const paint = body('function paintSessionHeading(')
   assert.match(paint, /WorkspaceTree\.headerTitle\(meta\)/, 'the header asks DSH\'s rule')
   assert.match(paint, /document\.title = WorkspaceTree\.documentTitle\(meta\)/, 'and so does the window title')
-  for (const reader of ['async function renderTree() {', 'async function refreshSessions() {', 'async function loadSearchIndex() {']) {
+  for (const reader of ['async function drawTree() {', 'async function refreshSessions() {', 'async function loadSearchIndex() {']) {
     assert.match(body(reader), /noteSessions\((sessions|searchIndex\.sessions)\)/, `${reader} repaints the header from the list it read`)
   }
 })
@@ -573,8 +573,9 @@ test('a tree redraw gives the keyboard its place back: the same row and the same
    * keyboard focus to the top of the page mid-walk (found by 80's check-tree-keyboard.mjs on its first run). Judged in
    * that check; this detects a redraw that stops asking where focus was or stops giving it back.
    */
-  const render = pageFunction('async function renderTree() {')
-  assert.match(render, /^async function renderTree\(\) \{\s*\/\*\*[^]*?\*\/\s*let focus = treeFocus\(\)/, 'renderTree reads the keyboard\'s place before it reads anything else')
+  /** One drawing at a time since the Page.navigate hangs of 1 Nov: `renderTree` runs `drawTree`, which is the redraw. */
+  const render = pageFunction('async function drawTree() {')
+  assert.match(render, /^async function drawTree\(\) \{\s*\/\*\*[^]*?\*\/\s*let focus = treeFocus\(\)/, 'the redraw reads the keyboard\'s place before it reads anything else')
   /**
    * And again just before the rows are replaced: focus may have moved while the reads were in flight (developer-ten). Since
    * #143 the new rows are drawn off the page and put in at once, keeping every row that stays (`placeTree`).

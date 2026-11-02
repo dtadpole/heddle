@@ -47,6 +47,13 @@ function constant(name: string): string {
   return new RegExp(`\\nconst ${name} = [^\\n]*\\n`).exec(page)?.[0] ?? ''
 }
 
+/** A marked block of the page, else nothing (content search and the session rules are later blocks). */
+const maybeBlock = (name: string): string => {
+  const begin = page.indexOf(`/* ${name}:begin */`)
+  const end = page.indexOf(`/* ${name}:end */`)
+  return begin > 0 && end > begin ? page.slice(begin, end) : ''
+}
+
 /** The page's folded-groups memory (`COLLAPSED_KEY` and `collapsed`). */
 function collapsedMemory(): string {
   const start = page.indexOf('\nconst COLLAPSED_KEY = ')
@@ -88,12 +95,18 @@ const REQUIRED = [
   'renderTree',
   'revealSession',
 ]
-/** What this fix adds; absent on the page before it. `newestTreeDrawn` is the first round's, which N1 replaced. */
+/**
+ * What this fix adds; absent on the page before it. `newestTreeDrawn`, `treeLandedAt` and `treeDrawn` are earlier rounds',
+ * kept so the red runs on those pages load; one drawing at a time (`drawTree`) replaced them.
+ */
 const ADDED = [
   'paintDisclosure',
   'newestTreeDrawn',
   'treeLandedAt',
   'treeDrawn',
+  'drawTree',
+  'readList',
+  'readFolderOffPage',
   'treeOpening',
   'sameMembers',
   'watermarkState',
@@ -108,6 +121,21 @@ const ADDED = [
   'indexShownRows',
   'indexDrawnRows',
 ]
+/**
+ * The search and the stream's list-change handling, for the request counts: the search index, the hits, the host query
+ * and the tree's debounce. `searchDrawing` is search-fresh's (#163).
+ */
+const SEARCH = ['scheduleTreeRefresh', 'treeIndex', 'loadSearchIndex', 'workspaceNamer', 'searchDrawing', 'searchHit', 'applySearch', 'requestContentSearch', 'paintSearchPending']
+
+/** The stream's list-change handlers: from search-fresh's `let searchFollowDue`, else the workspace listener, to the end of the sessions listener. */
+function frameHandlers(): string {
+  let start = page.indexOf('\nlet searchFollowDue = false')
+  if (start < 0) start = page.indexOf("\nevents.addEventListener('workspace'")
+  assert.ok(start >= 0, 'the page listens for workspace frames')
+  const sessions = page.indexOf("events.addEventListener('sessions'", start)
+  assert.ok(sessions > start, 'and for sessions frames')
+  return page.slice(start + 1, page.indexOf('\n})\n', sessions) + 4)
+}
 
 /** A stand-in DOM: elements with attributes, a dataset, children, focus, and the selectors the tree code uses. */
 const DOM = String.raw`
@@ -374,6 +402,12 @@ interface Page {
   rows(): Row[]
   pending(): string[]
   hold(on: boolean): void
+  search(query: string): Promise<unknown>
+  hits(): number
+  frame(data: unknown): void
+  inFlight(): number
+  peak(): string
+  resetPeak(): void
   delay(ms: number): void
   reveal(id: string): Promise<unknown>
   scrolled(key: string): string
@@ -390,12 +424,21 @@ interface Page {
 
 /** One page over `data`, the open session `s-a2`, with `expanded` remembered open. */
 function load(data: World, expandedPaths: string[]): Page {
-  const functions = [...REQUIRED.map(source), ...ADDED.map(optional)].join('\n')
+  const functions = [...REQUIRED.map(source), ...ADDED.map(optional), ...SEARCH.map(optional)].join('\n')
   return runInNewContext(
     `
     ${DOM}
+    document.getElementById = (id) => document.documentElement.descendants().find((node) => node.id === id) ?? null
+    for (const [tag, id] of [['input', 'session-search'], ['div', 'search-results'], ['div', 'search-note'], ['div', 'search-more']]) {
+      const node = document.createElement(tag)
+      node.id = id
+      node.value = ''
+      document.body.append(node)
+    }
+    ${maybeBlock('session-rules')}
     ${block('workspace-tree')}
     ${block('workspace-folder')}
+    ${maybeBlock('content-search')}
     let current = 's-a2'
     let groupingMode = 'tree'
     const archiveMode = 'hide'
@@ -417,6 +460,30 @@ function load(data: World, expandedPaths: string[]): Page {
     let treeRead = 0
     let treeLanded = 0
     let treeWaiters = []
+    let treeDrawing = false
+    let treeFollowUp = null
+    let treeFolderReads = 0
+    const treeFolderQueue = []
+    let treeRefreshTimer = 0
+    let searchIndex = null
+    let heldIndex = null
+    let searchEpoch = 0
+    let searchIndexRead = null
+    let searchGeneration = 0
+    let shownSearch = null
+    const searchHits = new Map()
+    let contentSearch = { query: '', status: 'idle', items: [], hasMore: false }
+    let contentSearchTimer = null
+    let contentSearchAbort = null
+    const sessionMetas = new Map()
+    const listedMetas = new Map()
+    const SessionArchive = { TEXT: { archivedNotOpenable: 'Archived sessions cannot be opened.', unarchiveSession: 'Unarchive session', unarchive: 'Unarchive' } }
+    const paintSessionHeading = () => {}
+    class AbortController { constructor() { this.signal = { aborted: false } } abort() { this.signal.aborted = true } }
+    const handlers = new Map()
+    const events = { addEventListener: (name, handler) => { if (!handlers.has(name)) handlers.set(name, []); handlers.get(name).push(handler) } }
+    ${constant('listReads')}
+    ${constant('TREE_FOLDER_READS')}
     const NEW_CONVERSATION_NOTE = 'a new conversation in '
     const EXPANDED_KEY = ${JSON.stringify(EXPANDED)}
     const stored = { [EXPANDED_KEY]: JSON.stringify(EXPANDED_PATHS) }
@@ -449,11 +516,11 @@ function load(data: World, expandedPaths: string[]): Page {
     const noteSessions = () => {}
     const paintEmptyList = () => {}
     const newConversationTarget = () => null
-    const applySearch = () => {}
     const renderFlatList = async () => {}
     ${functions}
     const expanded = readExpanded()
     ${collapsedMemory()}
+    ${frameHandlers()}
     const held = []
     let holding = false
     let delayMs = 0
@@ -462,21 +529,42 @@ function load(data: World, expandedPaths: string[]): Page {
       const reply =
         url === '/api/workspaces' ? { status: 200, body: { workspaces: DATA.workspaces } }
         : url === '/api/sessions' ? { status: 200, body: DATA.sessions }
+        : url === '/api/tree' ? { status: 200, body: { children: DATA.workspaces.map((entry) => ({ path: entry.path, label: entry.title })) } }
+        : url.startsWith('/api/sessions/search') ? { status: 200, body: { items: [], hasMore: false } }
         : path !== null && path in DATA.trees ? DATA.trees[path]
         : { status: 404, body: { error: 'no route ' + url } }
       const body = JSON.parse(JSON.stringify(reply.body))
       return { ok: reply.status >= 200 && reply.status < 300, status: reply.status, json: async () => body }
     }
+    /** The requests out now, and the most there were at once since the count was last reset: what a browser holds open. */
+    let inFlight = 0
+    let peak = { count: 0, urls: [] }
+    const out = []
+    const settled = (entry, answer) => {
+      inFlight -= 1
+      out.splice(out.indexOf(entry), 1)
+      return answer
+    }
     /** Each answer is what the server held when it was asked; a held one arrives when the test lets it go. */
     const fetch = (url) => {
       const answer = respond(url)
-      if (delayMs > 0) return new Promise((resolve) => setTimeout(() => resolve(answer), delayMs))
-      if (!holding) return Promise.resolve(answer)
-      return new Promise((resolve) => held.push({ url, resolve: () => resolve(answer) }))
+      const entry = String(url)
+      inFlight += 1
+      out.push(entry)
+      if (inFlight > peak.count) peak = { count: inFlight, urls: [...out] }
+      if (delayMs > 0) return new Promise((resolve) => setTimeout(() => resolve(settled(entry, answer)), delayMs))
+      if (!holding) return Promise.resolve(settled(entry, answer))
+      return new Promise((resolve) => held.push({ url, resolve: () => resolve(settled(entry, answer)) }))
     }
     const rowLi = (key) => treeList.querySelector('li[data-row-key="' + CSS.escape(key) + '"]')
     ;({
       render: () => renderTree(),
+      search: (query) => { document.getElementById('session-search').value = query; return applySearch() },
+      hits: () => document.getElementById('search-results').children.length,
+      frame: (data) => { for (const handler of handlers.get('sessions') ?? []) handler({ data: JSON.stringify(data), lastEventId: '' }) },
+      inFlight: () => inFlight,
+      peak: () => JSON.stringify(peak),
+      resetPeak: () => { peak = { count: inFlight, urls: [...out] } },
       rows: () => treeList.querySelectorAll('li[role="treeitem"]').map((li) => ({
         key: li.dataset.rowKey,
         li,
@@ -540,6 +628,7 @@ function load(data: World, expandedPaths: string[]): Page {
       decodeURIComponent,
       queueMicrotask,
       setTimeout,
+      clearTimeout,
       console,
     },
   ) as Page
@@ -673,20 +762,22 @@ test('a kept Show more still shows the group\'s other sessions in the list on th
   assert.equal(after, 8, 'all eight')
 })
 
-test('a slower, older drawing never lands over a newer one, and its caller still goes on', async () => {
+test('a refresh asked for while one is reading waits for it, asks nothing meanwhile, and then draws the newer answer; both callers go on', async () => {
   const data = world()
   const view = load(data, [A])
   await view.render()
   view.hold(true)
   const older = view.render()
   await settle()
-  view.hold(false)
+  const reading = plain(view.pending()).sort()
   data.sessions = data.sessions.map((meta) => (meta.id === 's-a1' ? { ...meta, title: 'the newer title' } : meta))
-  await view.render()
-  assert.equal(view.rows().find((row) => row.key === 'session:s-a1')?.label, 'the newer title', 'the newer drawing is on the page')
+  const newer = view.render()
+  await settle()
+  assert.deepEqual(plain(view.pending()).sort(), reading, 'the second drawing asks nothing while the first is out: one drawing at a time')
+  view.hold(false)
   while (view.releaseFirst()) await settle()
-  await older
-  assert.equal(view.rows().find((row) => row.key === 'session:s-a1')?.label, 'the newer title', `the older drawing's answers, arriving last, draw nothing\nsaw: ${describe(view.rows())}`)
+  await Promise.all([older, newer])
+  assert.equal(view.rows().find((row) => row.key === 'session:s-a1')?.label, 'the newer title', `the newer answer is drawn last\nsaw: ${describe(view.rows())}`)
 })
 
 test('a level whose read fails draws its failure line in the new tree, and the sessions stay on the page throughout (#106)', async () => {
@@ -789,4 +880,50 @@ test('a reveal during a refresh scrolls to the row on the page, which the refres
   assert.equal(view.scrolled('session:s-a3'), 'on the page', 'the row scrolled into view is the revealed session\'s row on the page')
   const selected = view.rows().filter((row) => row.selected === 'true').map((row) => row.key)
   assert.deepEqual(plain(selected), ['session:s-a3'], 'and it is the one selected row')
+})
+
+/** Three workspaces, each with a folder left open: six folder reads a drawing, and a search on screen. */
+function busyWorld() {
+  const data = world()
+  data.workspaces = [...data.workspaces, workspace('ws-c', '/w/c', ['s-c1', 's-c2'])]
+  data.sessions = [...data.sessions, session('s-c1', '/w/c', 5), session('s-c2', '/w/c', 6)]
+  data.trees['/w/b'] = { status: 200, body: { children: [folder('/w/b/docs'), file('/w/b/notes.txt')] } }
+  data.trees['/w/b/docs'] = { status: 200, body: { children: [file('/w/b/docs/b.md')] } }
+  data.trees['/w/c'] = { status: 200, body: { children: [folder('/w/c/docs')] } }
+  data.trees['/w/c/docs'] = { status: 200, body: { children: [file('/w/c/docs/c.md')] } }
+  return data
+}
+
+test('a burst of list changes, an action\'s redraw and a search on screen keep at most four requests out at once (the Page.navigate hangs of 1 Nov)', async () => {
+  /**
+   * A browser opens six connections to one server, and the event stream holds one. Measured on search-fresh 139d7c36's
+   * page with this burst: six requests out at once (the search index's three list reads and three folder reads), and six
+   * on tree-steady 401d2039's page with an action redrawing during the refresh (two drawings, each reading every folder).
+   * A navigation then waited behind them for 20 s. Every read here answers 30 ms after it is asked.
+   */
+  const data = busyWorld()
+  const view = load(data, [A, B, '/w/c', DOCS, '/w/b/docs', '/w/c/docs'])
+  await view.render()
+  await view.search('s-')
+  await new Promise((done) => setTimeout(done, 400))
+  view.delay(30)
+  view.resetPeak()
+  for (let index = 0; index < 5; index += 1) {
+    data.sessions = data.sessions.map((meta) => (meta.id === 's-b1' ? { ...meta, title: `renamed ${index}` } : meta))
+    view.frame({ type: 'session/renamed', session: 's-b1', title: `renamed ${index}` })
+    /** This page's own action, a pin say, redraws the tree itself during the burst. */
+    if (index === 2) void view.render()
+    await new Promise((done) => setTimeout(done, 50))
+  }
+  /** And another one as the stream's refresh starts. */
+  await new Promise((done) => setTimeout(done, 380))
+  const action = view.render()
+  for (let quiet = 0, round = 0; quiet < 4 && round < 200; round += 1) {
+    await new Promise((done) => setTimeout(done, 40))
+    quiet = view.inFlight() === 0 ? quiet + 1 : 0
+  }
+  await action
+  const peak = JSON.parse(view.peak()) as { count: number; urls: string[] }
+  assert.ok(peak.count <= 4, `at most four requests out at once (saw ${peak.count}: ${peak.urls.join(', ')})`)
+  assert.equal(view.rows().find((row) => row.key === 'session:s-b1')?.label, 'renamed 4', 'and the tree shows the last rename')
 })
