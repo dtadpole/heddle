@@ -2590,6 +2590,7 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
         model: selection.model.clone(),
         reasoning_effort: selection.reasoning_effort.clone(),
         answer_pending: false,
+        claim_queued: false,
     };
     let runner = state.harness().turns.clone();
     let sessions = state.harness().sessions.clone();
@@ -3366,15 +3367,16 @@ fn kick_queue(state: &AppState, session: &str) {
             if state.runs().is_closing() || queue_held(&session) {
                 break;
             }
-            // The selection before the claim (developer-ten's review): a server with no endpoint leaves the row queued
-            // rather than a claimed message with no turn.
+            // The selection first (developer-ten's review): a server with no endpoint leaves the row queued. The row
+            // itself is claimed by the turn once it holds the session (developer-three's point 3), so a direct turn that
+            // takes the slot first never answers it.
             let Some(selection) = queue_selection(&state, &session) else {
                 break;
             };
-            let Some(row) = state.harness().sessions.claim_next_turn(&session) else {
+            if state.harness().sessions.queued(&session).is_empty() {
                 break;
-            };
-            run_queued(&state, &session, row, selection).await;
+            }
+            run_queued(&state, &session, selection).await;
         }
         draining()
             .lock()
@@ -3401,37 +3403,21 @@ fn queue_selection(state: &AppState, session: &str) -> Option<TurnSelection> {
     )
 }
 
-async fn run_queued(
-    state: &AppState,
-    session: &str,
-    row: crate::services::QueueRow,
-    selection: TurnSelection,
-) {
+async fn run_queued(state: &AppState, session: &str, selection: TurnSelection) {
     let sessions = state.harness().sessions.clone();
-    let text: String = row
-        .content
-        .iter()
-        .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
-        .filter_map(|part| part.get("text").and_then(Value::as_str))
-        .collect();
-    let attachments: Vec<Value> = row
-        .content
-        .iter()
-        .filter(|part| part.get("type").and_then(Value::as_str) != Some("text"))
-        .cloned()
-        .collect();
     let guard = state.runs().begin(session);
     let cancel = guard.cancellation();
     let request = crate::services::TurnRequest {
         session: session.to_owned(),
         endpoint: selection.endpoint.clone(),
-        prompt: text,
-        attachments,
+        prompt: String::new(),
+        attachments: Vec::new(),
         cancel: cancel.clone(),
         max_rounds: state.options().max_rounds,
         model: selection.model.clone(),
         reasoning_effort: selection.reasoning_effort.clone(),
-        answer_pending: true,
+        answer_pending: false,
+        claim_queued: true,
     };
     let outcome = state.harness().turns.clone().run_turn(request).await;
     drop(guard);

@@ -477,6 +477,9 @@ pub struct TurnRequest {
     /// Answer the user message already in the log instead of writing `prompt` (#162: the queue's claim wrote it, in one
     /// write with the claim). `answerPending` in the TypeScript build.
     pub answer_pending: bool,
+    /// The turn answers the session's first queued row, claimed once it holds the session (#162): the runner claims it
+    /// where the prompt would be written, and `prompt` is not written.
+    pub claim_queued: bool,
 }
 
 /// What a finished turn reports on its `done` frame.
