@@ -301,3 +301,65 @@ test('openTurnClosers closes only an open tail turn, and only the calls it left 
   ]
   assert.deepEqual(openTurnClosers(earlier, cause), [], 'a call left in a turn that already ended is not reopened: the request-time repair answers it')
 })
+
+test('a turn cut while its automatic compaction ran is closed as interrupted, and a /compact on its own is not (#154)', async () => {
+  /**
+   * Live #154 on both builds: a server killed while a turn's automatic summary ran left the log at `compaction/start`,
+   * and nothing closed it at the next open, because the turn had not reached its first model request. The transcript
+   * ended with the bare question. DSH appends `turn/start` before its pre-step, so `openTurnClosers` closes that turn
+   * as interrupted. The bytes are pinned here and in heddle-session `repair.rs`.
+   */
+  const { openTurnClosers } = (await import('../src/session/repair.ts')) as {
+    openTurnClosers: (events: readonly SessionEvent[], cause: { readonly kind: 'interrupted' }) => SessionEvent[]
+  }
+  const cause = { kind: 'interrupted' } as const
+  let seq = 0
+  const at = (minute: number) => `2026-10-30T10:${String(minute).padStart(2, '0')}:00.000Z`
+  const event = (type: string, fields: Record<string, unknown> = {}, minute = 0): SessionEvent => ({ seq: seq++, at: at(minute), type, ...fields })
+  const user = (text: string) => event('message', { message: { role: 'user', content: [{ type: 'text', text }] } })
+  const balanced = () => [
+    event('session/created'),
+    user('hi'),
+    event('model/request'),
+    event('assistant/chunk', { chunk: { type: 'text-delta', text: 'hello' } }),
+    event('assistant/completed', { text: 'hello' }),
+    event('turn/completed', { rounds: 1 }),
+  ]
+
+  seq = 0
+  const cut = [...balanced(), user('go'), event('compaction/start', { fromSeq: 1, throughSeq: 4 }, 3)]
+  assert.deepEqual(openTurnClosers(cut, cause).map((one) => JSON.stringify(one)), [
+    '{"seq":8,"at":"2026-10-30T10:03:00.000Z","type":"assistant/completed","text":"","reasoning":"","rounds":0,"denials":0,"ended":["the process exited before this turn finished, so the turn was closed; unfinished tool calls have unknown outcomes"]}',
+    '{"seq":9,"at":"2026-10-30T10:03:00.000Z","type":"turn/completed","rounds":0,"reason":{"kind":"interrupted"}}',
+  ])
+
+  seq = 0
+  const landed = [
+    ...balanced(),
+    user('go'),
+    event('compaction/start'),
+    event('compaction/summary'),
+    event('context/note', { origin: 'compaction' }),
+    event('compaction/end'),
+    event('compaction/measured'),
+  ]
+  assert.deepEqual(
+    openTurnClosers(landed, cause).map((one) => one.type),
+    ['assistant/completed', 'turn/completed'],
+    'a compaction that landed before the kill still leaves the prompt unanswered, so the turn is closed',
+  )
+
+  seq = 0
+  const requested = [...balanced(), user('go'), event('compaction/start'), event('compaction/end'), event('model/request'), event('assistant/chunk', { chunk: { type: 'text-delta', text: 'half' } })]
+  const once = openTurnClosers(requested, cause)
+  assert.deepEqual(once.map((one) => one.type), ['assistant/completed', 'turn/completed'], 'a model request after the compaction opens the same turn, closed once')
+  assert.equal(once[0]!.rounds, 1)
+  assert.equal(once[0]!.text, 'half')
+
+  seq = 0
+  assert.deepEqual(openTurnClosers([...balanced(), event('compaction/start')], cause), [], 'a /compact after a turn end, with no prompt since, is no turn')
+  seq = 0
+  assert.deepEqual(openTurnClosers([...balanced(), event('compaction/start'), event('compaction/end')], cause), [], 'nor is a /compact that finished')
+  seq = 0
+  assert.deepEqual(openTurnClosers(balanced(), cause), [], 'and a log that ends at a turn end needs nothing')
+})

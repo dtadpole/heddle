@@ -1,11 +1,11 @@
 ---
 title: TMPDIR sweep tests
-version: 1.2.0
-description: Unit tests for tmp-sweep. They cover the seven kinds it removes, the age with live children, live browser profiles, dry-run, the command, the line of what the folder still holds and the cache sizes.
+version: 1.3.0
+description: Unit tests for tmp-sweep. They cover the seven kinds it removes, the age with live children, live browser profiles, dry-run, the command, the line of what the folder still holds, the cache sizes, and the scratch worktree sweep.
 grounded_in:
   - source: _tools_/local-build/tmp-sweep.mjs
 created: 2026-10-29T14:25:54Z
-modified: 2026-10-31T12:45:00Z
+modified: 2026-11-01T17:20:00Z
 ---
 
 # `tmp-sweep`
@@ -22,6 +22,16 @@ The tests check:
 - the npm and uv cache sizes come from `npm_config_cache`, `UV_CACHE_DIR` and `XDG_CACHE_HOME` (else `HOME`), an
   absent cache says so, a month-old cache file stays, and `--no-caches` drops the line. These tests point every
   cache setting at a folder of their own.
+- `--worktrees`, on a scratch repository with a fake `origin` ref and a scratch folder for `/private/tmp`: an
+  old, clean, unused, pushed worktree goes, under the tmp root or as a `heddle--developer-*-*` sibling, ignored
+  build output and all, and its branch stays. Kept, each with its reason: a young one, a changed file, an
+  untracked file, an unpushed HEAD, an open file inside, a command line naming it, a locked one, and one holding
+  a nested worktree. A seat's own worktree and one elsewhere are never touched. A folder removed by hand is
+  pruned;
+- a dry run removes and prunes nothing, a missing process list removes nothing, and a longer age keeps it;
+- the candidates rule, and that a holder must name the whole path (`d1-80s16` does not hold `d1-80s1`);
+- the command with the real process list, its summary and per-worktree lines, `--worktrees` alone turning it on,
+  and a usage error.
 
 ```bash
 node --test _tools_/local-build/_tests_/tmp-sweep/unit.test.mjs

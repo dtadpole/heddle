@@ -605,6 +605,19 @@ fn commands_host(boot: &Boot, host: &PageHost) -> Arc<heddle_commands::Commands>
             .map(|turns| {
                 Arc::new(move |id: &str| turns.is_running(id)) as heddle_commands::TurnRunning
             }),
+        // And a running `/compact` holds its session in the same registry, so a turn sent meanwhile waits for it
+        // (#140) and the session's Stop reaches its summary call (#154).
+        turn_hold: services
+            .get::<heddle_agent::TurnRegistry>("turns")
+            .map(|turns| {
+                Arc::new(move |id: &str| {
+                    let live = turns.begin(id, None);
+                    (
+                        live.token().clone(),
+                        Box::new(live) as Box<dyn std::any::Any + Send>,
+                    )
+                }) as heddle_commands::TurnHold
+            }),
     })
     .with_contributed(contributed);
     for refusal in commands.refused() {
