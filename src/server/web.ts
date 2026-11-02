@@ -45,6 +45,7 @@ import { handleScheduleRoute } from '../schedule/http.ts'
 import type { ScheduleService } from '../schedule/service.ts'
 import { handleJobsRoute } from '../jobs/http.ts'
 import { handleQueueRoute, holdQueue, installQueue, queueRequest, releaseQueue } from './queue.ts'
+import { pendingInbox } from '../session/inbox.ts'
 import type { JobRegistry } from '../jobs/registry.ts'
 import {
   COOKIE_MAX_AGE,
@@ -3100,8 +3101,21 @@ export function unknownTurnSession(
    * and another device see it, and the host runs it when the running turn ends. A retry with the same `requestId`
    * answers the row it queued. On a free session it runs now, as any turn does.
    */
-  if (body.queue !== true) releaseQueue(ctx, handle.id)
-  if (body.queue === true) {
+  /**
+   * A queued send to an archived session is refused as any turn into it is, before anything reaches its log (developer-
+   * three's review); the archived gate inside the turn would otherwise splice the row into a log that runs nothing.
+   */
+  if (body.queue === true && record?.archived === true) {
+    respond(response, 409, 'application/json', `${JSON.stringify({ error: `session ${handle.id} is archived`, code: 'session/archived' })}\n`)
+    return
+  }
+  /**
+   * The person acting again releases a queue their Stop held. A detached send to a session whose queue still holds rows
+   * goes behind them (developer-ten's review: DSH's wake after an abort runs the held rows first, in order, then the new
+   * one); a streamed caller (the CLI) keeps its own turn, as before.
+   */
+  releaseQueue(ctx, handle.id)
+  if (body.queue === true || (body.detach === true && pendingInbox(ctx.session.store, handle)['next-turn'].length > 0)) {
     const requestId = typeof body.requestId === 'string' && body.requestId.length > 0 ? body.requestId : undefined
     const queued = queueRequest(ctx, handle, [{ type: 'text', text: body.prompt }, ...attachments], requestId)
     if (queued !== undefined) {

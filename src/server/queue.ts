@@ -5,7 +5,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { runTurn } from '../agent/loop.ts'
 import type { TurnRegistry } from '../agent/turns.ts'
 import type { ContentPart } from '../llm/types.ts'
-import { claimNextTurn, pendingInbox, queuedByRequest, queueTurn, removeQueued, replaceQueued, type InboxMessage } from '../session/inbox.ts'
+import { claimNextTurn, pendingInbox, queuedByRequest, queueTurn, removeQueued, replaceQueued, steerQueued, type InboxMessage } from '../session/inbox.ts'
 import type { SessionHandle } from '../session/store.ts'
 
 /**
@@ -24,8 +24,10 @@ import type { SessionHandle } from '../session/store.ts'
  * - `GET /api/sessions/<id>/queue` — `{items: [{id, requestId?, text, content}]}`.
  * - `POST /api/sessions/<id>/queue/remove {id}` — `{outcome: 'removed'}`, or `409 {outcome: 'claimed'}` when its turn
  *   already took it.
- * - `POST /api/sessions/<id>/queue/edit {id, text}` — text-only rows, as DSH's queue dock edits only rows whose every part
- *   is text; `400` for a row with an attachment, `409` once claimed.
+ * - `POST /api/sessions/<id>/queue/edit {id, text}` — rewrites the row's text and keeps its attachments; `409` once
+ *   claimed.
+ * - `POST /api/sessions/<id>/queue/steer {id}` — moves the row into the running turn's next step in one splice pair;
+ *   `409` once claimed, `409 session/steer-unavailable` with nothing running.
  *
  * The drain: when the session has nothing in flight (the live-turn registry is idle, which a `/compact` hold also
  * settles), the first row is claimed — a splice with no `outcome` — and run as the session's next turn.
@@ -76,6 +78,7 @@ export function queueRequest(
 ): { readonly item: QueueItem; readonly duplicate: boolean } | undefined {
   const store = ctx.session.store
   if (requestId !== undefined) {
+    // Claimed or not: a retry of a request the host already took is answered with that row, never a second one.
     const already = queuedByRequest(store, handle, requestId)
     if (already !== undefined) return { item: itemOf(already), duplicate: true }
   }
@@ -116,7 +119,7 @@ function answer(response: ServerResponse, status: number, body: unknown): void {
   response.end(`${JSON.stringify(body)}\n`)
 }
 
-const QUEUE_PATH = /^\/api\/sessions\/(session-[0-9a-f-]{36})\/queue(\/remove|\/edit)?$/i
+const QUEUE_PATH = /^\/api\/sessions\/(session-[0-9a-f-]{36})\/queue(\/remove|\/edit|\/steer)?$/i
 
 /** The queue routes; answers whether the request was one of them. */
 export async function handleQueueRoute(ctx: Context, url: URL, request: IncomingMessage, response: ServerResponse): Promise<boolean> {
@@ -144,6 +147,21 @@ export async function handleQueueRoute(ctx: Context, url: URL, request: Incoming
     answer(response, 400, { error: 'an id is required' })
     return true
   }
+  if (action === '/steer') {
+    /**
+     * One operation, so every page sees the row move at once (developer-ten's review): out of the queue and into the
+     * running turn's next step. With no turn running there is nothing to steer into, as DSH answers
+     * `session/steer-unavailable` and disables Steer.
+     */
+    const turns = ctx.get('turns') as TurnRegistry | undefined
+    if (turns?.isRunning(id) !== true) {
+      answer(response, 409, { code: 'session/steer-unavailable', error: `session ${id} has no running turn to steer into` })
+      return true
+    }
+    if (steerQueued(ctx.session.store, handle, row)) answer(response, 200, { outcome: 'steered', id: row })
+    else answer(response, 409, { outcome: 'claimed', id: row, error: `queued message ${row} is no longer waiting` })
+    return true
+  }
   if (action === '/remove') {
     if (removeQueued(ctx.session.store, handle, row)) answer(response, 200, { outcome: 'removed', id: row })
     else answer(response, 409, { outcome: 'claimed', id: row, error: `queued message ${row} is no longer waiting` })
@@ -159,11 +177,12 @@ export async function handleQueueRoute(ctx: Context, url: URL, request: Incoming
     answer(response, 409, { outcome: 'claimed', id: row, error: `queued message ${row} is no longer waiting` })
     return true
   }
-  if (!current.content.every((part) => part.type === 'text')) {
-    answer(response, 400, { error: 'a queued message with an attachment cannot be edited; remove it and send it again' })
-    return true
-  }
-  replaceQueued(ctx.session.store, handle, row, [{ type: 'text', text }])
+  /**
+   * The text is rewritten and every attachment kept, in place: heddle's queue already let a person fix a queued
+   * message's words without losing its image (check-composer), and a generic rewrite must never turn an attachment-
+   * bearing row into a text-only one (developer-twelve's review).
+   */
+  replaceQueued(ctx.session.store, handle, row, [{ type: 'text', text }, ...current.content.filter((part) => part.type !== 'text')])
   answer(response, 200, { outcome: 'edited', id: row })
   return true
 }
@@ -246,8 +265,19 @@ function drain(ctx: Context, session: string): void {
     ...(maxRounds !== undefined ? { maxRounds } : {}),
   })
   void turn
-    .catch((error: unknown) => {
-      ctx.logger.warn('queue: the queued turn in session %s failed — %s', session, error instanceof Error ? error.message : String(error))
-    })
+    .then(
+      (result) => {
+        // A turn a person stopped holds the rest (DSH's keepInbox; the stop route holds it too).
+        if ((result as { ended?: readonly string[] } | undefined)?.ended?.includes('stopped by the caller') === true) holdQueue(ctx, session)
+      },
+      (error: unknown) => {
+        /**
+         * DSH's driver goes idle after an error without waking for pending input (developer-ten's review): the rest of
+         * the queue waits for the person's next send instead of meeting the same failure.
+         */
+        holdQueue(ctx, session)
+        ctx.logger.warn('queue: the queued turn in session %s failed — %s', session, error instanceof Error ? error.message : String(error))
+      },
+    )
     .finally(() => kick(ctx, session))
 }
