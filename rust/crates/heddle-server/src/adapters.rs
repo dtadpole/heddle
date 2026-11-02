@@ -300,6 +300,12 @@ impl SessionService for StoreSessions {
             .ok_or_else(|| ServiceError::new(format!("no session {id}")))?;
         let parts = parts_of(content)?;
         let store = self.service.store();
+        // The retry check and the append under one lock, so two concurrent retries cannot both append
+        // (developer-eight's review). TypeScript has no await between them, which is the same guarantee per process.
+        static QUEUEING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _queueing = QUEUEING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(request) = request_id.as_deref()
             && let Some(already) = heddle_session::inbox::queued_by_request(store, &handle, request)
                 .map_err(|error| ServiceError::new(error.to_string()))?

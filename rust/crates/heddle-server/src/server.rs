@@ -2587,6 +2587,7 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
         max_rounds: state.options().max_rounds,
         model: selection.model.clone(),
         reasoning_effort: selection.reasoning_effort.clone(),
+        answer_pending: false,
     };
     let runner = state.harness().turns.clone();
     let sessions = state.harness().sessions.clone();
@@ -3416,6 +3417,7 @@ async fn run_queued(state: &AppState, session: &str, row: crate::services::Queue
         max_rounds: state.options().max_rounds,
         model: selection.model.clone(),
         reasoning_effort: selection.reasoning_effort.clone(),
+        answer_pending: true,
     };
     let outcome = state.harness().turns.clone().run_turn(request).await;
     drop(guard);

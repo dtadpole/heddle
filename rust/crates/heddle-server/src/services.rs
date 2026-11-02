@@ -474,6 +474,9 @@ pub struct TurnRequest {
     pub max_rounds: Option<u32>,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
+    /// Answer the user message already in the log instead of writing `prompt` (#162: the queue's claim wrote it, in one
+    /// write with the claim). `answerPending` in the TypeScript build.
+    pub answer_pending: bool,
 }
 
 /// What a finished turn reports on its `done` frame.
