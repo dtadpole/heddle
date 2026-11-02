@@ -46,6 +46,10 @@ pub struct InboxMessage {
     /// Who wrote it, when it was not a person (the same field a recorded message carries).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<Value>,
+    /// The id of the request that queued it, when a page queued it (issue #162): a retried request finds its row by
+    /// it, and a page matches its pending row to the host's.
+    #[serde(rename = "requestId", default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
 }
 
 /// The inbox's state: DSH's projection, `{"next-turn": [...], "next-step": [...]}`.
@@ -186,6 +190,7 @@ pub fn queue_steer(
         role: "user".to_string(),
         content,
         source,
+        request_id: None,
     };
     let start = pending_inbox(store, handle)?.next_step.len();
     let inserted =
@@ -213,11 +218,24 @@ pub fn queue_turn(
     content: Vec<ContentPart>,
     source: Option<Value>,
 ) -> Result<InboxMessage, InboxError> {
+    queue_turn_request(store, handle, content, source, None)
+}
+
+/// [`queue_turn`] for a page's queued send, with the request's id on the row (issue #162). `queueTurn` with
+/// `{requestId}` in the TypeScript build.
+pub fn queue_turn_request(
+    store: &SessionStore,
+    handle: &SessionHandle,
+    content: Vec<ContentPart>,
+    source: Option<Value>,
+    request_id: Option<String>,
+) -> Result<InboxMessage, InboxError> {
     let message = InboxMessage {
         id: format!("inbox-{}", uuid::Uuid::new_v4()),
         role: "user".to_string(),
         content,
         source,
+        request_id,
     };
     let start = pending_inbox(store, handle)?.next_turn.len();
     let inserted =
@@ -231,6 +249,93 @@ pub fn queue_turn(
         AppendOptions::default(),
     )?;
     Ok(message)
+}
+
+/// The queued next-turn message a request put there, so a retry of that request is answered with the same row
+/// (#162). `queuedByRequest` in the TypeScript build.
+pub fn queued_by_request(
+    store: &SessionStore,
+    handle: &SessionHandle,
+    request_id: &str,
+) -> Result<Option<InboxMessage>, InboxError> {
+    Ok(pending_inbox(store, handle)?
+        .next_turn
+        .into_iter()
+        .find(|message| message.request_id.as_deref() == Some(request_id)))
+}
+
+/// Take a queued prompt back out before its turn: one splice that removes it, marked `outcome: "canceled"` as DSH
+/// marks input dropped unrun. Answers whether it was still queued (#162). `removeQueued` in the TypeScript build.
+pub fn remove_queued(
+    store: &SessionStore,
+    handle: &SessionHandle,
+    id: &str,
+) -> Result<bool, InboxError> {
+    let list = pending_inbox(store, handle)?.next_turn;
+    let Some(start) = list.iter().position(|message| message.id == id) else {
+        return Ok(false);
+    };
+    store.append(
+        handle,
+        NewEvent::new(INBOX_SPLICED)
+            .field("target", NEXT_TURN)
+            .field("start", start as u64)
+            .field("removedCount", 1u64)
+            .field("inserted", Value::Array(Vec::new()))
+            .field("outcome", "canceled"),
+        AppendOptions::default(),
+    )?;
+    Ok(true)
+}
+
+/// Rewrite a queued prompt in place, keeping its id, request and place (#162). Answers whether it was still queued.
+/// `replaceQueued` in the TypeScript build.
+pub fn replace_queued(
+    store: &SessionStore,
+    handle: &SessionHandle,
+    id: &str,
+    content: Vec<ContentPart>,
+) -> Result<bool, InboxError> {
+    let list = pending_inbox(store, handle)?.next_turn;
+    let Some(start) = list.iter().position(|message| message.id == id) else {
+        return Ok(false);
+    };
+    let mut message = list[start].clone();
+    message.content = content;
+    let inserted =
+        serde_json::to_value(std::slice::from_ref(&message)).expect("a message is serializable");
+    store.append(
+        handle,
+        NewEvent::new(INBOX_SPLICED)
+            .field("target", NEXT_TURN)
+            .field("start", start as u64)
+            .field("removedCount", 1u64)
+            .field("inserted", inserted),
+        AppendOptions::default(),
+    )?;
+    Ok(true)
+}
+
+/// Claim the first queued prompt for the turn about to answer it (DSH's next-turn claim at a turn's first step): one
+/// splice with no `outcome`; the caller writes it as the turn's user message right after (#162). `claimNextTurn` in
+/// the TypeScript build.
+pub fn claim_next_turn(
+    store: &SessionStore,
+    handle: &SessionHandle,
+) -> Result<Option<InboxMessage>, InboxError> {
+    let Some(queued) = pending_inbox(store, handle)?.next_turn.into_iter().next() else {
+        return Ok(None);
+    };
+    store.append(
+        handle,
+        NewEvent::new(INBOX_SPLICED)
+            .field("target", NEXT_TURN)
+            .field("start", 0u64)
+            .field("removedCount", 1u64)
+            .field("inserted", Value::Array(Vec::new())),
+        AppendOptions::default(),
+    )?;
+    Ok(Some(queued))
 }
 
 /// Claim what a step proposes and write **none** of it: the claim of a step the archived-session gate rejected.
