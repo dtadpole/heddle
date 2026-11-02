@@ -14,6 +14,7 @@ heddle-llm.workspace = true
 heddle-sandbox.workspace = true
 heddle-session.workspace = true
 futures.workspace = true
+icu_collator.workspace = true
 serde.workspace = true
 # `preserve_order`: argument violations name present properties in the order the schema declares them, as
 # DSH's validator does, whatever else the build pulls in.

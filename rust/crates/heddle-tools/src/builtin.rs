@@ -4,12 +4,17 @@
 //! not that the catalogue is large. Every spec description is copied verbatim from the TypeScript build:
 //! it is what the model is told, so the two binaries must tell it the same thing.
 
+use std::cmp::Ordering;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
+use icu_collator::options::{AlternateHandling, CollatorOptions, Strength};
+use icu_collator::preferences::{CollationCaseFirst, CollationNumericOrdering};
+use icu_collator::{Collator, CollatorBorrowed, CollatorPreferences};
 use serde_json::json;
 
 use crate::gates::SandboxGate;
@@ -432,6 +437,33 @@ fn listing_refusal(shown: &str, error: &std::io::Error) -> ToolResult {
     }
 }
 
+/// The order `list_dir` gives a folder's entries: DSH's (`dsh-fs-local` listDirectory sorts the children with
+/// `name.localeCompare`), which the TypeScript build shares. That is ICU collation with the options Node's default
+/// `Intl.Collator` resolves to under an English locale: tertiary strength (`sensitivity: "variant"`), punctuation
+/// not ignorable (`ignorePunctuation: false`), case-first off and numeric off. Names that collate equal keep byte
+/// order, because Node's `readdir` hands them over sorted by bytes (libuv's scandir) before its stable sort. The
+/// collator is built once.
+///
+/// Live-testing issue #247: the build sorted by bytes, so `B.txt` came before `a.txt` and `é.txt` after `plain.txt`.
+/// Stated difference: the Rust build always uses root collation, where Node follows the process locale (`LANG`); under
+/// an English locale they agree. If the collator could not be built, the order falls back to bytes.
+fn listing_order(left: &OsStr, right: &OsStr) -> Ordering {
+    static COLLATOR: LazyLock<Option<CollatorBorrowed<'static>>> = LazyLock::new(|| {
+        let mut options = CollatorOptions::default();
+        options.strength = Some(Strength::Tertiary);
+        options.alternate_handling = Some(AlternateHandling::NonIgnorable);
+        let mut preferences = CollatorPreferences::default();
+        preferences.case_first = Some(CollationCaseFirst::False);
+        preferences.numeric_ordering = Some(CollationNumericOrdering::False);
+        Collator::try_new(preferences, options).ok()
+    });
+    let collated = match COLLATOR.as_ref() {
+        Some(collator) => collator.compare(&left.to_string_lossy(), &right.to_string_lossy()),
+        None => Ordering::Equal,
+    };
+    collated.then_with(|| left.cmp(right))
+}
+
 fn list_dir_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
     let list = Arc::clone(&sandbox);
     tool_fn(
@@ -474,22 +506,22 @@ fn list_dir_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
                     }
                     Err(error) => return Ok(listing_refusal(&shown, &error)),
                 }
-                let mut entries = Vec::new();
+                let mut entries: Vec<(std::ffi::OsString, tokio::fs::DirEntry)> = Vec::new();
                 let mut dir = match tokio::fs::read_dir(&target).await {
                     Ok(dir) => dir,
                     Err(error) => return Ok(listing_refusal(&shown, &error)),
                 };
                 loop {
                     match dir.next_entry().await {
-                        Ok(Some(entry)) => entries.push(entry),
+                        Ok(Some(entry)) => entries.push((entry.file_name(), entry)),
                         Ok(None) => break,
                         Err(error) => return Ok(listing_refusal(&shown, &error)),
                     }
                 }
-                entries.sort_by_key(|entry| entry.file_name());
+                entries.sort_by(|(left, _), (right, _)| listing_order(left, right));
                 let mut lines = Vec::with_capacity(entries.len());
-                for entry in &entries {
-                    let name = entry.file_name().to_string_lossy().into_owned();
+                for (name, entry) in &entries {
+                    let name = name.to_string_lossy().into_owned();
                     // Follow the entry like the TypeScript `statSync` does: a symlink to a directory is a
                     // directory in the listing. A broken link falls back to the entry's own type.
                     let metadata = match tokio::fs::metadata(entry.path()).await {
@@ -1212,6 +1244,62 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn listing_order_is_dshs_localecompare_not_byte_order() {
+        // Live-testing issue #247's six names, then punctuation, digits, a space, a folder and case. Each expected
+        // order is what Node's `localeCompare` gives under en-US after readdir's byte-sorted hand-over.
+        let sorted = |names: &[&str]| {
+            let mut names: Vec<&OsStr> = names.iter().map(OsStr::new).collect();
+            names.sort_by(|left, right| listing_order(left, right));
+            names
+                .into_iter()
+                .map(|name| name.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            sorted(&[
+                "plain.txt",
+                "\u{e9}.txt",
+                "e.txt",
+                "c.txt",
+                "B.txt",
+                "a.txt"
+            ]),
+            [
+                "a.txt",
+                "B.txt",
+                "c.txt",
+                "e.txt",
+                "\u{e9}.txt",
+                "plain.txt"
+            ]
+        );
+        assert_eq!(
+            sorted(&[
+                "Zed", "zed", "alpha", "9nine", "10ten", "-dash", "_under", ".hidden", "Docs",
+                "a b", "a~b", "a#b",
+            ]),
+            [
+                "_under", "-dash", ".hidden", "10ten", "9nine", "a b", "a#b", "a~b", "alpha",
+                "Docs", "zed", "Zed",
+            ]
+        );
+    }
+
+    #[test]
+    fn names_that_collate_equal_keep_byte_order() {
+        // A zero-width joiner is ignorable, and precomposed and decomposed é are canonically equal, so each pair
+        // collates equal; Node keeps readdir's byte order for them, whatever order they arrive in.
+        for names in [
+            ["a\u{200d}b", "ab", "\u{e9}", "e\u{301}"],
+            ["e\u{301}", "\u{e9}", "ab", "a\u{200d}b"],
+        ] {
+            let mut names: Vec<&OsStr> = names.iter().map(OsStr::new).collect();
+            names.sort_by(|left, right| listing_order(left, right));
+            assert_eq!(names, ["ab", "a\u{200d}b", "e\u{301}", "\u{e9}"]);
+        }
+    }
+
     #[tokio::test]
     async fn list_dir_follows_a_symlink_to_a_directory() {
         let root = tempdir();
