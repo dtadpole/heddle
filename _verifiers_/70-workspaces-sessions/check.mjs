@@ -1585,6 +1585,95 @@ test('after a crash, a session whose lock names a pid now another live process\'
   }
 })
 
+test('a server stopped with SIGTERM, and a command line that exits, leave no lock on the sessions they wrote (#248)', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * Issue #248 by its steps: run turns from the command line, and with the server, stop the server with SIGTERM the way a
+   * service manager stops it, and look for the lock files. Measured before the fix: the Rust build left every one, each
+   * naming a dead pid (its release was in a destructor no exit ran; the live 3097 store held 926 lock files, 782 of them
+   * naming dead pids), and once such a pid named another live process the session refused every write. The TypeScript
+   * build let go of them all on both exits. DSH's lock is a kernel flock, which dies with its holder
+   * (dsh-session-persistence-jsonl lib/index.js:692-716; its release, :724-734, closes the descriptor).
+   */
+  const { readdirSync } = await import('node:fs')
+  const h = harness('lock-release')
+  const serverArgs = ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')]
+  let live
+  try {
+    /** Every lock file under the session root, with what it says. */
+    const locksLeft = () => {
+      const found = []
+      const walk = (dir) => {
+        let entries = []
+        try {
+          entries = readdirSync(dir, { withFileTypes: true })
+        } catch {
+          return
+        }
+        for (const entry of entries) {
+          if (entry.isDirectory()) walk(join(dir, entry.name))
+          else if (entry.name.endsWith('.lock')) found.push(`${entry.name}: ${readFileSync(join(dir, entry.name), 'utf8').trim()}`)
+        }
+      }
+      walk(join(h.home, 'sessions'))
+      return found
+    }
+    const newSession = async () => {
+      const made = await runCli(adminArgs(h, ['session', 'new', h.work, '--json']), { env: h.env, cwd: h.work })
+      assert.equal(made.code, 0, `the session was created\n${made.stdout}${made.stderr}`)
+      const id = parseJson(made.stdout)?.session
+      assert.ok(typeof id === 'string', `it has an id\n${made.stdout}`)
+      return id
+    }
+
+    /** The server: three sessions it writes, so it holds a lock on each, then SIGTERM. The command line made them; its own exit is judged below. */
+    const ids = [await newSession(), await newSession(), await newSession()]
+    live = await startServer(serverArgs, { ...h.env, HOME: h.home })
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    for (const id of ids) {
+      const response = await fetch(new URL('/api/turn', live.url), {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ session: id, prompt: 'remember the word loom' }),
+      })
+      const stream = await response.text()
+      assert.equal(response.status, 200, `the server's turn in ${id} ran\n${stream}`)
+      assert.ok(!stream.includes('event: error'), `and did not fail\n${stream}`)
+    }
+    const held = locksLeft()
+    assert.equal(held.length, 3, `the server holds a lock on each session it wrote\n${held.join('\n')}`)
+    for (const lock of held) assert.equal(lock.split(': ')[1].split(/\s+/)[0], String(live.pid), `${lock} names the server, process ${live.pid}`)
+    const server = live
+    live = undefined
+    const code = await server.stop('SIGTERM')
+    assert.deepEqual(locksLeft(), [], `a server stopped with SIGTERM leaves no lock behind (it exited ${code})\n${server.output()}`)
+
+    /** The command line: a new session's turn, a made session resumed, and a turn that fails after it wrote its prompt. */
+    const first = await runCli([...h.args, '--turn', 'remember the word loom'], { env: h.env, cwd: h.work })
+    assert.equal(first.code, 0, `the command line's turn ran\n${first.stdout}${first.stderr}`)
+    assert.deepEqual(locksLeft(), [], 'a command line that exits after its turn leaves no lock behind')
+    const resumed = await newSession()
+    assert.deepEqual(locksLeft(), [], 'making a session leaves no lock behind')
+    const again = await runCli([...h.args, '--resume', resumed, '--turn', 'and again'], { env: h.env, cwd: h.work })
+    assert.equal(again.code, 0, `the resumed turn ran\n${again.stdout}${again.stderr}`)
+    assert.deepEqual(locksLeft(), [], 'nor does a resumed turn')
+    const broken = join(h.home, 'broken.json')
+    writeFileSync(broken, JSON.stringify({ default: 'scripted', endpoints: [{ name: 'scripted', kind: 'scripted', baseUrl: join(h.home, 'no-such-script.json'), model: 'scripted' }] }))
+    const failed = await runCli([...h.args, '--resume', resumed, '--turn', 'this one fails'], { env: { ...h.env, HEDDLE_CONFIG: broken }, cwd: h.work })
+    assert.notEqual(failed.code, 0, `the turn failed: its script cannot be read\n${failed.stdout}${failed.stderr}`)
+    assert.ok(
+      readTranscript(join(h.home, 'sessions', resumed)).some((event) => event.type === 'message' && event.message?.content?.[0]?.text === 'this one fails'),
+      'after it wrote its prompt, so it held the lock',
+    )
+    assert.deepEqual(locksLeft(), [], 'nor does a turn that fails')
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 test('a session log that is not a readable log is left out after a restart, and the server still starts whole (#130)', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   /**
@@ -1956,12 +2045,19 @@ function startServer(args, env) {
       })
       let output = ''
       let settled = false
+      /** Resolves with the exit code (or the signal's name) once the server is gone. */
+      const exited = new Promise((done) => child.once('exit', (code, signal) => done(code ?? signal)))
+      /** Stop it the way a service manager or a person does (SIGTERM, SIGINT), and wait for it to exit. */
+      const stop = (signal) => {
+        child.kill(signal)
+        return exited
+      }
       const onData = (chunk) => {
         output += chunk.toString()
         const match = /heddle web: (http:\/\/\S+)/.exec(output)
         if (match && !settled) {
           settled = true
-          resolvePromise({ url: match[1], pid: child.pid, kill: () => child.kill('SIGKILL'), output: () => output })
+          resolvePromise({ url: match[1], pid: child.pid, kill: () => child.kill('SIGKILL'), stop, output: () => output })
         }
       }
       child.stdout.on('data', onData)

@@ -7,7 +7,9 @@ import {
   formatLock,
   judgeLock,
   type LockProbe,
+  namesThisProcess,
   ownedSentence,
+  ownLock,
   parseLock,
   parseProcStat,
   parsePsLine,
@@ -121,4 +123,14 @@ test('the refusal names the process and the lock file, and says how to clear it,
     'session "session-a" is already owned by an active write handle. Its lock file is session.lock, beside the session\'s log; if no heddle is writing this session, delete that file and try again.',
   )
   assert.equal(ownedSentence('session-a'), 'session "session-a" is already owned by an active write handle', 'DSH\'s sentence alone')
+})
+
+test('a lock names this process only with its pid and its identity, so letting go never removes another\'s (#248)', () => {
+  const own = ownLock()
+  assert.equal(namesThisProcess(formatLock(own)), true, 'the lock this process writes')
+  assert.equal(namesThisProcess(`${own.pid}\n`), true, 'a pid-only lock naming this pid: no other live process can hold it')
+  assert.equal(namesThisProcess(`${own.pid + 1}\n`), false, 'another pid')
+  assert.equal(namesThisProcess(''), false, 'no pid')
+  if (own.start !== undefined) assert.equal(namesThisProcess(formatLock({ ...own, start: '1' })), false, 'this pid with another start')
+  if (own.boot !== undefined) assert.equal(namesThisProcess(formatLock({ ...own, boot: 'other' })), false, 'this pid in another boot')
 })

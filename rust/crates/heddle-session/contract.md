@@ -40,7 +40,11 @@ grounded_in:
   `session "<id>" is already owned by an active write handle (process <pid>, <name>). Its lock file is
   <id>.lock, beside the session's log; if process <pid> is not heddle, delete that file and try again.`
   `test/session-lock.fixtures.json` holds the lines both suites read. One machine and one pid namespace,
-  as before: a pid names a process on the machine that wrote it.
+  as before: a pid names a process on the machine that wrote it. A process lets go of every lock it holds
+  when it ends, removing each file only while it still names this process by pid and identity (#248): the
+  TypeScript build in its `exit` handler, the Rust build in the `heddle` binary's shell after a run returns
+  (a server stopped by SIGTERM or SIGINT, a command line done or failed) or a panic unwinds out of it
+  (`store::release_held_writer_locks`).
 
 ## Decisions a dependent crate should know
 

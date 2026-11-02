@@ -504,6 +504,21 @@ pub fn own_lock() -> LockContent {
     .clone()
 }
 
+/// Whether a lock file's text names this process: its pid, and, where both the line and this process say them, its
+/// start and its boot (`namesThisProcess` in the TypeScript build). Letting go removes a lock only then, so a lock
+/// another process wrote is never removed, whatever happened to this one's (#248).
+pub fn names_this_process(text: &str) -> bool {
+    let Some(lock) = parse_lock(text) else {
+        return false;
+    };
+    let own = own_lock();
+    let agrees = |written: &Option<String>, mine: &Option<String>| match (written, mine) {
+        (Some(written), Some(mine)) => written == mine,
+        _ => true,
+    };
+    lock.pid == own.pid && agrees(&lock.start, &own.start) && agrees(&lock.boot, &own.boot)
+}
+
 /// Give a lock just written with identity its modification time, [`IDENTIFIED_LOCK_MTIME_S`]; a pid-only lock keeps
 /// the time it was written, which is what the pid-only rule reads. A file system that refuses the time still holds
 /// the lock; only a build from before #202 reads it differently.
@@ -851,5 +866,43 @@ mod tests {
             );
         }
         assert_eq!(parse_lock(&format_lock(&own)), Some(own));
+    }
+
+    #[test]
+    fn a_lock_names_this_process_only_with_its_pid_and_its_identity() {
+        let own = own_lock();
+        assert!(
+            names_this_process(&format_lock(&own)),
+            "the lock this process writes"
+        );
+        assert!(
+            names_this_process(&format!("{}\n", own.pid)),
+            "a pid-only lock naming this pid: no other live process can hold it"
+        );
+        assert!(
+            !names_this_process(&format!("{}\n", own.pid + 1)),
+            "another pid"
+        );
+        assert!(!names_this_process(""), "no pid");
+        if own.start.is_some() {
+            let earlier = LockContent {
+                start: Some("1".to_string()),
+                ..own.clone()
+            };
+            assert!(
+                !names_this_process(&format_lock(&earlier)),
+                "this pid with another start: an earlier process's lock"
+            );
+        }
+        if own.boot.is_some() {
+            let other_boot = LockContent {
+                boot: Some("other".to_string()),
+                ..own.clone()
+            };
+            assert!(
+                !names_this_process(&format_lock(&other_boot)),
+                "this pid in another boot"
+            );
+        }
     }
 }

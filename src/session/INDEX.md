@@ -108,7 +108,10 @@ both builds write byte for byte: `<pid> boot=<boot id> start=<start>`. It is sta
 written in another boot, when its pid now names a process that started at another time, when a pid-only lock (every
 build before #202) names a process that started after the lock was written, or when its pid's process is another
 user's than the file's. A live holder is refused in words that name the process and the lock file and say how to clear
-it; the Rust build (`writer_lock.rs`) says the same.
+it; the Rust build (`writer_lock.rs`) says the same. A process lets go of every lock it holds when it ends, and only of
+a file that still names it by pid and identity (`namesThisProcess`, #248): this build in its `exit` handler, the Rust
+build in its binary's shell, which until #248 left every lock behind because its release was in a destructor no exit
+ran.
 
 This is a source folder rather than a type folder: it carries code, not instances of a
 registered content type. Its entry point exists so that a reader who opens it learns

@@ -378,3 +378,36 @@ test('a lock whose holder is alive and is the process it records is refused, nam
   const taken = appendFresh(root, id)
   assert.ok(!(taken instanceof Error), `the next writer takes the lock\n${taken instanceof Error ? taken.message : ''}`)
 })
+
+/**
+ * Issue #248: the Rust build never removed its lock files (the release was in a destructor that no exit ran), so every
+ * session a process wrote kept a lock naming its dead pid. This build lets go in its exit handler, on a clean exit and on
+ * a failing one alike; these pin that, and the Rust build's binary is judged the same way in
+ * `rust/crates/heddle/tests/writer_locks_at_exit.rs` and in verifier 70.
+ */
+test('a process that wrote sessions leaves no lock behind when it exits, cleanly or with a failure (#248)', async () => {
+  for (const ending of ['return', 'throw', 'exit 3']) {
+    const root = join(scratch, `exit-${ending.replace(' ', '-')}`)
+    const script = join(scratch, `exit-${ending.replace(' ', '-')}.mjs`)
+    writeFileSync(
+      script,
+      [
+        `import { SessionStore } from ${JSON.stringify(storeUrl)}`,
+        `const store = new SessionStore(${JSON.stringify(root)})`,
+        `for (let n = 0; n < 3; n += 1) store.append(store.create({ cwd: ${JSON.stringify(scratch)} }), { type: 'test/writer' })`,
+        ending === 'throw' ? `throw new Error('the run failed')` : ending === 'exit 3' ? 'process.exit(3)' : '',
+      ].join('\n'),
+    )
+    const child = spawn(process.execPath, [script], { stdio: ['ignore', 'ignore', 'pipe'] })
+    const code = await new Promise<number | null>((resolve) => child.once('exit', (exitCode) => resolve(exitCode)))
+    assert.equal(code === 0, ending === 'return', `the writer ended as asked (${ending}): exit ${code}`)
+    const store = new SessionStore(root)
+    const sessions = store.list()
+    assert.equal(sessions.length, 3, `${ending}: the three sessions were written`)
+    for (const meta of sessions) {
+      const handle = store.open(meta.id)
+      assert.ok(handle !== null)
+      assert.equal(existsSync(join(handle.dir, `${handle.id}.lock`)), false, `${ending}: no lock is left for ${meta.id}`)
+    }
+  }
+})

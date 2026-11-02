@@ -23,8 +23,20 @@ fn main() -> ExitCode {
     let mut stderr = std::io::stderr();
     let exit = {
         let mut out = Output::new(&mut stdout, &mut stderr);
-        run(&invocation, &mut out)
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&invocation, &mut out)))
+        {
+            Ok(exit) => exit,
+            Err(panic) => {
+                heddle_session::store::release_held_writer_locks();
+                std::panic::resume_unwind(panic);
+            }
+        }
     };
+    // Every way out of a run lets go of the session writer locks this process holds: a server stopped by SIGTERM or
+    // SIGINT returns here after its graceful close, and a command line here after its turn, failed or not (#248). The
+    // stores' `Drop` never ran on these paths — a store a spawned task still holds outlives the run, and statics are
+    // not dropped — so every lock file stayed behind naming a dead pid. Only locks that still name this process go.
+    heddle_session::store::release_held_writer_locks();
     // The library reports a closed pipe as no error; a failed flush is no worse than that.
     let _ = stdout.flush();
     let _ = stderr.flush();

@@ -25,7 +25,7 @@ import { SessionTitles } from './title.ts'
 import { decodeTranscript, encodeFrame, isEventRecord, judgeLogHeader, type LogHeader } from './transcript.ts'
 import { normalizeSessionTitle } from './title-text.ts'
 
-import { formatLock, judgeLock, type LockFile, ownedSentence, ownLock, parseLock, stampLock } from './writer-lock.ts'
+import { formatLock, judgeLock, type LockFile, namesThisProcess, ownedSentence, ownLock, parseLock, stampLock } from './writer-lock.ts'
 
 /**
  * The session store.
@@ -722,10 +722,13 @@ export function lockPath(handle: SessionHandle): string {
 const heldByProcess = new Map<string, number>()
 let exitHookInstalled = false
 
-/** Remove a lock file only if it still names this process, so letting go never removes somebody else's lock. */
+/**
+ * Remove a lock file only if it still names this process, by pid and identity (`namesThisProcess`), so letting go never
+ * removes somebody else's lock.
+ */
 function removeOwnLock(path: string): void {
   try {
-    if (parseLock(readFileSync(path, 'utf8'))?.pid === process.pid) unlinkSync(path)
+    if (namesThisProcess(readFileSync(path, 'utf8'))) unlinkSync(path)
   } catch {
     // Already gone, or unreadable: there is nothing of ours left to remove.
   }

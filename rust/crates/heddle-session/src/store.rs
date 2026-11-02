@@ -12,7 +12,8 @@
 //! - **One process writes a session at a time.** The first append takes a writer lock beside the log
 //!   ([`lock_path`]: `<id>.lock`, or `session.lock` in an old-layout directory, holding the holder's pid, boot
 //!   and start — the TypeScript build's file, byte for byte, [`crate::writer_lock`]) and keeps it until
-//!   [`SessionStore::release`] or the store is dropped. Another process's append is refused with
+//!   [`SessionStore::release`], the store is dropped, or the process ends ([`release_held_writer_locks`], which
+//!   the `heddle` binary calls on every way out, #248). Another process's append is refused with
 //!   [`SessionError::AlreadyOwned`], DSH's `session "<id>" is already owned by an active write handle`; a lock
 //!   whose holder is gone is taken over, also when its pid now names another process (#202).
 //!   Taking the lock drops the fold, so the first write re-reads what a previous holder appended. Without
@@ -140,9 +141,10 @@ pub fn lock_path(handle: &SessionHandle) -> String {
 static HELD_BY_PROCESS: LazyLock<Mutex<HashMap<PathBuf, usize>>> = LazyLock::new(Default::default);
 
 /// Remove a lock file only if it still names this process, so letting go never removes another's lock.
+/// Its identity is checked as well as its pid ([`crate::writer_lock::names_this_process`]).
 fn remove_own_lock(path: &Path) {
     if let Ok(text) = std::fs::read_to_string(path)
-        && crate::writer_lock::parse_lock(&text).map(|lock| lock.pid) == Some(std::process::id())
+        && crate::writer_lock::names_this_process(&text)
     {
         let _ = std::fs::remove_file(path);
     }
@@ -244,6 +246,28 @@ fn release_writer_lock(path: &Path) {
     }
     held.remove(path);
     remove_own_lock(path);
+}
+
+/// Let go of every writer lock this process holds, whichever store took it: the process is ending (#248).
+///
+/// The process shell calls it on every way out of a run — a server stopped by SIGTERM or SIGINT, a command line that
+/// returns, a failure, a panic that unwinds out of the run — because [`SessionStore`]'s `Drop` is not one of them: a
+/// store a spawned task or a listener still holds is never dropped, and the process ends without dropping its statics.
+/// So every lock file the Rust build wrote stayed on disk naming a dead pid (the live 3097 store held 782 such), and
+/// one whose pid came round again refused the session. The TypeScript build lets go in its `exit` handler
+/// (`acquireWriterLock` in `src/session/store.ts`). A file is removed only while it still names this process, by pid
+/// and identity, so another holder's lock is never touched. Do not call it while a store in this process still
+/// writes: the stores would go on writing without the lock.
+pub fn release_held_writer_locks() {
+    let paths: Vec<PathBuf> = HELD_BY_PROCESS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .drain()
+        .map(|(path, _)| path)
+        .collect();
+    for path in paths {
+        remove_own_lock(&path);
+    }
 }
 
 /// The meter sections of one request.
@@ -1112,8 +1136,9 @@ impl SessionStore {
     }
 
     /// Let go of the session's writer lock, so another process may write it. Nothing has to call this:
-    /// dropping the store lets go of every lock, and a lock whose holder died is taken over by the next
-    /// writer. A later append takes the lock again.
+    /// dropping the store lets go of every lock, the process lets go of every lock it holds when it ends
+    /// ([`release_held_writer_locks`], #248), and a lock whose holder died is taken over by the next writer. A
+    /// later append takes the lock again.
     pub fn release(&self, handle: &SessionHandle) {
         let path = self
             .state

@@ -367,6 +367,19 @@ export function ownLock(): LockContent {
 }
 
 /**
+ * Whether a lock file's text names this process: its pid, and, where both the line and this process say them, its start
+ * and its boot (`names_this_process` in the Rust build). Letting go removes a lock only then, so a lock another process
+ * wrote is never removed, whatever happened to this one's (#248).
+ */
+export function namesThisProcess(text: string): boolean {
+  const lock = parseLock(text)
+  if (lock === undefined) return false
+  const own = ownLock()
+  const agrees = (written: string | undefined, mine: string | undefined) => written === undefined || mine === undefined || written === mine
+  return lock.pid === own.pid && agrees(lock.start, own.start) && agrees(lock.boot, own.boot)
+}
+
+/**
  * Give a lock just written with identity its modification time, {@link IDENTIFIED_LOCK_MTIME_S}; a pid-only lock keeps
  * the time it was written, which is what the pid-only rule reads.
  */
