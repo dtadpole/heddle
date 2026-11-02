@@ -181,6 +181,14 @@ test("the file panel's words and the insert menu read in the page language, and 
     assert.equal(await browser.evaluate(BODY), 'the server answered 500')
     await browser.evaluate(fileReads('real'))
     assert.deepEqual(await insertMenu(browser), { empty: 'nothing to insert here', up: '↑ up' })
+
+    // With a file open under Automation tasks, a language change leaves that page where it is (developer-ten's case).
+    await open(browser, 'notes.txt', `${HEAD}.endsWith('  ·  2 lines')`)
+    await browser.evaluate(`(() => { document.getElementById('automation-tasks').click(); return true })()`)
+    assert.ok(await browser.waitFor(`document.querySelector('main')?.dataset.page === 'schedules'`, 10_000), 'Automation tasks opens')
+    await chooseLanguage(browser, 'zh', 'zh-CN')
+    await new Promise((done) => setTimeout(done, 500))
+    assert.equal(await browser.evaluate(`document.querySelector('main')?.dataset.page ?? null`), 'schedules', 'and stays open across the change')
   } finally {
     await browser?.close()
     server.kill()
