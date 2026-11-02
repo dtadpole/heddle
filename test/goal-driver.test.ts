@@ -460,3 +460,58 @@ test('a stopped turn that is not a goal round, a failed one and a length cut onl
   new GoalDriver(new Context(), goals, { run: async () => ({}) }).turnEnded(handle, 'completed')
   assert.equal(goals.get(handle)?.activation, 'armed', 'a turn that completed changes nothing')
 })
+
+/**
+ * Inventory A9: a round starts only after the session's progressing descendants settle (DSH's round driver awaits
+ * `subagents.waitForChildren` before it reserves a round, and reads readiness again after the wait).
+ */
+test('a round waits for the session’s working children, and the condition is read again after the wait', async () => {
+  const { store, goals, handle } = setup()
+  goals.create(handle, { objective: 'two rounds', maxGoalRounds: 2 })
+  const calls: { round: number; prompt: string }[] = []
+  const order: string[] = []
+  let children = 1
+  let release = (): void => {}
+  const settled = new Promise<void>((resolve) => (release = resolve))
+  const run = recordingRun(store, calls)
+  const driver = new GoalDriver(new Context(), goals, {
+    run: async (h, prompt, source) => {
+      order.push(`round ${String(source.round)}`)
+      return await run.run(h, prompt, source)
+    },
+    waitForChildren: async () => {
+      if (children === 0) return false
+      order.push('waiting')
+      await settled
+      children = 0
+      order.push('children settled')
+      return true
+    },
+  })
+  const chain = driver.advance(handle)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.deepEqual(order, ['waiting'], 'no round starts while a child works')
+  release()
+  const outcome = await chain
+  assert.equal(outcome.rounds, 2)
+  assert.deepEqual(order, ['waiting', 'children settled', 'round 1', 'round 2'])
+})
+
+test('a goal paused while its round waits for children starts no round', async () => {
+  const { store, goals, handle } = setup()
+  const created = goals.create(handle, { objective: 'one', maxGoalRounds: 3 })
+  const calls: { round: number; prompt: string }[] = []
+  let waited = false
+  const driver = new GoalDriver(new Context(), goals, {
+    ...recordingRun(store, calls),
+    waitForChildren: async () => {
+      if (waited) return false
+      waited = true
+      goals.pause(handle, { id: created.id, revision: created.revision })
+      return true
+    },
+  })
+  const outcome = await driver.advance(handle)
+  assert.equal(outcome.stopped, 'phase-paused')
+  assert.equal(calls.length, 0, 'the paused goal runs no round after the wait')
+})

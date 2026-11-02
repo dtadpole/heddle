@@ -1685,6 +1685,24 @@ impl heddle_goal::RoundRunner for GoalRounds {
                 .map_err(|error| error.to_string())
         })
     }
+
+    /// A round waits for the goal session's working subagents and teammates (inventory A9).
+    fn wait_for_children(&self, session: &str) -> futures::future::BoxFuture<'static, bool> {
+        let Some(turns) = self
+            .runtime
+            .upgrade()
+            .and_then(|runtime| runtime.turns.clone())
+        else {
+            return Box::pin(async { false });
+        };
+        let sessions = Arc::clone(&self.sessions);
+        let session = session.to_owned();
+        Box::pin(async move {
+            let parent_of =
+                move |id: &str| heddle_goal::round::subagent_parent(sessions.meta(id).as_ref());
+            heddle_goal::round::wait_for_descendants(&turns, &parent_of, &session).await
+        })
+    }
 }
 
 impl Component for GoalDriverComponent {
