@@ -49,6 +49,25 @@ test('a stored markdown file is a file block, not an image', () => {
   })
 })
 
+test('#42: zero-byte ordinary files are admitted with their measured empty digest', () => {
+  withUploads((home) => {
+    const saved = saveUpload('empty.txt', Buffer.alloc(0), { home })
+    const part = readAttachment(saved.path)
+    assert.equal(part.type, 'file')
+    assert.equal(part.bytes, 0)
+    assert.equal(part.sha256, 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855')
+  })
+})
+
+test('#42: empty raster references are refused rather than turned into image parts', () => {
+  withUploads((home) => {
+    for (const extension of ['png', 'PNG', 'jpg', 'jpeg', 'webp', 'gif']) {
+      const saved = saveUpload(`empty.${extension}`, Buffer.alloc(0), { home })
+      assert.throws(() => readAttachment(saved.path), /an empty image is not valid/)
+    }
+  })
+})
+
 test('a path outside the upload directory is refused', () => {
   withUploads(() => {
     assert.throws(() => readAttachment('/etc/passwd'), (error: unknown) => {

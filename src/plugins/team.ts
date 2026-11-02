@@ -52,7 +52,17 @@ function ensurePolicy(ctx: Context, ids: readonly string[]): void {
   for (const id of ids) {
     const handle = store.open(id)
     if (handle === null) continue
-    if (store.read(handle).some((event) => event.type === 'context/note' && event.origin === TEAM_POLICY_NOTE_ORIGIN)) continue
+    /**
+     * A policy note counts only while it is on the surface (issue #185): a compaction shadows it with the history it
+     * folds, and the Lead would run on without the team rules. DSH carries the policy in every member's system prompt,
+     * which compaction never shadows; here the note is written again, after the summary, as the instruction baseline
+     * is (`currentBaseline`).
+     */
+    const notes = store.read(handle).filter((event) => event.type === 'context/note' && event.origin === TEAM_POLICY_NOTE_ORIGIN)
+    if (notes.length > 0) {
+      const surface = new Set(store.surface(handle).nodes)
+      if (notes.some((note) => surface.has(note.seq))) continue
+    }
     store.append(handle, {
       type: 'context/note',
       message: { role: 'system', content: [{ type: 'text', text: TEAM_POLICY }] },
@@ -63,6 +73,18 @@ function ensurePolicy(ctx: Context, ids: readonly string[]): void {
 
 export function apply(ctx: Context, config: Config = {}): void {
   const store = ctx.session.store
+  /**
+   * A compaction that shadowed a team member's policy note is followed by the note again (issue #185), before the
+   * turn's next request is assembled: the append is synchronous with the `compaction/end` event. Only a session that
+   * already carries the policy (a Lead or a teammate) is considered.
+   */
+  ctx.on('session/event', ({ session, event }) => {
+    if (event.type !== 'compaction/end') return
+    const handle = store.open(session)
+    if (handle === null) return
+    if (!store.read(handle).some((one) => one.type === 'context/note' && one.origin === TEAM_POLICY_NOTE_ORIGIN)) return
+    ensurePolicy(ctx, [session])
+  })
   const service = new TeamService({
     store,
     /**

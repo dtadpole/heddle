@@ -45,10 +45,10 @@ test('Chinese and an emoji printed one byte at a time arrive whole on stdout', a
   assert.equal(result.output, '你好🙂')
 })
 
-test('the same on stderr', async () => {
+test('the same on stderr, under its [stderr] marker (issue #246)', async () => {
   const result = await bash(`{ ${bytewise('é🙂')}; } >&2`)
   assert.equal(result.error, undefined)
-  assert.equal(result.output, 'é🙂')
+  assert.equal(result.output, '[stderr]\né🙂')
 })
 
 test('a character left unfinished at the end is flushed as one replacement character, not dropped', async () => {

@@ -363,3 +363,86 @@ test('a turn cut while its automatic compaction ran is closed as interrupted, an
   seq = 0
   assert.deepEqual(openTurnClosers(balanced(), cause), [], 'and a log that ends at a turn end needs nothing')
 })
+
+test('a command its process left running is answered, and a /compact cut mid-summary closes its span and says "Compaction cancelled." (#206)', async () => {
+  /**
+   * Live #206 on both builds: a server killed while `/compact` waited on its summary left `command/run` and
+   * `compaction/start` with no closer and no `command/done`, so the page drew the row as Running… for good, on every
+   * open. DSH settles a cancelled `/compact` as "Compaction cancelled.". The bytes are pinned here and in heddle-session
+   * `repair.rs`.
+   */
+  const { openTurnClosers, COMPACTION_CANCELLED } = (await import('../src/session/repair.ts')) as {
+    openTurnClosers: (events: readonly SessionEvent[], cause: { readonly kind: 'interrupted' }) => SessionEvent[]
+    COMPACTION_CANCELLED: string
+  }
+  const { COMPACT_CANCELLED } = await import('../src/commands/builtins.ts')
+  assert.equal(COMPACTION_CANCELLED, COMPACT_CANCELLED, 'the closer answers in the words the Stop route answers with')
+  const cause = { kind: 'interrupted' } as const
+  let seq = 0
+  const at = (minute: number) => `2026-10-30T10:${String(minute).padStart(2, '0')}:00.000Z`
+  const event = (type: string, fields: Record<string, unknown> = {}, minute = 0): SessionEvent => ({ seq: seq++, at: at(minute), type, ...fields })
+  const user = (text: string) => event('message', { message: { role: 'user', content: [{ type: 'text', text }] } })
+  const balanced = () => [
+    event('session/created'),
+    user('hi'),
+    event('model/request'),
+    event('assistant/chunk', { chunk: { type: 'text-delta', text: 'hello' } }),
+    event('assistant/completed', { text: 'hello' }),
+    event('turn/completed', { rounds: 1 }),
+  ]
+  const run = (commandId: string, name: string) => event('command/run', { commandId, name, source: { kind: 'user' } })
+
+  seq = 0
+  const cut = [...balanced(), run('cmd-1', 'compact'), event('compaction/start', { fromSeq: 1, throughSeq: 4, shadowedSeqs: [1, 2, 3, 4] }, 5)]
+  const closers = openTurnClosers(cut, cause)
+  assert.deepEqual(closers.map((one) => JSON.stringify(one)), [
+    '{"seq":8,"at":"2026-10-30T10:05:00.000Z","type":"compaction/failed","fromSeq":1,"throughSeq":4,"stopped":true,"reason":"the process exited before the compaction finished"}',
+    '{"seq":9,"at":"2026-10-30T10:05:00.000Z","type":"command/done","commandId":"cmd-1","kind":"error","text":"Compaction cancelled."}',
+  ])
+  assert.deepEqual(openTurnClosers([...cut, ...closers], cause), [], 'a log already closed is not closed again, so a second restart writes nothing')
+
+  seq = 0
+  assert.deepEqual(openTurnClosers([...balanced(), run('cmd-1', 'goal')], cause).map((one) => JSON.stringify(one)), [
+    '{"seq":7,"at":"2026-10-30T10:00:00.000Z","type":"command/done","commandId":"cmd-1","kind":"error","text":"The process exited before this command finished."}',
+  ], 'any other command left running answers the generic words')
+
+  seq = 0
+  const landed = [...balanced(), run('cmd-1', 'compact'), event('compaction/start'), event('compaction/summary'), event('context/note', { origin: 'compaction' }), event('compaction/end'), event('compaction/measured')]
+  assert.deepEqual(
+    openTurnClosers(landed, cause).map((one) => [one.type, one.text]),
+    [['command/done', 'The process exited before this command finished.']],
+    'a /compact killed after its compaction landed is answered, and its span is not closed twice',
+  )
+
+  seq = 0
+  const refused = [...balanced(), run('cmd-1', 'compact'), event('compaction/start'), event('compaction/failed', { refused: true, reason: 'no' })]
+  assert.deepEqual(openTurnClosers(refused, cause).map((one) => one.type), ['command/done'], 'nor is a span a refusal already closed')
+
+  seq = 0
+  const finished = [...balanced(), run('cmd-1', 'compact'), event('compaction/start'), event('compaction/end'), event('command/done', { commandId: 'cmd-1', kind: 'success', text: 'Compacted 2 history items (~10 tokens).' })]
+  assert.deepEqual(openTurnClosers(finished, cause), [], 'a command that settled needs nothing')
+
+  seq = 0
+  const twoRuns = [...balanced(), run('cmd-1', 'goal'), run('cmd-2', 'compact'), event('compaction/start', { fromSeq: 1, throughSeq: 4 })]
+  assert.deepEqual(
+    openTurnClosers(twoRuns, cause).map((one) => [one.type, one.commandId]),
+    [['command/done', 'cmd-1'], ['compaction/failed', undefined], ['command/done', 'cmd-2']],
+    'each open command is answered in the order it ran, and the open span is the latest command\'s',
+  )
+
+  /**
+   * A compaction inside a command is the command's, not a turn's pre-step (#154), even after a prompt nobody answered:
+   * no turn is closed for it.
+   */
+  seq = 0
+  const afterPrompt = [...balanced(), user('a prompt nobody answered'), run('cmd-1', 'compact'), event('compaction/start', { fromSeq: 1, throughSeq: 4 })]
+  assert.deepEqual(openTurnClosers(afterPrompt, cause).map((one) => one.type), ['compaction/failed', 'command/done'])
+
+  /** A turn and a command both left open: the turn is closed first, then the command, with seqs continuing the log. */
+  seq = 0
+  const both = [...balanced(), run('cmd-1', 'goal'), user('go'), event('model/request'), event('assistant/chunk', { chunk: { type: 'text-delta', text: 'half' } }, 9)]
+  const bothClosers = openTurnClosers(both, cause)
+  assert.deepEqual(bothClosers.map((one) => one.type), ['assistant/completed', 'turn/completed', 'command/done'])
+  assert.deepEqual(bothClosers.map((one) => one.seq), [both.length, both.length + 1, both.length + 2])
+  assert.ok(bothClosers.every((one) => one.at === at(9)), 'every closer takes the last real event\'s time')
+})

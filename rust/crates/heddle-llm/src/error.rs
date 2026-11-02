@@ -61,6 +61,8 @@ pub struct ModelError {
     pub code: String,
     /// The HTTP status, when the provider answered with one.
     pub status: Option<u16>,
+    /// The provider's `Retry-After`, in milliseconds, when it sent a positive one (DSH's `providerRetryAfterMs`).
+    pub retry_after_ms: Option<f64>,
     source: Option<Box<dyn Error + Send + Sync + 'static>>,
 }
 
@@ -76,8 +78,16 @@ impl ModelError {
             endpoint: endpoint.into(),
             code: code.into(),
             status: None,
+            retry_after_ms: None,
             source: None,
         }
+    }
+
+    /// The same failure, carrying the provider's `Retry-After` in milliseconds, which a retry policy honours.
+    #[must_use]
+    pub fn with_retry_after_ms(mut self, delay: f64) -> Self {
+        self.retry_after_ms = Some(delay);
+        self
     }
 
     /// The same failure, carrying the HTTP status the provider answered with.

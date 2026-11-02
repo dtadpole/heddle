@@ -595,6 +595,7 @@ mod tests {
             cwd: Some("/work".to_owned()),
             endpoint: Some("scripted".to_owned()),
             model: Some("m".to_owned()),
+            reasoning_effort: None,
             team_id: None,
             preset: None,
         });
@@ -789,6 +790,7 @@ mod tests {
                 cwd: Some("/work".to_owned()),
                 endpoint: None,
                 model: None,
+                reasoning_effort: None,
                 parent_session: h.lead.clone(),
                 origin: "subagent",
                 delegation_depth: 1,
