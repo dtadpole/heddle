@@ -1,8 +1,8 @@
 ---
 title: The heddle-tools crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-11-01T23:20:00Z
-version: 0.6.4
+modified: 2026-11-01T23:55:00Z
+version: 0.6.5
 description: The Rust port crate for the tool registry, the built-in tools, and outside tools as processes — its public API, what it asks of other crates, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -51,6 +51,8 @@ refuses an existing target that is not a regular file, such as a folder, as `FS_
 "<path>": not a regular file`, before writing anything (issue #237). `list_dir`
 classifies a missing target as `FS_NOT_FOUND`, a file as `FS_NOT_DIRECTORY`, a folder the OS refuses as
 `FS_PERMISSION_DENIED` and any other platform failure as `FS_IO_ERROR`, each `cannot list "<path>": …` (issue #223).
+`bash` answers with stdout, then stderr under a `[stderr]` line, with a newline before it when stdout does not end in
+one (`marked_streams`, as DSH's renderResult; issue #246); the marked text is what the output limit cuts.
 
 ## Where the port stands
 

@@ -1,6 +1,6 @@
 ---
 title: Verifier 4 — Pluggable Tools
-version: 1.6.0
+version: 1.7.0
 description: tools are configurable and pluggable.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-11, listing the ten verifiers
@@ -36,7 +36,10 @@ is listed by name instead of failing the whole listing (live-testing issue #223)
 `check-list-links.mjs` holds a symbolic link in a listing to what it points at, as DSH's `stat` probe follows it: a
 link to a folder is `link/` and a link to a file is a file of the target's size (live-testing issue #229: the
 TypeScript build listed a link to a folder as a file of the folder's size).
-Those four share `fs-tool-turn.mjs`, which is not a check: it writes a self-contained profile that allows the one tool
+`check-bash-streams.mjs` holds a finished bash call's stderr to its own section, as DSH's renderResult marks it: stdout,
+a newline when stdout does not end in one, then `[stderr]` and the stderr text, in success and below a failure's error
+line alike (live-testing issue #246: both builds glued the streams, `printf out; printf err >&2` came back `outerr`).
+Those five share `fs-tool-turn.mjs`, which is not a check: it writes a self-contained profile that allows the one tool
 under test and runs one scripted turn that calls it once, returning the tool results and what the disk holds afterwards.
 `check-utf8-chunks.mjs` holds bash output to whole characters when a UTF-8 sequence arrives split across chunks
 (live-testing issue #96: the TypeScript build decoded each chunk alone).

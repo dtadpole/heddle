@@ -259,14 +259,29 @@ export interface ShellEnd {
 }
 
 /**
- * `bash`'s answer for a command that ended: the combined output cut to `outputLimit`, then the stop, the wall time,
- * the sandbox's reading (a runner failure outranks a denial) or a nonzero exit, each with the sandbox facts. Shared by
- * the foreground run and the jobs row's promoting run, so a call answers the same however it was run.
+ * A finished command's stdout, then its stderr in a `[stderr]` section, as DSH's bash renders a run (`dsh-tool-bash`
+ * renderResult): when stdout has text that does not end in a newline, one is added before the marker; with no stderr,
+ * stdout alone. The jobs row's `job_output` reads mark stderr the same way. Live-testing issue #246: both builds glued
+ * the streams, so `printf out; printf err >&2` came back as `outerr` and a warning read as ordinary output. Stated
+ * differences kept: heddle cuts the combined text (`tailOutput`), keeps its error line first, and keeps its own answer
+ * for a run that printed nothing.
+ */
+export function markedStreams(stdout: string, stderr: string): string {
+  if (stderr.length === 0) return stdout
+  const separator = stdout.length > 0 && !stdout.endsWith('\n') ? '\n' : ''
+  return `${stdout}${separator}[stderr]\n${stderr}`
+}
+
+/**
+ * `bash`'s answer for a command that ended: stdout and the marked stderr (`markedStreams`) cut to `outputLimit`, then
+ * the stop, the wall time, the sandbox's reading (a runner failure outranks a denial) or a nonzero exit, each with the
+ * sandbox facts. Shared by the foreground run and the jobs row's promoting run, so a call answers the same however it
+ * was run.
  */
 export function shellResult(end: ShellEnd, launch: ShellLaunch, mode: ToolRunContext['mode'], outputLimit: number): ToolResult {
   const { stdout, stderr, code } = end
   const { confined } = launch
-  const combined = stdout + stderr
+  const combined = markedStreams(stdout, stderr)
   const trimmed = tailOutput(combined, outputLimit)
   /** The facts a reader (and the model) is told: which mode ran, and what the runner actually governed. */
   const sandboxFacts = confined === null ? { mode } : { mode, enforcement: confined.enforcement }
