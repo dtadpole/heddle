@@ -31,6 +31,7 @@ test('the page disables the seat for a gated session and gives it back for the n
   assert.match(gate, /renderModelSeat\(\)/, 'leaving a gated session repaints the seat')
   const seat = page.slice(page.indexOf('function renderModelSeat() {'), page.indexOf('\n}\n', page.indexOf('function renderModelSeat() {')))
   assert.match(seat, /modelTrigger\.disabled = modelTrigger\.dataset\.subagent === 'true'/, 'a repaint keeps the gate')
+  assert.ok(!/modelTrigger\.title = (?!seatTitle\(|'no model')/.test(seat), 'and every title it writes goes through seatTitle, which keeps the gate’s reason')
   const access = page.slice(page.indexOf('function paintComposerAccess() {'), page.indexOf('\n}\n', page.indexOf('function paintComposerAccess() {')))
   assert.match(access, /gateModelSeat\(\)/, 'every access paint applies it')
 })
