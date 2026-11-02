@@ -484,7 +484,18 @@ export function builtinTools(
           type: 'object',
           properties: {
             command: { type: 'string', description: 'Command line, run through sh -c.' },
-            timeoutMs: { type: 'number', description: `Wall time before the command is killed, in milliseconds; default ${timeoutMs}, at most ${maxTimeoutMs}.` },
+            /**
+             * DSH picks the text by whether a timed-out call is promoted (dsh-tool-bash lib/index.js:506-508). Here the
+             * jobs row promotes when it attaches a foreground runner (`promoteOnTimeout`, default true); without one
+             * the command is killed at its wall time.
+             */
+            timeoutMs: {
+              type: 'number',
+              description:
+                background?.runForeground !== undefined
+                  ? `Timeout in milliseconds. The executor applies its configured default (${timeoutMs}) and cap (${maxTimeoutMs}); on expiry the command moves to the background as a job instead of being killed.`
+                  : `Wall time before the command is killed, in milliseconds; default ${timeoutMs}, at most ${maxTimeoutMs}.`,
+            },
             ...(background !== undefined ? { run_in_background: background.property } : {}),
             ...escalation,
           },

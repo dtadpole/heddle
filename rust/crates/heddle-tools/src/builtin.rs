@@ -529,6 +529,8 @@ struct BashTool {
     sandbox: Arc<dyn SandboxGate>,
     foreground: ToolSpec,
     background: ToolSpec,
+    /// The background schema while the attached runner promotes a timed-out call: DSH's timeout text for it.
+    promoting: ToolSpec,
     default_timeout_ms: u64,
     max_timeout_ms: u64,
     output_limit: usize,
@@ -541,7 +543,18 @@ fn bash_tool(
     output_limit: usize,
     escalation: serde_json::Map<String, serde_json::Value>,
 ) -> Arc<dyn Tool> {
-    let parameters = |background: bool| {
+    // DSH picks the timeout text by whether a timed-out call is promoted (dsh-tool-bash lib/index.js:506-508): here the
+    // jobs row promotes when its attached runner says so (`promoteOnTimeout`, default true).
+    let parameters = |background: bool, promoting: bool| {
+        let timeout = if promoting {
+            format!(
+                "Timeout in milliseconds. The executor applies its configured default ({default_timeout_ms}) and cap ({max_timeout_ms}); on expiry the command moves to the background as a job instead of being killed."
+            )
+        } else {
+            format!(
+                "Wall time before the command is killed, in milliseconds; default {default_timeout_ms}, at most {max_timeout_ms}."
+            )
+        };
         let mut properties = serde_json::Map::from_iter([
             (
                 "command".to_owned(),
@@ -549,7 +562,7 @@ fn bash_tool(
             ),
             (
                 "timeoutMs".to_owned(),
-                json!({ "type": "number", "description": format!("Wall time before the command is killed, in milliseconds; default {default_timeout_ms}, at most {max_timeout_ms}.") }),
+                json!({ "type": "number", "description": timeout }),
             ),
         ]);
         if background {
@@ -567,8 +580,9 @@ fn bash_tool(
         })
     };
     Arc::new(BashTool {
-        foreground: spec("bash", BASH_DESCRIPTION, parameters(false)),
-        background: spec("bash", BASH_DESCRIPTION, parameters(true)),
+        foreground: spec("bash", BASH_DESCRIPTION, parameters(false, false)),
+        background: spec("bash", BASH_DESCRIPTION, parameters(true, false)),
+        promoting: spec("bash", BASH_DESCRIPTION, parameters(true, true)),
         sandbox,
         default_timeout_ms,
         max_timeout_ms,
@@ -581,10 +595,10 @@ impl Tool for BashTool {
     /// shows the parameter only when a job registry is loaded). With none attached, this is the foreground schema
     /// exactly.
     fn spec(&self) -> &ToolSpec {
-        if crate::background::background_for(&self.sandbox).is_some() {
-            &self.background
-        } else {
-            &self.foreground
+        match crate::background::background_for(&self.sandbox) {
+            Some(background) if background.promotes() => &self.promoting,
+            Some(_) => &self.background,
+            None => &self.foreground,
         }
     }
 
@@ -1594,6 +1608,57 @@ mod tests {
             "detached, the schema is the foreground one again"
         );
         detach.detach();
+    }
+
+    /// A runner that promotes a timed-out foreground call, as the jobs row's does by default.
+    struct PromotingRunner;
+
+    impl crate::background::BashBackground for PromotingRunner {
+        fn start(
+            &self,
+            args: ToolArgs,
+            context: ToolRunContext,
+            sandbox: Arc<dyn SandboxGate>,
+        ) -> BoxFuture<'static, Result<ToolResult, ToolFailure>> {
+            EchoRunner.start(args, context, sandbox)
+        }
+
+        fn promotes(&self) -> bool {
+            true
+        }
+    }
+
+    /// DSH's timeout text follows promotion (dsh-tool-bash lib/index.js:506-508): with a promoting runner the call
+    /// moves to the background on expiry; without one, or with a runner that does not promote, it is killed.
+    #[test]
+    fn the_timeout_text_says_promotion_while_a_promoting_runner_is_attached() {
+        let root = tempdir();
+        let gate = sandbox(root.path());
+        let bash = tool("bash", Arc::clone(&gate));
+        let timeout = |bash: &Arc<dyn Tool>| {
+            bash.spec().parameters["properties"]["timeoutMs"]["description"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert!(timeout(&bash).starts_with("Wall time before the command is killed"));
+        let plain = crate::background::attach_bash_background(&gate, Arc::new(EchoRunner));
+        assert!(
+            timeout(&bash).starts_with("Wall time before the command is killed"),
+            "a runner that does not promote"
+        );
+        plain.detach();
+        let promoting = crate::background::attach_bash_background(&gate, Arc::new(PromotingRunner));
+        let text = timeout(&bash);
+        assert!(
+            text.starts_with(
+                "Timeout in milliseconds. The executor applies its configured default ("
+            ) && text.ends_with(
+                "on expiry the command moves to the background as a job instead of being killed."
+            ),
+            "{text}"
+        );
+        promoting.detach();
     }
 
     #[test]
