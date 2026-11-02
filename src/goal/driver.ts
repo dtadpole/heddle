@@ -127,6 +127,14 @@ export function turnEndOf(completed: TurnEndEvidence | undefined, closing: TurnE
 /** How one round is run: append the attributed user message and answer it with a turn. */
 export interface GoalDriverDeps {
   readonly run: (handle: SessionHandle, prompt: string, source: Record<string, unknown>) => Promise<unknown>
+  /**
+   * Wait while the session's descendants (its delegated children and teammates, and theirs) still work, answering
+   * whether there was anything to wait for. DSH's round driver awaits `subagents.waitForChildren(agent)` before it
+   * reserves a round and re-checks readiness after it (dsh-goal-round-driver lib/index.js:130-134): "A round starts
+   * only at whole-agent idle and, when the subagent service is loaded, only after the agent's progressing descendants
+   * settle". Absent when the run has no live-turn registry.
+   */
+  readonly waitForChildren?: (handle: SessionHandle) => Promise<boolean>
 }
 
 /** What one `advance` call did. */
@@ -316,6 +324,12 @@ export class GoalDriver extends Service {
         }
         return { rounds, stopped: 'round-limit', blocked: decision.reason }
       }
+
+      /**
+       * A round waits for the session's progressing descendants (inventory A9); after a wait the condition is read
+       * again, because the goal may have been paused, edited or completed meanwhile.
+       */
+      if (this.deps.waitForChildren !== undefined && (await this.deps.waitForChildren(handle))) continue
 
       const before = view!.roundsStarted
       /** Where this round's own events start, so a round that was not admitted can be read back. */
