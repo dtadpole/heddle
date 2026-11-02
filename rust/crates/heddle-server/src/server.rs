@@ -2345,6 +2345,28 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
     };
     let sessions = &state.harness().sessions;
     let resume = body.str("session").filter(|id| !id.is_empty());
+    // A model the endpoint does not offer is refused before anything is opened or written (#239), as the switch
+    // route refuses it and as DSH's `requireModel` does (`session/model-unavailable`): recording it made every
+    // following turn fail with a name nobody could choose from the menu. The endpoint judged is the one this turn
+    // will use, as far as it is known before a session is opened (the request's, a resumed session's record, then
+    // the defaults); a folder's existing session is only known once opened, and is judged again below.
+    if let Some(model) = requested_model {
+        let recorded = resume
+            .and_then(|id| sessions.meta(id))
+            .map(|meta| session_request_selection(Some(&meta)))
+            .unwrap_or_default();
+        if let Some(prospect) = turn_selection(
+            requested_endpoint,
+            requested_model,
+            None,
+            &recorded,
+            state.options().default_endpoint.as_deref(),
+            models,
+        ) && let Some(problem) = models.model_problem(&prospect.endpoint, model)
+        {
+            return respond::text(StatusCode::BAD_REQUEST, format!("{problem}\n"));
+        }
+    }
     // A turn for a session that does not exist is the client's mistake, answered the way DSH answers it
     // (`session/not-found`, dsh-api-session-controller) and the way the other session routes do (`404`,
     // `no session <id>`), with the same shape as web.ts. It used to reach the resume and come back as a
@@ -2456,6 +2478,13 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
                 models.names().join(", ")
             ),
         );
+    }
+    // The named model against the endpoint now known for certain (a folder's existing session), before the record
+    // is written.
+    if let Some(model) = requested_model
+        && let Some(problem) = models.model_problem(&selection.endpoint, model)
+    {
+        return respond::text(StatusCode::BAD_REQUEST, format!("{problem}\n"));
     }
     let unchanged = meta.as_ref().is_some_and(|meta| {
         meta.endpoint.as_deref() == Some(selection.endpoint.as_str())
